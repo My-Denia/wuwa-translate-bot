@@ -91,6 +91,10 @@ Optional LLM environment variables:
   auto-translation (Telegram's own text limit)
 - `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`; max caption length for
   auto-translation (Telegram's own caption limit)
+- `WUWATERM_CHANNEL_MAX_AGE_SECONDS`, default `300`; channel posts older
+  than this are never auto-translated — guards against Telegram update
+  replays (restart backlog, bot admin promotion) translating channel
+  history
 - `WUWATERM_SOURCE_PROFILE`, default `arikatsu`; supported profiles are listed
   by `refresh-data --help` and `build-db --help`
 
@@ -100,7 +104,9 @@ No Telegram token, LLM key, endpoint, or model is hardcoded.
 
 In groups, slash commands work with Telegram privacy mode left on. The bot
 does not listen to free-text messages from members; the only passive listener
-is the linked-channel auto-translation described below.
+is the linked-channel auto-translation described below — note that receiving
+those channel auto-forwards at all requires the bot to be a discussion-group
+admin (see that section).
 
 - All translate commands — `/tr`, `/term`, `/sentence`, `/sent` — share one
   authorization gate and are admin-only in groups: each call resolves the
@@ -150,9 +156,15 @@ formatting (bold, links, spoilers, ...). No command is involved.
   and budget exhaustion on this path skip silently with one log line — no
   notice comment under the post (command paths keep their visible notices).
 - Kill switch: `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on.
-
-`.env.example` / `deploy/env.example` additions for the new variables are
-deferred to the owner (hook-gated).
+- Freshness gate: posts older than `WUWATERM_CHANNEL_MAX_AGE_SECONDS`
+  (default 300) are skipped silently. Telegram replays updates — restart
+  backlog, or a burst of recent group history when the bot is promoted to
+  admin — and without this gate the bot would translate channel history.
+- Delivery precondition: Telegram privacy mode withholds channel
+  auto-forwards from non-admin bots (slash commands still arrive). Make
+  the bot an admin of the discussion group (any single right suffices);
+  the alternative — disabling privacy mode via BotFather — also requires
+  removing and re-adding the bot to the group.
 
 ## VPS Docker Compose
 

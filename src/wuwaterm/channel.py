@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 from telegram import Update
@@ -149,6 +150,18 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.effective_message
     if message is None:
         return
+    # Freshness gate: Telegram replays updates (restart backlog, admin
+    # promotion, 24h queue) — historical channel posts must never be
+    # translated, regardless of how their update arrives.
+    message_date = getattr(message, "date", None)
+    if message_date is not None:
+        age_seconds = (datetime.now(timezone.utc) - message_date).total_seconds()
+        if age_seconds > config.channel_max_age_seconds:
+            LOGGER.info(
+                "channel autotranslate skipped: stale post message_id=%s",
+                message.message_id,
+            )
+            return
     if message.text:
         plain = message.text
         html_text = message.text_html

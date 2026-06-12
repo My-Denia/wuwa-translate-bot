@@ -57,6 +57,7 @@ class BotConfig:
     channel_min_cjk: int = 1
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
+    channel_max_age_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -81,6 +82,9 @@ class BotConfig:
             channel_text_limit=int(os.getenv("WUWATERM_CHANNEL_TEXT_LIMIT", "4096")),
             channel_caption_limit=int(
                 os.getenv("WUWATERM_CHANNEL_CAPTION_LIMIT", "1024")
+            ),
+            channel_max_age_seconds=int(
+                os.getenv("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "300")
             ),
         )
 

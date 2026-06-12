@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -48,6 +49,7 @@ class FakeMessage:
         caption_html: str | None = None,
         sender_chat=None,
         is_automatic_forward: bool = False,
+        date: datetime | None = None,
     ):
         self.message_id = message_id
         self.text = text
@@ -56,6 +58,7 @@ class FakeMessage:
         self.caption_html = caption_html
         self.sender_chat = sender_chat
         self.is_automatic_forward = is_automatic_forward
+        self.date = date
         self.replies: list[tuple[str, str | None, int | None]] = []
 
     async def reply_text(self, text: str, **kwargs):
@@ -83,6 +86,7 @@ def channel_update(
     caption_html: str | None = None,
     chat_id: int = -2001,
     message_id: int = 4001,
+    date: datetime | None = None,
 ):
     message = FakeMessage(
         message_id=message_id,
@@ -92,6 +96,7 @@ def channel_update(
         caption_html=caption_html if caption_html is not None else caption,
         sender_chat=SimpleNamespace(id=-3001, type="channel"),
         is_automatic_forward=True,
+        date=date,
     )
     update = SimpleNamespace(
         effective_message=message,
@@ -348,6 +353,87 @@ def test_exact_dictionary_hit_replies_official_plain_with_zero_llm(
 
     assert message.replies == [("Echo", None, 4090)]
     assert calls == []
+
+
+def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sample_db):
+    """Replayed history (restart backlog, admin-promotion replay) must never
+    be translated: a post older than channel_max_age_seconds is skipped
+    before the throttle, so a follow-up fresh post still translates."""
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(
+        sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
+    )
+    stale_update, stale_message = channel_update(
+        text=CN_TEXT,
+        message_id=4100,
+        date=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    asyncio.run(channel_post_handler(stale_update, context))
+
+    assert stale_message.replies == []
+    assert calls == []
+
+    fresh_update, fresh_message = channel_update(
+        text=CN_TEXT, message_id=4101, date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(fresh_update, context))
+
+    assert fresh_message.replies == [("translated", "HTML", 4101)]
+    assert len(calls) == 1
+
+
+def test_post_age_boundary_respects_configured_max_age(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(
+        sample_db,
+        config=BotConfig(
+            rate_limit_per_minute=10, owner_user_id=11, channel_max_age_seconds=60
+        ),
+    )
+
+    old_update, old_message = channel_update(
+        text=CN_TEXT,
+        message_id=4110,
+        date=datetime.now(timezone.utc) - timedelta(seconds=120),
+    )
+    asyncio.run(channel_post_handler(old_update, context))
+
+    assert old_message.replies == []
+    assert calls == []
+
+    recent_update, recent_message = channel_update(
+        text=CN_TEXT,
+        message_id=4111,
+        date=datetime.now(timezone.utc) - timedelta(seconds=10),
+    )
+    asyncio.run(channel_post_handler(recent_update, context))
+
+    assert recent_message.replies == [("translated", "HTML", 4111)]
+    assert len(calls) == 1
+
+
+def test_missing_date_is_treated_as_fresh(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    update, message = channel_update(text=CN_TEXT, message_id=4120, date=None)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == [("translated", "HTML", 4120)]
+    assert len(calls) == 1
+
+
+def test_from_env_parses_channel_max_age_seconds(monkeypatch):
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "60")
+
+    config = BotConfig.from_env()
+
+    assert config.channel_max_age_seconds == 60
 
 
 def test_count_cjk_counts_ideographs_only():
