@@ -4,16 +4,21 @@ import asyncio
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from telegram import Update, User
+from telegram.error import TelegramError
 from telegram.ext import CommandHandler
 
 from wuwaterm.bot import (
+    ADMIN_CACHE_KEY,
     CONFIG_KEY,
+    DEFAULT_GROUP_TR_REJECT_TEXT,
     LLM_INPUT_CHAR_LIMIT,
     RATE_LIMITER_KEY,
     SERVICE_KEY,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
+    AdminStatusCache,
     BotConfig,
     PerChatRateLimiter,
     create_application,
@@ -30,30 +35,68 @@ from wuwaterm.sentence import (
 
 
 class FakeMessage:
-    def __init__(self, message_id: int = 101):
+    def __init__(self, message_id: int = 101, sender_chat_id: int | None = None):
         self.message_id = message_id
+        self.sender_chat = (
+            SimpleNamespace(id=sender_chat_id) if sender_chat_id is not None else None
+        )
         self.replies: list[tuple[str, int | None]] = []
 
     async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append((text, kwargs.get("reply_to_message_id")))
 
 
-def fake_update(chat_id: int = 1, chat_type: str = "private", message_id: int = 101):
-    message = FakeMessage(message_id=message_id)
+class FakeBot:
+    def __init__(self, default_status: str = "member", overrides=None):
+        self.default_status = default_status
+        self.overrides = dict(overrides or {})
+        self.member_calls: list[tuple[int, int]] = []
+
+    async def get_chat_member(self, chat_id: int, user_id: int):
+        self.member_calls.append((chat_id, user_id))
+        outcome = self.overrides.get((chat_id, user_id), self.default_status)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(status=outcome)
+
+
+def fake_update(
+    chat_id: int = 1,
+    chat_type: str = "private",
+    message_id: int = 101,
+    user_id: int | None = 11,
+    sender_chat_id: int | None = None,
+):
+    message = FakeMessage(message_id=message_id, sender_chat_id=sender_chat_id)
     chat = SimpleNamespace(id=chat_id, type=chat_type)
-    return SimpleNamespace(effective_message=message, effective_chat=chat), message
+    user = SimpleNamespace(id=user_id) if user_id is not None else None
+    return (
+        SimpleNamespace(effective_message=message, effective_chat=chat, effective_user=user),
+        message,
+    )
 
 
-def fake_context(sample_db, args, *, limit=10):
-    config = BotConfig(rate_limit_per_minute=limit)
+def fake_context(
+    sample_db,
+    args,
+    *,
+    limit=10,
+    member_status="administrator",
+    member_overrides=None,
+    config=None,
+):
+    config = config or BotConfig(rate_limit_per_minute=limit)
+    bot = FakeBot(default_status=member_status, overrides=member_overrides)
     return SimpleNamespace(
         args=args,
+        bot=bot,
         application=SimpleNamespace(
             bot_data={
                 SERVICE_KEY: TermService(sample_db),
                 TRANSLATOR_KEY: SentenceTranslator(sample_db),
                 CONFIG_KEY: config,
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
+                ADMIN_CACHE_KEY: AdminStatusCache(),
             }
         ),
     )
@@ -130,7 +173,7 @@ def test_group_term_replies_to_asking_message(sample_db):
     assert message.replies == [("Echo", 555)]
 
 
-def test_group_tr_sentence_uses_llm_without_chat_gate(monkeypatch, sample_db):
+def test_group_tr_admin_sentence_uses_llm(monkeypatch, sample_db):
     calls = []
 
     def response(_locked_text, locks):
@@ -299,3 +342,190 @@ def test_no_free_text_group_listener_or_inline_handler(sample_db):
     handler_types = {type(handler).__name__ for group in app.handlers.values() for handler in group}
 
     assert handler_types == {"CommandHandler"}
+
+
+def test_group_tr_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=900)
+    context = fake_context(sample_db, ["今汐说声骸很强"], member_status="member")
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 900)]
+    assert message.replies[0][0] == "仅群管理员可用 /tr"
+    assert calls == []
+    assert context.bot.member_calls == [(-2001, 11)]
+
+
+@pytest.mark.parametrize("status", ["restricted", "left", "kicked"])
+def test_group_tr_non_admin_statuses_are_rejected(status, sample_db):
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=901)
+    context = fake_context(sample_db, ["声骸"], member_status=status)
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 901)]
+
+
+@pytest.mark.parametrize("status", ["creator", "administrator"])
+def test_group_tr_admin_statuses_translate(status, sample_db):
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=902)
+    context = fake_context(sample_db, ["声骸"], member_status=status)
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", 902)]
+
+
+def test_private_tr_plain_user_skips_member_lookup(sample_db):
+    update, message = fake_update(chat_id=1, chat_type="private")
+    context = fake_context(sample_db, ["声骸"], member_status="member")
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", None)]
+    assert context.bot.member_calls == []
+
+
+def test_group_tr_anonymous_admin_translates_without_member_lookup(sample_db):
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=903,
+        user_id=None,
+        sender_chat_id=-2001,
+    )
+    context = fake_context(sample_db, ["声骸"], member_status="member")
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", 903)]
+    assert context.bot.member_calls == []
+
+
+def test_group_tr_linked_channel_sender_is_rejected(sample_db):
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=904,
+        user_id=None,
+        sender_chat_id=-3001,
+    )
+    context = fake_context(sample_db, ["声骸"], member_status="administrator")
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 904)]
+    assert context.bot.member_calls == []
+
+
+def test_group_tr_member_verdict_is_cached_across_calls(sample_db):
+    context = fake_context(sample_db, ["声骸"], member_status="member")
+    first_update, first_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=905
+    )
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=906
+    )
+
+    asyncio.run(term_command(first_update, context))
+    asyncio.run(term_command(second_update, context))
+
+    assert first_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 905)]
+    assert second_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 906)]
+    assert context.bot.member_calls == [(-2001, 11)]
+
+
+def test_admin_status_cache_expires_after_ttl():
+    cache = AdminStatusCache(ttl_seconds=300.0)
+    cache.put(-2001, 11, False, now=0.0)
+    cache.put(-2001, 12, True, now=0.0)
+
+    assert cache.get(-2001, 11, now=299.9) is False
+    assert cache.get(-2001, 12, now=299.9) is True
+    assert cache.get(-2001, 11, now=300.0) is None
+    assert cache.get(-2001, 99, now=0.0) is None
+
+
+def test_group_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=907)
+    context = fake_context(
+        sample_db,
+        ["今汐说声骸很强"],
+        member_status="member",
+        config=BotConfig(rate_limit_per_minute=10, group_tr_reject_silent=True),
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == []
+    assert calls == []
+
+
+def test_group_tr_rejection_text_is_configurable(sample_db):
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=908)
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        member_status="member",
+        config=BotConfig(rate_limit_per_minute=10, group_tr_reject_text="管理员专用。"),
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("管理员专用。", 908)]
+
+
+def test_group_tr_rejections_consume_throttle_budget(sample_db):
+    context = fake_context(sample_db, ["声骸"], limit=2, member_status="member")
+    replies = []
+    for idx in range(3):
+        update, message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=909 + idx
+        )
+        asyncio.run(term_command(update, context))
+        replies.append(message.replies)
+
+    assert replies[0] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 909)]
+    assert replies[1] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 910)]
+    assert replies[2] == [(THROTTLE_NOTICE, 911)]
+    assert context.bot.member_calls == [(-2001, 11)]
+
+
+def test_group_tr_member_lookup_failure_fails_closed_and_uncached(sample_db):
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        member_overrides={(-2001, 11): TelegramError("temporarily unavailable")},
+    )
+    first_update, first_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=912
+    )
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=913
+    )
+
+    asyncio.run(term_command(first_update, context))
+    asyncio.run(term_command(second_update, context))
+
+    assert first_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 912)]
+    assert second_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 913)]
+    assert context.bot.member_calls == [(-2001, 11), (-2001, 11)]
+
+
+def test_group_sentence_command_stays_ungated_for_members(monkeypatch, sample_db):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=914)
+    context = fake_context(sample_db, ["今汐装备了声骸"], member_status="member")
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("Jinhsi装备了Echo", 914)]
+    assert context.bot.member_calls == []
