@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 from telegram import Update, User
 from telegram.ext import CommandHandler
 
@@ -21,7 +22,11 @@ from wuwaterm.bot import (
 )
 from wuwaterm.constants import PINNED_WUTHERINGDATA_COMMIT
 from wuwaterm.lookup import TermService
-from wuwaterm.sentence import SentenceTranslator
+from wuwaterm.sentence import (
+    BUDGET_EXHAUSTED_NOTICE,
+    SentenceTranslator,
+    _llm_error_from_response,
+)
 
 
 class FakeMessage:
@@ -171,6 +176,30 @@ def test_llm_path_rejects_over_1000_chars_before_call(monkeypatch, sample_db):
         (f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).", None)
     ]
     assert calls == []
+
+
+def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    def fake_call(_locked_text, _locks):
+        raise _llm_error_from_response(
+            httpx.Response(429, text='{"error":"max_budget exceeded"}')
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=558)
+    context = fake_context(sample_db, ["这是一个需要翻译的句子。"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(BUDGET_EXHAUSTED_NOTICE, 558)]
+    reply = message.replies[0][0]
+    assert reply == "本月翻译额度已用完,请稍后再试。"
+    assert "429" not in reply
+    assert "max_budget" not in reply
+    assert "exceeded" not in reply
 
 
 def test_screenshot_noise_speaker_prefix_and_quote_bars_are_normalized(monkeypatch, sample_db):

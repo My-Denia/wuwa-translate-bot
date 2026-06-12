@@ -14,7 +14,7 @@ from .normalize import normalize_user_text
 
 
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
-BUDGET_EXHAUSTED_NOTICE = "本月翻译额度已用完，请稍后再试。"
+BUDGET_EXHAUSTED_NOTICE = "本月翻译额度已用完,请稍后再试。"
 TRANSLATION_UNAVAILABLE_NOTICE = "翻译服务暂时不可用，请稍后再试。"
 
 
