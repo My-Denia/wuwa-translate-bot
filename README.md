@@ -93,22 +93,22 @@ No Telegram token, LLM key, endpoint, or model is hardcoded.
 In groups, slash commands work with Telegram privacy mode left on. The bot only
 handles commands, not free-text messages.
 
-- `/tr` and `/term` (one shared handler) are admin-only in groups: each call
-  resolves the sender via `getChatMember`, and only `creator`/`administrator`
-  may use them. Anonymous group admins (posting as the group itself) are
-  allowed. Membership verdicts are cached about 5 minutes per (chat, user).
+- All translate commands — `/tr`, `/term`, `/sentence`, `/sent` — share one
+  authorization gate and are admin-only in groups: each call resolves the
+  sender via `getChatMember`, and only `creator`/`administrator` may use
+  them. Anonymous group admins (posting as the group itself) are allowed.
+  Membership verdicts are cached about 5 minutes per (chat, user).
 - Unauthorized callers get a one-line reply, default `仅群管理员可用 /tr`;
   the wording is configurable, and a config flag switches to silent ignore
   (default replies). Rejected calls never invoke the LLM but still consume
   the per-chat throttle budget.
-- `/sentence` is intentionally not admin-gated in groups.
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <Chinese sentence>` translates with DB terms locked.
 - Group replies quote the asking message.
-- Private chat: `/tr` answers only the configured owner user id; everyone
-  else gets a one-line reply, default `此 bot 仅限群内由管理员使用`. With the
-  owner id unset, private `/tr` rejects everyone (fail-closed). `/sentence`
-  remains open in private chat. Channel-type chats are rejected entirely.
+- Private chat: all translate commands answer only the configured owner
+  user id; everyone else gets a one-line reply, default
+  `此 bot 仅限群内由管理员使用`. With the owner id unset, private chat
+  rejects everyone (fail-closed). Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
 

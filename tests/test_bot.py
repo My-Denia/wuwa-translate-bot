@@ -519,18 +519,119 @@ def test_group_tr_member_lookup_failure_fails_closed_and_uncached(sample_db):
     assert context.bot.member_calls == [(-2001, 11), (-2001, 11)]
 
 
-def test_group_sentence_command_stays_ungated_for_members(monkeypatch, sample_db):
+def test_group_sentence_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=914)
+    context = fake_context(sample_db, ["今汐说声骸很强"], member_status="member")
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 914)]
+    assert calls == []
+    assert context.bot.member_calls == [(-2001, 11)]
+
+
+@pytest.mark.parametrize("status", ["creator", "administrator"])
+def test_group_sentence_admin_statuses_translate(status, monkeypatch, sample_db):
     monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=914)
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=915)
+    context = fake_context(sample_db, ["今汐装备了声骸"], member_status=status)
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("Jinhsi装备了Echo", 915)]
+
+
+def test_group_sentence_anonymous_admin_translates_without_member_lookup(
+    monkeypatch, sample_db
+):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=916,
+        user_id=None,
+        sender_chat_id=-2001,
+    )
     context = fake_context(sample_db, ["今汐装备了声骸"], member_status="member")
 
     asyncio.run(sentence_command(update, context))
 
-    assert message.replies == [("Jinhsi装备了Echo", 914)]
+    assert message.replies == [("Jinhsi装备了Echo", 916)]
+    assert context.bot.member_calls == []
+
+
+def test_private_sentence_owner_translates_without_member_lookup(monkeypatch, sample_db):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(sample_db, ["今汐装备了声骸"], member_status="member")
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("Jinhsi装备了Echo", None)]
+    assert context.bot.member_calls == []
+
+
+def test_private_sentence_rejects_everyone_when_owner_unset(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(
+        sample_db,
+        ["今汐说声骸很强"],
+        config=BotConfig(rate_limit_per_minute=10, owner_user_id=None),
+    )
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert calls == []
+    assert context.bot.member_calls == []
+
+
+@pytest.mark.parametrize("user_id", [22, 11])
+def test_channel_sentence_is_rejected_even_for_owner(user_id, sample_db):
+    update, message = fake_update(
+        chat_id=-5005, chat_type="channel", message_id=917, user_id=user_id
+    )
+    context = fake_context(sample_db, ["声骸"])
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert context.bot.member_calls == []
+
+
+def test_private_sentence_stranger_rejections_consume_throttle_budget(sample_db):
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        config=BotConfig(rate_limit_per_minute=2, owner_user_id=11),
+    )
+    replies = []
+    for idx in range(3):
+        update, message = fake_update(
+            chat_id=2, chat_type="private", user_id=22, message_id=940 + idx
+        )
+        asyncio.run(sentence_command(update, context))
+        replies.append(message.replies)
+
+    assert replies[0] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert replies[1] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert replies[2] == [(THROTTLE_NOTICE, None)]
     assert context.bot.member_calls == []
 
 
@@ -659,18 +760,18 @@ def test_private_tr_stranger_rejections_consume_throttle_budget(sample_db):
     assert context.bot.member_calls == []
 
 
-def test_private_sentence_command_stays_ungated_for_strangers(monkeypatch, sample_db):
-    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+def test_private_sentence_stranger_gets_one_line_rejection_and_zero_llm(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
     update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
-    context = fake_context(sample_db, ["今汐装备了声骸"])
+    context = fake_context(sample_db, ["今汐说声骸很强"])
 
     asyncio.run(sentence_command(update, context))
 
-    assert message.replies == [("Jinhsi装备了Echo", None)]
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert calls == []
     assert context.bot.member_calls == []
 
 

@@ -200,15 +200,7 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
-    if not await _is_authorized_sender(update, context):
-        config: BotConfig = context.application.bot_data[CONFIG_KEY]
-        if not config.tr_reject_silent:
-            reject_text = (
-                config.group_tr_reject_text
-                if is_group_chat(update)
-                else config.private_tr_reject_text
-            )
-            await reply_to_user(update, reject_text)
+    if not await _passes_authorization(update, context):
         return
     if not query:
         await reply_to_user(update, "Usage: /tr <Chinese text>")
@@ -225,6 +217,8 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
+        return
+    if not await _passes_authorization(update, context):
         return
     if not text:
         await reply_to_user(update, "Usage: /sentence <Chinese sentence>")
@@ -271,6 +265,23 @@ def _is_short_query(text: str) -> bool:
 
 def _has_locked_terms(translator: SentenceTranslator, text: str) -> bool:
     return bool(translator.lock_terms(text).locks)
+
+
+async def _passes_authorization(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """One shared authorization wrapper for every translate command."""
+    if await _is_authorized_sender(update, context):
+        return True
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    if not config.tr_reject_silent:
+        reject_text = (
+            config.group_tr_reject_text
+            if is_group_chat(update)
+            else config.private_tr_reject_text
+        )
+        await reply_to_user(update, reject_text)
+    return False
 
 
 async def _is_authorized_sender(
