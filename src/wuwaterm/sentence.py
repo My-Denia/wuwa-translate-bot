@@ -83,6 +83,17 @@ class SentenceTranslator:
             return exc.user_message
         return locked.restore(translated)
 
+    def translate_html(self, html_text: str) -> str:
+        """Translate Telegram-HTML text with DB terms locked and tags untouched.
+
+        Skips ``prepare_text``/``normalize_user_text`` on purpose: normalization
+        would mangle tags and strip ``>`` quote bars. ``LLMTranslationError``
+        propagates to the caller so the passive channel path can stay silent.
+        """
+        locked = self._lock_terms(html_text)
+        translated = _call_llm(locked.locked_text, locked.locks, html_mode=True)
+        return locked.restore(translated)
+
     def _resolve_speaker_prefix(self, line: str) -> str:
         match = SPEAKER_PREFIX_RE.match(line)
         if not match:
@@ -121,23 +132,36 @@ def _llm_configured() -> bool:
     )
 
 
-def _call_llm(locked_text: str, locks: tuple[tuple[str, str, str], ...]) -> str:
+_HTML_MODE_INSTRUCTION = (
+    "The input contains Telegram HTML tags (<b>, <i>, <u>, <s>, <a href>, "
+    "<code>, <pre>, <blockquote>, <tg-spoiler>, <tg-emoji>); copy every tag "
+    "and attribute through exactly unchanged, translate only the "
+    "human-readable text between tags, and return English only with the "
+    "same tags.\n"
+)
+
+
+def _call_llm(
+    locked_text: str,
+    locks: tuple[tuple[str, str, str], ...],
+    html_mode: bool = False,
+) -> str:
     base_url = (os.getenv("WUWATERM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = os.getenv("WUWATERM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
     model = os.getenv("WUWATERM_OPENAI_MODEL") or ""
     lock_lines = "\n".join(f"{placeholder} = {en}" for placeholder, _zh, en in locks)
+    system_content = (
+        "Translate Chinese Wuthering Waves text into English. "
+        "Keep placeholders like __TERM_0__ exactly unchanged. "
+        "Do not paraphrase locked official terms. Return English only.\n"
+    )
+    if html_mode:
+        system_content += _HTML_MODE_INSTRUCTION
+    system_content += f"Locked terms:\n{lock_lines}"
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Translate Chinese Wuthering Waves text into English. "
-                    "Keep placeholders like __TERM_0__ exactly unchanged. "
-                    "Do not paraphrase locked official terms. Return English only.\n"
-                    f"Locked terms:\n{lock_lines}"
-                ),
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": locked_text},
         ],
         "temperature": 0,

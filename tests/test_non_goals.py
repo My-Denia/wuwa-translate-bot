@@ -11,5 +11,4 @@ def test_no_webhook_inline_alias_or_messagehandler_in_runtime_code():
     assert "run_webhook" not in text
     assert "set_webhook" not in text
     assert "InlineQueryHandler" not in text
-    assert "MessageHandler" not in text
     assert "alias" not in text.casefold()

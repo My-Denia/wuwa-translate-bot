@@ -13,7 +13,14 @@ from typing import Deque
 
 from telegram import Update
 from telegram.error import TelegramError
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .lookup import TermService
 from .sentence import SentenceTranslator
@@ -36,6 +43,7 @@ ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
 ADMIN_CACHE_PRUNE_THRESHOLD = 1024
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,10 @@ class BotConfig:
     private_tr_reject_text: str = DEFAULT_PRIVATE_TR_REJECT_TEXT
     tr_reject_silent: bool = False
     owner_user_id: int | None = None
+    channel_autotranslate: bool = True
+    channel_min_cjk: int = 1
+    channel_text_limit: int = 4096
+    channel_caption_limit: int = 1024
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -61,6 +73,15 @@ class BotConfig:
                 in _TRUTHY_ENV_VALUES
             ),
             owner_user_id=_owner_user_id_from_env(),
+            channel_autotranslate=(
+                os.getenv("WUWATERM_CHANNEL_AUTOTRANSLATE", "").strip().lower()
+                not in _FALSY_ENV_VALUES
+            ),
+            channel_min_cjk=int(os.getenv("WUWATERM_CHANNEL_MIN_CJK", "1")),
+            channel_text_limit=int(os.getenv("WUWATERM_CHANNEL_TEXT_LIMIT", "4096")),
+            channel_caption_limit=int(
+                os.getenv("WUWATERM_CHANNEL_CAPTION_LIMIT", "1024")
+            ),
         )
 
 
@@ -166,6 +187,10 @@ def create_application(
     db_path: str | Path,
     config: BotConfig | None = None,
 ) -> Application:
+    # Imported here because channel.py imports the shared bot_data keys and
+    # the rate-limit helper from this module (circular at import time).
+    from .channel import channel_post_handler
+
     config = config or BotConfig.from_env()
     app = ApplicationBuilder().token(token).build()
     app.bot_data[SERVICE_KEY] = TermService(db_path)
@@ -175,6 +200,12 @@ def create_application(
     app.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
     app.add_handler(CommandHandler(["tr", "term"], term_command))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
+    app.add_handler(
+        MessageHandler(
+            filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL,
+            channel_post_handler,
+        )
+    )
     return app
 
 

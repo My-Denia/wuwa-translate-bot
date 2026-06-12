@@ -83,6 +83,14 @@ Optional LLM environment variables:
 - `OWNER_USER_ID`, no default; the only Telegram user id allowed to use
   `/tr` in private chat — missing or empty means private `/tr` rejects
   everyone (fail-closed) and a startup warning is logged
+- `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on; set `0`/`false`/`no`/`off`
+  to disable the linked-channel auto-translation listener (kill switch)
+- `WUWATERM_CHANNEL_MIN_CJK`, default `1`; minimum number of CJK
+  ideographs a channel post must contain to be auto-translated
+- `WUWATERM_CHANNEL_TEXT_LIMIT`, default `4096`; max text-post length for
+  auto-translation (Telegram's own text limit)
+- `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`; max caption length for
+  auto-translation (Telegram's own caption limit)
 - `WUWATERM_SOURCE_PROFILE`, default `arikatsu`; supported profiles are listed
   by `refresh-data --help` and `build-db --help`
 
@@ -90,8 +98,9 @@ No Telegram token, LLM key, endpoint, or model is hardcoded.
 
 ### Group Chats
 
-In groups, slash commands work with Telegram privacy mode left on. The bot only
-handles commands, not free-text messages.
+In groups, slash commands work with Telegram privacy mode left on. The bot
+does not listen to free-text messages from members; the only passive listener
+is the linked-channel auto-translation described below.
 
 - All translate commands — `/tr`, `/term`, `/sentence`, `/sent` — share one
   authorization gate and are admin-only in groups: each call resolves the
@@ -111,6 +120,39 @@ handles commands, not free-text messages.
   rejects everyone (fail-closed). Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
+
+### Linked-Channel Auto-Translation
+
+When the channel linked to a group posts, Telegram auto-forwards the post
+into the group. The bot detects Chinese content in that forward and replies
+in-thread with an English translation that preserves the original Telegram
+formatting (bold, links, spoilers, ...). No command is involved.
+
+- Trigger (hard boundary): only automatic forwards whose sender is a
+  channel (`is_automatic_forward` + channel `sender_chat`). Ordinary member
+  messages, manual forwards of channel posts, and anonymous-admin posts
+  never trigger it. No authorization gate applies: posting rights in the
+  linked channel are already owner-controlled.
+- Posts without Chinese characters are skipped silently with zero LLM
+  calls and zero throttle consumption. The minimum CJK ideograph count is
+  configurable (`WUWATERM_CHANNEL_MIN_CJK`).
+- The reply uses Telegram HTML (`parse_mode=HTML`) rendered from the
+  post's entities, with DB terms locked before the LLM call. If the
+  translated markup fails validation against Telegram's HTML subset, the
+  bot strips the tags and sends a plain-text reply instead — formatting
+  never fails the reply.
+- Dictionary-first still applies: a post that is exactly one official term
+  gets the official English string byte-for-byte, plain, without the LLM.
+- Caption posts (photo/video announcements) are handled the same as text
+  posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
+  instead of the 1000-char command cap.
+- The per-chat throttle is shared with the slash commands. Throttle denials
+  and budget exhaustion on this path skip silently with one log line — no
+  notice comment under the post (command paths keep their visible notices).
+- Kill switch: `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on.
+
+`.env.example` / `deploy/env.example` additions for the new variables are
+deferred to the owner (hook-gated).
 
 ## VPS Docker Compose
 

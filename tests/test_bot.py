@@ -9,7 +9,7 @@ import httpx
 import pytest
 from telegram import Update, User
 from telegram.error import TelegramError
-from telegram.ext import CommandHandler
+from telegram.ext import CommandHandler, MessageHandler
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
@@ -340,11 +340,79 @@ def test_commandhandler_accepts_bot_username(sample_db):
     assert handler.check_update(update)
 
 
-def test_no_free_text_group_listener_or_inline_handler(sample_db):
+def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
+    """Pin evolution (deliberate): the old no-listener pin becomes the
+    exact-handler-set pin — two command handlers plus exactly one passive
+    listener whose filter is the linked-channel hard boundary."""
     app = create_application("123:ABC", sample_db, config=BotConfig())
-    handler_types = {type(handler).__name__ for group in app.handlers.values() for handler in group}
+    handlers = [handler for group in app.handlers.values() for handler in group]
+    command_handlers = [h for h in handlers if isinstance(h, CommandHandler)]
+    message_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
 
-    assert handler_types == {"CommandHandler"}
+    assert len(handlers) == 3
+    assert len(command_handlers) == 2
+    assert len(message_handlers) == 1
+    # Repr verified against the installed PTB 22.7 in this venv.
+    assert str(message_handlers[0].filters) == (
+        "<filters.IS_AUTOMATIC_FORWARD and filters.SenderChat.CHANNEL>"
+    )
+
+
+def test_ordinary_member_message_never_triggers_any_handler(sample_db):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    app.bot._bot_user = User(id=123, first_name="WuWa", is_bot=True, username="WuWaTermBot")
+    update = Update.de_json(
+        {
+            "update_id": 2,
+            "message": {
+                "message_id": 50,
+                "date": 1,
+                "chat": {"id": -2001, "type": "supergroup", "title": "g"},
+                "from": {"id": 42, "is_bot": False, "first_name": "member"},
+                "text": "今汐说声骸很强",
+            },
+        },
+        app.bot,
+    )
+
+    matched = [
+        handler
+        for group in app.handlers.values()
+        for handler in group
+        if handler.check_update(update)
+    ]
+
+    assert matched == []
+
+
+def test_automatic_channel_forward_matches_only_the_message_handler(sample_db):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    app.bot._bot_user = User(id=123, first_name="WuWa", is_bot=True, username="WuWaTermBot")
+    update = Update.de_json(
+        {
+            "update_id": 3,
+            "message": {
+                "message_id": 51,
+                "date": 1,
+                "chat": {"id": -2001, "type": "supergroup", "title": "g"},
+                "from": {"id": 777000, "is_bot": False, "first_name": "Telegram"},
+                "sender_chat": {"id": -1003001, "type": "channel", "title": "c"},
+                "is_automatic_forward": True,
+                "text": "公告：今汐上线",
+            },
+        },
+        app.bot,
+    )
+
+    matched = [
+        handler
+        for group in app.handlers.values()
+        for handler in group
+        if handler.check_update(update)
+    ]
+
+    assert len(matched) == 1
+    assert isinstance(matched[0], MessageHandler)
 
 
 def test_group_tr_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
