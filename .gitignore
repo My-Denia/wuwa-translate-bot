@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local WutheringData checkout and generated DBs.
+data/
+goal-runs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local environment, rules, and secrets.
+.env
+.env.*
+!.env.example
+AGENTS.md
+CLAUDE.md
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.github/

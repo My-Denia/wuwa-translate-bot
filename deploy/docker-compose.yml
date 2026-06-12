@@ -1,0 +1,14 @@
+services:
+  wuwaterm:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: wuwaterm:local
+    container_name: wuwaterm-bot
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    command: ["bot"]
