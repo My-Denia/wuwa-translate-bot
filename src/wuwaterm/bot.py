@@ -29,6 +29,7 @@ LOGGER = logging.getLogger(__name__)
 
 THROTTLE_NOTICE = "Rate limit reached for this chat. Try again in a minute."
 DEFAULT_GROUP_TR_REJECT_TEXT = "仅群管理员可用 /tr"
+DEFAULT_PRIVATE_TR_REJECT_TEXT = "此 bot 仅限群内由管理员使用"
 LLM_INPUT_CHAR_LIMIT = 1000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
@@ -41,7 +42,9 @@ _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 class BotConfig:
     rate_limit_per_minute: int = 10
     group_tr_reject_text: str = DEFAULT_GROUP_TR_REJECT_TEXT
-    group_tr_reject_silent: bool = False
+    private_tr_reject_text: str = DEFAULT_PRIVATE_TR_REJECT_TEXT
+    tr_reject_silent: bool = False
+    owner_user_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -50,11 +53,33 @@ class BotConfig:
             group_tr_reject_text=os.getenv(
                 "WUWATERM_GROUP_TR_REJECT_TEXT", DEFAULT_GROUP_TR_REJECT_TEXT
             ),
-            group_tr_reject_silent=(
-                os.getenv("WUWATERM_GROUP_TR_REJECT_SILENT", "").strip().lower()
+            private_tr_reject_text=os.getenv(
+                "WUWATERM_PRIVATE_TR_REJECT_TEXT", DEFAULT_PRIVATE_TR_REJECT_TEXT
+            ),
+            tr_reject_silent=(
+                os.getenv("WUWATERM_TR_REJECT_SILENT", "").strip().lower()
                 in _TRUTHY_ENV_VALUES
             ),
+            owner_user_id=_owner_user_id_from_env(),
         )
+
+
+def _owner_user_id_from_env() -> int | None:
+    raw = os.getenv("OWNER_USER_ID", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            # Never echo the raw value: the owner id is quasi-sensitive.
+            LOGGER.warning(
+                "OWNER_USER_ID is set but not a valid integer; "
+                "private /tr will reject everyone"
+            )
+            return None
+    LOGGER.warning(
+        "OWNER_USER_ID is not configured; private /tr will reject everyone"
+    )
+    return None
 
 
 class PerChatRateLimiter:
@@ -175,10 +200,15 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
-    if not await _is_authorized_group_sender(update, context):
+    if not await _is_authorized_sender(update, context):
         config: BotConfig = context.application.bot_data[CONFIG_KEY]
-        if not config.group_tr_reject_silent:
-            await reply_to_user(update, config.group_tr_reject_text)
+        if not config.tr_reject_silent:
+            reject_text = (
+                config.group_tr_reject_text
+                if is_group_chat(update)
+                else config.private_tr_reject_text
+            )
+            await reply_to_user(update, reject_text)
         return
     if not query:
         await reply_to_user(update, "Usage: /tr <Chinese text>")
@@ -243,11 +273,27 @@ def _has_locked_terms(translator: SentenceTranslator, text: str) -> bool:
     return bool(translator.lock_terms(text).locks)
 
 
+async def _is_authorized_sender(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    if is_group_chat(update):
+        return await _is_authorized_group_sender(update, context)
+    chat = update.effective_chat
+    if chat is None or chat.type != "private":
+        # Channels and any other chat type are outside the service surface.
+        return False
+    user = update.effective_user
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    return (
+        user is not None
+        and config.owner_user_id is not None
+        and user.id == config.owner_user_id
+    )
+
+
 async def _is_authorized_group_sender(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
-    if not is_group_chat(update):
-        return True
     chat = update.effective_chat
     message = update.effective_message
     sender_chat = getattr(message, "sender_chat", None)
@@ -264,13 +310,8 @@ async def _is_authorized_group_sender(
     try:
         member = await context.bot.get_chat_member(chat.id, user.id)
     except TelegramError as exc:
-        # Fail closed, but do not cache transient API failures.
-        LOGGER.warning(
-            "get_chat_member failed chat_id=%s user_id=%s error=%r",
-            chat.id,
-            user.id,
-            exc,
-        )
+        # Fail closed without caching; ids stay out of logs (quasi-sensitive).
+        LOGGER.warning("get_chat_member failed error=%r", exc)
         return False
     verdict = getattr(member, "status", None) in ADMIN_ALLOWED_STATUSES
     cache.put(chat.id, user.id, verdict)

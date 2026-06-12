@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -13,6 +15,7 @@ from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
+    DEFAULT_PRIVATE_TR_REJECT_TEXT,
     LLM_INPUT_CHAR_LIMIT,
     RATE_LIMITER_KEY,
     SERVICE_KEY,
@@ -85,7 +88,7 @@ def fake_context(
     member_overrides=None,
     config=None,
 ):
-    config = config or BotConfig(rate_limit_per_minute=limit)
+    config = config or BotConfig(rate_limit_per_minute=limit, owner_user_id=11)
     bot = FakeBot(default_status=member_status, overrides=member_overrides)
     return SimpleNamespace(
         args=args,
@@ -378,8 +381,8 @@ def test_group_tr_admin_statuses_translate(status, sample_db):
     assert message.replies == [("Echo", 902)]
 
 
-def test_private_tr_plain_user_skips_member_lookup(sample_db):
-    update, message = fake_update(chat_id=1, chat_type="private")
+def test_private_tr_owner_translates_without_member_lookup(sample_db):
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
     context = fake_context(sample_db, ["声骸"], member_status="member")
 
     asyncio.run(term_command(update, context))
@@ -456,7 +459,7 @@ def test_group_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db)
         sample_db,
         ["今汐说声骸很强"],
         member_status="member",
-        config=BotConfig(rate_limit_per_minute=10, group_tr_reject_silent=True),
+        config=BotConfig(rate_limit_per_minute=10, tr_reject_silent=True, owner_user_id=11),
     )
 
     asyncio.run(term_command(update, context))
@@ -529,3 +532,165 @@ def test_group_sentence_command_stays_ungated_for_members(monkeypatch, sample_db
 
     assert message.replies == [("Jinhsi装备了Echo", 914)]
     assert context.bot.member_calls == []
+
+
+def test_private_tr_stranger_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
+    context = fake_context(sample_db, ["今汐说声骸很强"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert message.replies[0][0] == "此 bot 仅限群内由管理员使用"
+    assert calls == []
+    assert context.bot.member_calls == []
+
+
+def test_private_tr_rejects_everyone_when_owner_unset(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(
+        sample_db,
+        ["今汐说声骸很强"],
+        config=BotConfig(rate_limit_per_minute=10, owner_user_id=None),
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert calls == []
+    assert context.bot.member_calls == []
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "not-an-int"])
+def test_from_env_owner_missing_or_invalid_warns_once_without_digits(
+    raw, monkeypatch, caplog
+):
+    monkeypatch.delenv("WUWATERM_RATE_LIMIT_PER_MINUTE", raising=False)
+    monkeypatch.delenv("WUWATERM_GROUP_TR_REJECT_TEXT", raising=False)
+    monkeypatch.delenv("WUWATERM_PRIVATE_TR_REJECT_TEXT", raising=False)
+    monkeypatch.delenv("WUWATERM_TR_REJECT_SILENT", raising=False)
+    if raw is None:
+        monkeypatch.delenv("OWNER_USER_ID", raising=False)
+    else:
+        monkeypatch.setenv("OWNER_USER_ID", raw)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        config = BotConfig.from_env()
+
+    assert config.owner_user_id is None
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "private /tr will reject everyone" in warnings[0].getMessage()
+    assert re.search(r"\d", warnings[0].getMessage()) is None
+
+
+def test_from_env_owner_valid_int_no_warning(monkeypatch, caplog):
+    monkeypatch.delenv("WUWATERM_RATE_LIMIT_PER_MINUTE", raising=False)
+    monkeypatch.setenv("OWNER_USER_ID", " 654321 ")
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        config = BotConfig.from_env()
+
+    assert config.owner_user_id == 654321
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("user_id", [22, 11])
+def test_channel_chat_is_rejected_even_for_owner(user_id, sample_db):
+    update, message = fake_update(
+        chat_id=-5005, chat_type="channel", message_id=920, user_id=user_id
+    )
+    context = fake_context(sample_db, ["声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert context.bot.member_calls == []
+
+
+def test_private_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
+    context = fake_context(
+        sample_db,
+        ["今汐说声骸很强"],
+        config=BotConfig(rate_limit_per_minute=10, tr_reject_silent=True, owner_user_id=11),
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == []
+    assert calls == []
+
+
+def test_private_tr_rejection_text_is_configurable(sample_db):
+    update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        config=BotConfig(rate_limit_per_minute=10, owner_user_id=11, private_tr_reject_text="老板专用。"),
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("老板专用。", None)]
+
+
+def test_private_tr_stranger_rejections_consume_throttle_budget(sample_db):
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        config=BotConfig(rate_limit_per_minute=2, owner_user_id=11),
+    )
+    replies = []
+    for idx in range(3):
+        update, message = fake_update(chat_id=2, chat_type="private", user_id=22, message_id=930 + idx)
+        asyncio.run(term_command(update, context))
+        replies.append(message.replies)
+
+    assert replies[0] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert replies[1] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
+    assert replies[2] == [(THROTTLE_NOTICE, None)]
+    assert context.bot.member_calls == []
+
+
+def test_private_sentence_command_stays_ungated_for_strangers(monkeypatch, sample_db):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
+    context = fake_context(sample_db, ["今汐装备了声骸"])
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("Jinhsi装备了Echo", None)]
+    assert context.bot.member_calls == []
+
+
+def test_member_lookup_failure_log_carries_no_chat_or_user_ids(caplog, sample_db):
+    chat_id, user_id = -778899001, 445566
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        member_overrides={(chat_id, user_id): TelegramError("temporarily unavailable")},
+    )
+    update, message = fake_update(
+        chat_id=chat_id, chat_type="supergroup", message_id=321, user_id=user_id
+    )
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 321)]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "get_chat_member failed" in warnings[0].getMessage()
+    assert "445566" not in caplog.text
+    assert "778899001" not in caplog.text

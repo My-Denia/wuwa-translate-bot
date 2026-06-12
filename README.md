@@ -77,8 +77,12 @@ Optional LLM environment variables:
 - `WUWATERM_OPENAI_MODEL`
 - `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
 - `WUWATERM_GROUP_TR_REJECT_TEXT`, default `仅群管理员可用 /tr`
-- `WUWATERM_GROUP_TR_REJECT_SILENT`, default `0`; set `1` to drop
-  unauthorized group `/tr` calls without replying
+- `WUWATERM_PRIVATE_TR_REJECT_TEXT`, default `此 bot 仅限群内由管理员使用`
+- `WUWATERM_TR_REJECT_SILENT`, default `0`; set `1` to drop unauthorized
+  `/tr` calls without replying
+- `OWNER_USER_ID`, no default; the only Telegram user id allowed to use
+  `/tr` in private chat — missing or empty means private `/tr` rejects
+  everyone (fail-closed) and a startup warning is logged
 - `WUWATERM_SOURCE_PROFILE`, default `arikatsu`; supported profiles are listed
   by `refresh-data --help` and `build-db --help`
 
@@ -101,7 +105,10 @@ handles commands, not free-text messages.
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <Chinese sentence>` translates with DB terms locked.
 - Group replies quote the asking message.
-- Private chat behavior is unchanged: anyone may use all commands there.
+- Private chat: `/tr` answers only the configured owner user id; everyone
+  else gets a one-line reply, default `此 bot 仅限群内由管理员使用`. With the
+  owner id unset, private `/tr` rejects everyone (fail-closed). `/sentence`
+  remains open in private chat. Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
 
