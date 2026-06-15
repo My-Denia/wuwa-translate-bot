@@ -46,6 +46,21 @@ class TermService:
             ).fetchall()
         return [row_to_entry(row) for row in rows]
 
+    def metadata(self) -> dict[str, str]:
+        """Build-recorded key/value metadata (source repo, pinned commit, ...).
+
+        Read-only; backs the /about diagnostics command.
+        """
+        with connect(self.db_path) as conn:
+            rows = conn.execute("SELECT key, value FROM metadata").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    def term_count(self) -> int:
+        """Total number of dictionary term rows."""
+        with connect(self.db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM terms").fetchone()
+        return int(row["n"])
+
     def _exact(self, query: str) -> list[LookupCandidate]:
         zh_norm = normalize_text(query)
         en_norm = normalize_text(query)

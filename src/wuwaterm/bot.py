@@ -23,8 +23,7 @@ from telegram.ext import (
 )
 
 from .lookup import TermService
-from .sentence import SentenceTranslator
-from .constants import PINNED_WUTHERINGDATA_COMMIT
+from .sentence import SentenceTranslator, _llm_configured
 
 
 SERVICE_KEY = "wuwaterm_service"
@@ -57,6 +56,12 @@ TERM_USAGE_NOTICE = (
 SENTENCE_USAGE_NOTICE = (
     "用法：/sentence <中文句子>（或回复一条消息后发 /sentence 直接翻译）\n"
     "Usage: /sentence <Chinese sentence> (or reply to a message, then send /sentence to translate it)"
+)
+# Appended to a short query that misses the dictionary. The data version
+# (pinned commit) lives in /about, never in this user-facing line.
+DICT_MISS_FLAG = (
+    "(词典外,机器直译)\n"
+    "(Not in official dictionary; machine-translated)"
 )
 LLM_INPUT_CHAR_LIMIT = 1000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
@@ -243,6 +248,7 @@ def create_application(
     app.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
     app.add_handler(CommandHandler(["tr", "term"], term_command))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
+    app.add_handler(CommandHandler("about", about_command))
     app.add_handler(
         MessageHandler(
             filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL,
@@ -304,6 +310,36 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await reply_to_user(update, translate_query(service, translator, text))
 
 
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only diagnostics: data source, pinned commit, term count, limits.
+
+    No auth gate (anyone may ask), no throttle, zero LLM calls.
+    """
+    message = update.effective_message
+    if not message:
+        return
+    service: TermService = context.application.bot_data[SERVICE_KEY]
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    await reply_to_user(update, _about_text(service, config))
+
+
+def _about_text(service: TermService, config: BotConfig) -> str:
+    meta = service.metadata()
+    profile = meta.get("source_profile") or "unknown"
+    repo = meta.get("source_repo_url")
+    commit = meta.get("wutheringdata_commit") or "unknown (not recorded in DB)"
+    source = f"{profile} ({repo})" if repo else profile
+    llm = "configured" if _llm_configured() else "not configured"
+    return (
+        "wuwaterm /about\n"
+        f"Data source: {source}\n"
+        f"Pinned commit: {commit}\n"
+        f"Dictionary terms: {service.term_count()}\n"
+        f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
+        f"LLM: {llm}"
+    )
+
+
 def format_term_reply(service: TermService, query: str) -> str:
     translator = SentenceTranslator(service.db_path)
     return translate_query(service, translator, query)
@@ -324,10 +360,7 @@ def translate_query(service: TermService, translator: SentenceTranslator, query:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = translator.translate(prepared)
     if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
-        translated = (
-            f"{translated}\n\n"
-            f"(not in official data (pinned commit {PINNED_WUTHERINGDATA_COMMIT}))"
-        )
+        translated = f"{translated}\n\n{DICT_MISS_FLAG}"
     return translated
 
 

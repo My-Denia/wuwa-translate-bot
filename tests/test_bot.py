@@ -27,11 +27,11 @@ from wuwaterm.bot import (
     AdminStatusCache,
     BotConfig,
     PerChatRateLimiter,
+    about_command,
     create_application,
     sentence_command,
     term_command,
 )
-from wuwaterm.constants import PINNED_WUTHERINGDATA_COMMIT
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
@@ -199,7 +199,7 @@ def test_group_tr_admin_sentence_uses_llm(monkeypatch, sample_db):
     assert len(calls) == 1
 
 
-def test_short_dictionary_miss_translates_with_pinned_commit_note(monkeypatch, sample_db):
+def test_short_dictionary_miss_appends_bilingual_flag_without_hash(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "Unlisted term")
     update, message = fake_update()
@@ -210,10 +210,13 @@ def test_short_dictionary_miss_translates_with_pinned_commit_note(monkeypatch, s
     assert message.replies == [
         (
             "Unlisted term\n\n"
-            f"(not in official data (pinned commit {PINNED_WUTHERINGDATA_COMMIT}))",
+            "(词典外,机器直译)\n"
+            "(Not in official dictionary; machine-translated)",
             None,
         )
     ]
+    # The 40-char commit hash must never reach a user-facing reply.
+    assert re.search(r"[0-9a-f]{40}", message.replies[0][0]) is None
     assert len(calls) == 1
 
 
@@ -355,16 +358,16 @@ def test_commandhandler_accepts_bot_username(sample_db):
 
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
-    """Pin evolution (deliberate): the old no-listener pin becomes the
-    exact-handler-set pin — two command handlers plus exactly one passive
-    listener whose filter is the linked-channel hard boundary."""
+    """Pin evolution (deliberate): three command handlers (/tr+/term,
+    /sentence+/sent, /about) plus exactly one passive listener whose filter is
+    the linked-channel hard boundary."""
     app = create_application("123:ABC", sample_db, config=BotConfig())
     handlers = [handler for group in app.handlers.values() for handler in group]
     command_handlers = [h for h in handlers if isinstance(h, CommandHandler)]
     message_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
 
-    assert len(handlers) == 3
-    assert len(command_handlers) == 2
+    assert len(handlers) == 4
+    assert len(command_handlers) == 3
     assert len(message_handlers) == 1
     # Repr verified against the installed PTB 22.7 in this venv.
     assert str(message_handlers[0].filters) == (
@@ -1004,3 +1007,94 @@ def test_usage_notices_are_bilingual(sample_db):
     context = fake_context(sample_db, [])
     asyncio.run(sentence_command(update, context))
     assert message.replies == [(SENTENCE_USAGE_NOTICE, None)]
+
+
+# --- /about diagnostics command ---
+
+
+def test_term_service_metadata_and_count(sample_db):
+    service = TermService(sample_db)
+    meta = service.metadata()
+    assert meta["wutheringdata_commit"] == "e9234ffe094b2d944d16b222d31102e8ab32d954"
+    assert meta["source_profile"] == "dimbreath_legacy"
+    assert service.term_count() > 0
+
+
+def test_about_returns_expected_fields(monkeypatch, sample_db):
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+    service = context.application.bot_data[SERVICE_KEY]
+    monkeypatch.setattr(
+        service,
+        "metadata",
+        lambda: {
+            "source_profile": "arikatsu",
+            "source_repo_url": "https://example.test/repo.git",
+            "wutheringdata_commit": "abc123def456",
+        },
+    )
+    monkeypatch.setattr(service, "term_count", lambda: 4242)
+
+    asyncio.run(about_command(update, context))
+
+    assert len(message.replies) == 1
+    reply = message.replies[0][0]
+    assert "arikatsu" in reply
+    assert "https://example.test/repo.git" in reply
+    assert "abc123def456" in reply
+    assert "4242" in reply
+    assert "10/min" in reply  # fake_context default rate limit
+
+
+def test_about_makes_zero_llm_calls(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+
+    asyncio.run(about_command(update, context))
+
+    assert len(message.replies) == 1
+    assert calls == []
+
+
+def test_about_has_no_auth_gate(sample_db):
+    # A non-owner in private still gets /about (informational, no auth gate).
+    update, message = fake_update(chat_id=2, chat_type="private", user_id=22)
+    context = fake_context(
+        sample_db, [], config=BotConfig(rate_limit_per_minute=10, owner_user_id=11)
+    )
+
+    asyncio.run(about_command(update, context))
+
+    assert len(message.replies) == 1
+    reply = message.replies[0][0]
+    assert reply != DEFAULT_PRIVATE_TR_REJECT_TEXT
+    assert "wuwaterm /about" in reply
+    assert context.bot.member_calls == []
+
+
+def test_about_flags_missing_commit_metadata(monkeypatch, sample_db):
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+    service = context.application.bot_data[SERVICE_KEY]
+    monkeypatch.setattr(service, "metadata", lambda: {})
+    monkeypatch.setattr(service, "term_count", lambda: 0)
+
+    asyncio.run(about_command(update, context))
+
+    reply = message.replies[0][0]
+    assert "unknown" in reply  # the missing commit field flags the gap
+
+
+def test_about_contains_full_commit_from_db(sample_db):
+    # With the real sample DB, /about is the one reply allowed to carry the
+    # full pinned commit hash (read from DB metadata).
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+
+    asyncio.run(about_command(update, context))
+
+    reply = message.replies[0][0]
+    assert "e9234ffe094b2d944d16b222d31102e8ab32d954" in reply
+    assert re.search(r"[0-9a-f]{40}", reply) is not None
