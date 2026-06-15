@@ -76,8 +76,10 @@ Optional LLM environment variables:
 - `WUWATERM_OPENAI_API_KEY`
 - `WUWATERM_OPENAI_MODEL`
 - `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
-- `WUWATERM_GROUP_TR_REJECT_TEXT`, default `仅群管理员可用 /tr`
-- `WUWATERM_PRIVATE_TR_REJECT_TEXT`, default `此 bot 仅限群内由管理员使用`
+- `WUWATERM_GROUP_TR_REJECT_TEXT`, default is the bilingual two-line reply
+  `仅群管理员可用 /tr` then `Only group admins can use /tr`
+- `WUWATERM_PRIVATE_TR_REJECT_TEXT`, default is the bilingual two-line reply
+  `此 bot 仅限群内由管理员使用` then `This bot can only be used by admins inside a group.`
 - `WUWATERM_TR_REJECT_SILENT`, default `0`; set `1` to drop unauthorized
   `/tr` calls without replying
 - `OWNER_USER_ID`, no default; the only Telegram user id allowed to use
@@ -113,7 +115,8 @@ admin (see that section).
   sender via `getChatMember`, and only `creator`/`administrator` may use
   them. Anonymous group admins (posting as the group itself) are allowed.
   Membership verdicts are cached about 5 minutes per (chat, user).
-- Unauthorized callers get a one-line reply, default `仅群管理员可用 /tr`;
+- Unauthorized callers get a short bilingual reply (Chinese line then
+  English), default `仅群管理员可用 /tr` then `Only group admins can use /tr`;
   the wording is configurable, and a config flag switches to silent ignore
   (default replies). Rejected calls never invoke the LLM but still consume
   the per-chat throttle budget.
@@ -121,9 +124,10 @@ admin (see that section).
   `/tr <Chinese sentence>` translates with DB terms locked.
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
-  user id; everyone else gets a one-line reply, default
-  `此 bot 仅限群内由管理员使用`. With the owner id unset, private chat
-  rejects everyone (fail-closed). Channel-type chats are rejected entirely.
+  user id; everyone else gets a short bilingual reply, default
+  `此 bot 仅限群内由管理员使用` then `This bot can only be used by admins inside a group.`
+  With the owner id unset, private chat rejects everyone (fail-closed).
+  Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
 

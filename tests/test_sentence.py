@@ -4,6 +4,7 @@ import httpx
 
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
+    TRANSLATION_UNAVAILABLE_NOTICE,
     LLMTranslationError,
     SentenceTranslator,
     _llm_error_from_response,
@@ -69,3 +70,25 @@ def test_budget_exhaustion_returns_clean_user_notice(monkeypatch, sample_db):
     translator = SentenceTranslator(sample_db)
 
     assert translator.translate("这是一个需要翻译的句子。") == BUDGET_EXHAUSTED_NOTICE
+
+
+def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    # A non-budget failure (e.g. 500) routes to the unavailable notice, bilingual.
+    error = _llm_error_from_response(httpx.Response(500, text="internal server error"))
+    assert error.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert TRANSLATION_UNAVAILABLE_NOTICE == (
+        "翻译服务暂时不可用，请稍后再试。\n"
+        "Translation service is temporarily unavailable. Please try again later."
+    )
+
+    def fake_call(_locked_text, _locks):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    assert translator.translate("这是一个需要翻译的句子。") == TRANSLATION_UNAVAILABLE_NOTICE

@@ -34,9 +34,20 @@ RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
 ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
 LOGGER = logging.getLogger(__name__)
 
-THROTTLE_NOTICE = "Rate limit reached for this chat. Try again in a minute."
-DEFAULT_GROUP_TR_REJECT_TEXT = "仅群管理员可用 /tr"
-DEFAULT_PRIVATE_TR_REJECT_TEXT = "此 bot 仅限群内由管理员使用"
+# User-facing operational notices are bilingual: Chinese line first, then an
+# English line (single "\n"), so non-Chinese readers in the group can read them.
+# Each notice is a single source-of-truth constant. Owner-set env overrides
+# (WUWATERM_GROUP_TR_REJECT_TEXT / WUWATERM_PRIVATE_TR_REJECT_TEXT) still win
+# verbatim and are deliberately NOT auto-bilingual.
+THROTTLE_NOTICE = (
+    "本群消息过于频繁，请一分钟后再试。\n"
+    "Rate limit reached for this chat. Try again in a minute."
+)
+DEFAULT_GROUP_TR_REJECT_TEXT = "仅群管理员可用 /tr\nOnly group admins can use /tr"
+DEFAULT_PRIVATE_TR_REJECT_TEXT = (
+    "此 bot 仅限群内由管理员使用\n"
+    "This bot can only be used by admins inside a group."
+)
 LLM_INPUT_CHAR_LIMIT = 1000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})

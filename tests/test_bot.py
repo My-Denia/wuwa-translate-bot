@@ -242,7 +242,10 @@ def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sam
 
     assert message.replies == [(BUDGET_EXHAUSTED_NOTICE, 558)]
     reply = message.replies[0][0]
-    assert reply == "本月翻译额度已用完,请稍后再试。"
+    assert reply == (
+        "本月翻译额度已用完,请稍后再试。\n"
+        "This month's translation quota is used up. Please try again later."
+    )
     assert "429" not in reply
     assert "max_budget" not in reply
     assert "exceeded" not in reply
@@ -311,6 +314,10 @@ def test_rate_limit_is_per_chat(sample_db):
     asyncio.run(term_command(other_update, context))
 
     assert throttled_message.replies == [(THROTTLE_NOTICE, 700)]
+    assert throttled_message.replies[0][0] == (
+        "本群消息过于频繁，请一分钟后再试。\n"
+        "Rate limit reached for this chat. Try again in a minute."
+    )
     assert other_message.replies == [("Echo", 800)]
 
 
@@ -424,7 +431,7 @@ def test_group_tr_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sampl
     asyncio.run(term_command(update, context))
 
     assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 900)]
-    assert message.replies[0][0] == "仅群管理员可用 /tr"
+    assert message.replies[0][0] == "仅群管理员可用 /tr\nOnly group admins can use /tr"
     assert calls == []
     assert context.bot.member_calls == [(-2001, 11)]
 
@@ -712,7 +719,10 @@ def test_private_tr_stranger_gets_one_line_rejection_and_zero_llm(monkeypatch, s
     asyncio.run(term_command(update, context))
 
     assert message.replies == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
-    assert message.replies[0][0] == "此 bot 仅限群内由管理员使用"
+    assert message.replies[0][0] == (
+        "此 bot 仅限群内由管理员使用\n"
+        "This bot can only be used by admins inside a group."
+    )
     assert calls == []
     assert context.bot.member_calls == []
 
@@ -766,6 +776,21 @@ def test_from_env_owner_valid_int_no_warning(monkeypatch, caplog):
 
     assert config.owner_user_id == 654321
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_from_env_reject_overrides_win_verbatim_and_are_not_auto_bilingual(monkeypatch):
+    monkeypatch.delenv("WUWATERM_RATE_LIMIT_PER_MINUTE", raising=False)
+    monkeypatch.setenv("WUWATERM_GROUP_TR_REJECT_TEXT", "管理员专用。")
+    monkeypatch.setenv("WUWATERM_PRIVATE_TR_REJECT_TEXT", "老板专用。")
+
+    config = BotConfig.from_env()
+
+    # Owner-set override wins exactly as written; the bot never appends a second
+    # (English) line to it — owner text stays the owner's responsibility.
+    assert config.group_tr_reject_text == "管理员专用。"
+    assert config.private_tr_reject_text == "老板专用。"
+    assert "\n" not in config.group_tr_reject_text
+    assert "\n" not in config.private_tr_reject_text
 
 
 @pytest.mark.parametrize("user_id", [22, 11])
