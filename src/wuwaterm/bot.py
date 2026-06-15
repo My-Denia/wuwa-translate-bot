@@ -49,6 +49,15 @@ DEFAULT_PRIVATE_TR_REJECT_TEXT = (
     "此 bot 仅限群内由管理员使用\n"
     "This bot can only be used by admins inside a group."
 )
+# Usage hints (bilingual; also point out the reply-to-translate shortcut).
+TERM_USAGE_NOTICE = (
+    "用法：/tr <中文>（或回复一条消息后发 /tr 直接翻译）\n"
+    "Usage: /tr <Chinese text> (or reply to a message, then send /tr to translate it)"
+)
+SENTENCE_USAGE_NOTICE = (
+    "用法：/sentence <中文句子>（或回复一条消息后发 /sentence 直接翻译）\n"
+    "Usage: /sentence <Chinese sentence> (or reply to a message, then send /sentence to translate it)"
+)
 LLM_INPUT_CHAR_LIMIT = 1000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
@@ -175,6 +184,23 @@ def chat_id_for(update: Update) -> int | None:
     return int(chat.id) if chat else None
 
 
+def _replied_translatable_text(update: Update) -> str:
+    """Content of the message a command replies to: text, or caption for media.
+
+    Lets an authorized caller translate a message by replying to it with a bare
+    command. Returns "" when there is no reply, or it carries nothing to
+    translate (e.g. a sticker or an image without a caption).
+    """
+    message = update.effective_message
+    if message is None:
+        return ""
+    replied = getattr(message, "reply_to_message", None)
+    if replied is None:
+        return ""
+    content = getattr(replied, "text", None) or getattr(replied, "caption", None)
+    return content.strip() if content else ""
+
+
 async def reply_to_user(update: Update, text: str) -> None:
     message = update.effective_message
     if not message:
@@ -241,17 +267,18 @@ def run_bot(db_path: str | Path, token: str | None = None) -> None:
 
 
 async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = " ".join(context.args).strip()
     message = update.effective_message
     if not message:
         return
+    # Inline text wins; otherwise fall back to the replied-to message's content.
+    query = " ".join(context.args).strip() or _replied_translatable_text(update)
     if not await _passes_authorization(update, context):
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not query:
-        await reply_to_user(update, "Usage: /tr <Chinese text>")
+        await reply_to_user(update, TERM_USAGE_NOTICE)
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
@@ -259,17 +286,18 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = " ".join(context.args).strip()
     message = update.effective_message
     if not message:
         return
+    # Inline text wins; otherwise fall back to the replied-to message's content.
+    text = " ".join(context.args).strip() or _replied_translatable_text(update)
     if not await _passes_authorization(update, context):
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not text:
-        await reply_to_user(update, "Usage: /sentence <Chinese sentence>")
+        await reply_to_user(update, SENTENCE_USAGE_NOTICE)
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]

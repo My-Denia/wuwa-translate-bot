@@ -19,7 +19,9 @@ from wuwaterm.bot import (
     LLM_INPUT_CHAR_LIMIT,
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
+    SENTENCE_USAGE_NOTICE,
     SERVICE_KEY,
+    TERM_USAGE_NOTICE,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
     AdminStatusCache,
@@ -70,8 +72,11 @@ def fake_update(
     message_id: int = 101,
     user_id: int | None = 11,
     sender_chat_id: int | None = None,
+    reply_to=None,
 ):
     message = FakeMessage(message_id=message_id, sender_chat_id=sender_chat_id)
+    if reply_to is not None:
+        message.reply_to_message = reply_to
     chat = SimpleNamespace(id=chat_id, type=chat_type)
     user = SimpleNamespace(id=user_id) if user_id is not None else None
     return (
@@ -921,3 +926,81 @@ def test_member_lookup_failure_log_carries_no_chat_or_user_ids(caplog, sample_db
     assert "get_chat_member failed" in warnings[0].getMessage()
     assert "445566" not in caplog.text
     assert "778899001" not in caplog.text
+
+
+# --- reply-target translation (reply to a message + a bare command) ---
+
+
+def test_tr_reply_to_chinese_message_translates_replied_content(sample_db):
+    # Bare /tr (no inline text) while replying to a Chinese message translates
+    # that replied message's content. (The screenshot scenario.)
+    update, message = fake_update(reply_to=SimpleNamespace(text="声骸", caption=None))
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", None)]
+
+
+def test_tr_inline_text_wins_over_replied_content(sample_db):
+    # Inline args take precedence; the replied-to content is ignored.
+    update, message = fake_update(reply_to=SimpleNamespace(text="守岸人", caption=None))
+    context = fake_context(sample_db, ["声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    # 声骸 -> Echo (inline), NOT 守岸人 -> Shorekeeper (replied).
+    assert message.replies == [("Echo", None)]
+
+
+def test_tr_reply_to_image_only_message_falls_through_to_usage(sample_db):
+    # Replying to a sticker/image with no text and no caption -> Usage hint.
+    update, message = fake_update(reply_to=SimpleNamespace(text=None, caption=None))
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(TERM_USAGE_NOTICE, None)]
+
+
+def test_tr_reply_to_caption_media_translates_caption(sample_db):
+    # Media message with a caption (no text) -> the caption is the input.
+    update, message = fake_update(reply_to=SimpleNamespace(text=None, caption="守岸人"))
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Shorekeeper", None)]
+
+
+def test_sentence_reply_to_chinese_message_translates_replied_content(monkeypatch, sample_db):
+    # The sentence handler (/sentence, /sent) honors the same reply fallback.
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    update, message = fake_update(
+        reply_to=SimpleNamespace(text="今汐装备了声骸", caption=None)
+    )
+    context = fake_context(sample_db, [])
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("Jinhsi装备了Echo", None)]
+
+
+def test_usage_notices_are_bilingual(sample_db):
+    assert TERM_USAGE_NOTICE == (
+        "用法：/tr <中文>（或回复一条消息后发 /tr 直接翻译）\n"
+        "Usage: /tr <Chinese text> (or reply to a message, then send /tr to translate it)"
+    )
+    assert SENTENCE_USAGE_NOTICE == (
+        "用法：/sentence <中文句子>（或回复一条消息后发 /sentence 直接翻译）\n"
+        "Usage: /sentence <Chinese sentence> (or reply to a message, then send /sentence to translate it)"
+    )
+    # Bare command, no inline text and no reply -> the bilingual Usage hint.
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+    asyncio.run(sentence_command(update, context))
+    assert message.replies == [(SENTENCE_USAGE_NOTICE, None)]
