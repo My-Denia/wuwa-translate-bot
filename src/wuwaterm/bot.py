@@ -31,6 +31,7 @@ SERVICE_KEY = "wuwaterm_service"
 TRANSLATOR_KEY = "wuwaterm_translator"
 CONFIG_KEY = "wuwaterm_config"
 RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
+REJECT_LIMITER_KEY = "wuwaterm_reject_limiter"
 ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
 LOGGER = logging.getLogger(__name__)
 
@@ -212,6 +213,7 @@ def create_application(
     app.bot_data[TRANSLATOR_KEY] = SentenceTranslator(db_path)
     app.bot_data[CONFIG_KEY] = config
     app.bot_data[RATE_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
+    app.bot_data[REJECT_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
     app.add_handler(CommandHandler(["tr", "term"], term_command))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
@@ -243,10 +245,10 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.effective_message
     if not message:
         return
+    if not await _passes_authorization(update, context):
+        return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
-        return
-    if not await _passes_authorization(update, context):
         return
     if not query:
         await reply_to_user(update, "Usage: /tr <Chinese text>")
@@ -261,10 +263,10 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = update.effective_message
     if not message:
         return
+    if not await _passes_authorization(update, context):
+        return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
-        return
-    if not await _passes_authorization(update, context):
         return
     if not text:
         await reply_to_user(update, "Usage: /sentence <Chinese sentence>")
@@ -320,7 +322,11 @@ async def _passes_authorization(
     if await _is_authorized_sender(update, context):
         return True
     config: BotConfig = context.application.bot_data[CONFIG_KEY]
-    if not config.tr_reject_silent:
+    # Rejection replies ride a SEPARATE per-chat budget: non-admin /tr spam can
+    # neither starve the translation budget authorized callers depend on, nor
+    # flood the chat. Within budget -> reply (respecting tr_reject_silent);
+    # beyond budget -> silent. The translation limiter is never touched here.
+    if not config.tr_reject_silent and _consume_reject_limit(update, context):
         reject_text = (
             config.group_tr_reject_text
             if is_group_chat(update)
@@ -380,4 +386,14 @@ def _consume_rate_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     if chat_id is None:
         return True
     limiter: PerChatRateLimiter = context.application.bot_data[RATE_LIMITER_KEY]
+    return limiter.allow(chat_id)
+
+
+def _consume_reject_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Per-chat budget for unauthorized-rejection replies, separate from the
+    translation budget so reject spam cannot starve authorized translations."""
+    chat_id = chat_id_for(update)
+    if chat_id is None:
+        return True
+    limiter: PerChatRateLimiter = context.application.bot_data[REJECT_LIMITER_KEY]
     return limiter.allow(chat_id)

@@ -18,6 +18,7 @@ from wuwaterm.bot import (
     DEFAULT_PRIVATE_TR_REJECT_TEXT,
     LLM_INPUT_CHAR_LIMIT,
     RATE_LIMITER_KEY,
+    REJECT_LIMITER_KEY,
     SERVICE_KEY,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
@@ -99,6 +100,7 @@ def fake_context(
                 TRANSLATOR_KEY: SentenceTranslator(sample_db),
                 CONFIG_KEY: config,
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
+                REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 ADMIN_CACHE_KEY: AdminStatusCache(),
             }
         ),
@@ -557,7 +559,9 @@ def test_group_tr_rejection_text_is_configurable(sample_db):
     assert message.replies == [("管理员专用。", 908)]
 
 
-def test_group_tr_rejections_consume_throttle_budget(sample_db):
+def test_group_tr_reject_replies_are_capped_then_silent(sample_db):
+    # Rejections ride their own per-chat budget; beyond it they go silent and
+    # never emit THROTTLE_NOTICE (which would leak throttle state to non-admins).
     context = fake_context(sample_db, ["声骸"], limit=2, member_status="member")
     replies = []
     for idx in range(3):
@@ -569,8 +573,37 @@ def test_group_tr_rejections_consume_throttle_budget(sample_db):
 
     assert replies[0] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 909)]
     assert replies[1] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 910)]
-    assert replies[2] == [(THROTTLE_NOTICE, 911)]
+    assert replies[2] == []
     assert context.bot.member_calls == [(-2001, 11)]
+
+
+def test_group_nonadmin_spam_does_not_starve_admin(sample_db):
+    # A non-admin floods rejected /tr past the limit; an admin in the SAME chat
+    # must still translate. On the old throttle-before-auth code the admin would
+    # have been throttled by the non-admin's rejections draining the one bucket.
+    context = fake_context(
+        sample_db,
+        ["声骸"],
+        limit=2,
+        member_status="administrator",
+        member_overrides={(-2001, 22): "member"},
+    )
+    spam_replies = []
+    for idx in range(3):  # limit + 1: drains the reject budget
+        update, message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=950 + idx, user_id=22
+        )
+        asyncio.run(term_command(update, context))
+        spam_replies.append(message.replies)
+
+    # Reject budget (=2) exhausted by the 3rd call: silent, never THROTTLE_NOTICE.
+    assert spam_replies[2] == []
+
+    admin_update, admin_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=960, user_id=11
+    )
+    asyncio.run(term_command(admin_update, context))
+    assert admin_message.replies == [("Echo", 960)]
 
 
 def test_group_tr_member_lookup_failure_fails_closed_and_uncached(sample_db):
@@ -690,7 +723,7 @@ def test_channel_sentence_is_rejected_even_for_owner(user_id, sample_db):
     assert context.bot.member_calls == []
 
 
-def test_private_sentence_stranger_rejections_consume_throttle_budget(sample_db):
+def test_private_sentence_reject_replies_are_capped_then_silent(sample_db):
     context = fake_context(
         sample_db,
         ["声骸"],
@@ -706,7 +739,7 @@ def test_private_sentence_stranger_rejections_consume_throttle_budget(sample_db)
 
     assert replies[0] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
     assert replies[1] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
-    assert replies[2] == [(THROTTLE_NOTICE, None)]
+    assert replies[2] == []
     assert context.bot.member_calls == []
 
 
@@ -835,7 +868,7 @@ def test_private_tr_rejection_text_is_configurable(sample_db):
     assert message.replies == [("老板专用。", None)]
 
 
-def test_private_tr_stranger_rejections_consume_throttle_budget(sample_db):
+def test_private_tr_reject_replies_are_capped_then_silent(sample_db):
     context = fake_context(
         sample_db,
         ["声骸"],
@@ -849,7 +882,7 @@ def test_private_tr_stranger_rejections_consume_throttle_budget(sample_db):
 
     assert replies[0] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
     assert replies[1] == [(DEFAULT_PRIVATE_TR_REJECT_TEXT, None)]
-    assert replies[2] == [(THROTTLE_NOTICE, None)]
+    assert replies[2] == []
     assert context.bot.member_calls == []
 
 

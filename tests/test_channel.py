@@ -13,6 +13,7 @@ from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CONFIG_KEY,
     RATE_LIMITER_KEY,
+    REJECT_LIMITER_KEY,
     SERVICE_KEY,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
@@ -127,6 +128,7 @@ def make_context(sample_db, *, config=None, args=()):
                 TRANSLATOR_KEY: SentenceTranslator(sample_db),
                 CONFIG_KEY: config,
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
+                REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 ADMIN_CACHE_KEY: AdminStatusCache(),
             }
         ),
