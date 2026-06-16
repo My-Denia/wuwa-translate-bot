@@ -164,6 +164,12 @@ formatting (bold, links, spoilers, ...). No command is involved.
   (default 300) are skipped silently. Telegram replays updates — restart
   backlog, or a burst of recent group history when the bot is promoted to
   admin — and without this gate the bot would translate channel history.
+- Edited posts update the existing reply in place: when the linked channel
+  edits a post, the bot re-translates and edits the reply it already sent for
+  that post rather than adding a second one. The post-to-reply map is held in
+  memory, so an edit with no tracked reply — after a bot restart, for a post
+  that was never translated, or an edit made after the freshness window — is
+  skipped silently; an edit never produces a duplicate reply.
 - Delivery precondition: Telegram privacy mode withholds channel
   auto-forwards from non-admin bots (slash commands still arrive). Make
   the bot an admin of the discussion group (any single right suffices);

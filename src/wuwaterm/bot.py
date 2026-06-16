@@ -32,6 +32,7 @@ CONFIG_KEY = "wuwaterm_config"
 RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
 REJECT_LIMITER_KEY = "wuwaterm_reject_limiter"
 ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
+CHANNEL_REPLY_INDEX_KEY = "wuwaterm_channel_reply_index"
 LOGGER = logging.getLogger(__name__)
 
 # User-facing operational notices are bilingual: Chinese line first, then an
@@ -68,6 +69,7 @@ SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
 ADMIN_CACHE_PRUNE_THRESHOLD = 1024
+CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD = 1024
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -179,6 +181,51 @@ class AdminStatusCache:
         self._entries[(chat_id, user_id)] = (now + self.ttl_seconds, verdict)
 
 
+class ChannelReplyIndex:
+    """Maps a forwarded channel post to the bot's translation reply.
+
+    When the linked channel edits a post, Telegram edits the auto-forwarded
+    copy in the group in place (same message_id) and the listener fires
+    again. This index lets that edit update the existing reply instead of
+    adding a second one. In-memory and bounded by age (the channel
+    freshness window); a restart drops it, after which an edit finds no
+    entry and is skipped — degrading to "no update", never to a duplicate
+    reply.
+    """
+
+    def __init__(self, ttl_seconds: float = 300.0):
+        self.ttl_seconds = ttl_seconds
+        self._entries: dict[tuple[int, int], tuple[float, int]] = {}
+
+    def remember(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_message_id: int,
+        now: float | None = None,
+    ) -> None:
+        now = time.monotonic() if now is None else now
+        if len(self._entries) >= CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD:
+            self._entries = {
+                key: entry for key, entry in self._entries.items() if entry[0] > now
+            }
+        self._entries[(chat_id, message_id)] = (now + self.ttl_seconds, reply_message_id)
+
+    def get(
+        self, chat_id: int, message_id: int, now: float | None = None
+    ) -> int | None:
+        now = time.monotonic() if now is None else now
+        key = (chat_id, message_id)
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        expires_at, reply_message_id = entry
+        if now >= expires_at:
+            del self._entries[key]
+            return None
+        return reply_message_id
+
+
 def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type in {"group", "supergroup"})
@@ -246,6 +293,9 @@ def create_application(
     app.bot_data[RATE_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[REJECT_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
+    app.bot_data[CHANNEL_REPLY_INDEX_KEY] = ChannelReplyIndex(
+        ttl_seconds=config.channel_max_age_seconds
+    )
     app.add_handler(CommandHandler(["tr", "term"], term_command))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
     app.add_handler(CommandHandler("about", about_command))

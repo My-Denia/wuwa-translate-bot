@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from telegram.error import BadRequest
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
+    CHANNEL_REPLY_INDEX_KEY,
     CONFIG_KEY,
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
@@ -19,6 +21,7 @@ from wuwaterm.bot import (
     TRANSLATOR_KEY,
     AdminStatusCache,
     BotConfig,
+    ChannelReplyIndex,
     PerChatRateLimiter,
     term_command,
 )
@@ -51,6 +54,7 @@ class FakeMessage:
         sender_chat=None,
         is_automatic_forward: bool = False,
         date: datetime | None = None,
+        edit_date: datetime | None = None,
     ):
         self.message_id = message_id
         self.text = text
@@ -60,6 +64,7 @@ class FakeMessage:
         self.sender_chat = sender_chat
         self.is_automatic_forward = is_automatic_forward
         self.date = date
+        self.edit_date = edit_date
         self.replies: list[tuple[str, str | None, int | None]] = []
 
     async def reply_text(self, text: str, **kwargs):
@@ -70,13 +75,27 @@ class FakeMessage:
 
 
 class FakeBot:
-    def __init__(self, default_status: str = "administrator"):
+    def __init__(self, default_status: str = "administrator", edit_raises=None):
         self.default_status = default_status
         self.member_calls: list[tuple[int, int]] = []
+        self.edits: list[tuple[str, str | None, int | None, int | None]] = []
+        self.edit_attempts: list[tuple[str, str | None, int | None, int | None]] = []
+        # edit_raises(text, parse_mode, chat_id, message_id) -> Exception | None
+        self._edit_raises = edit_raises
 
     async def get_chat_member(self, chat_id: int, user_id: int):
         self.member_calls.append((chat_id, user_id))
         return SimpleNamespace(status=self.default_status)
+
+    async def edit_message_text(self, text=None, chat_id=None, message_id=None, **kwargs):
+        parse_mode = kwargs.get("parse_mode")
+        self.edit_attempts.append((text, parse_mode, chat_id, message_id))
+        if self._edit_raises is not None:
+            exc = self._edit_raises(text, parse_mode, chat_id, message_id)
+            if exc is not None:
+                raise exc
+        self.edits.append((text, parse_mode, chat_id, message_id))
+        return SimpleNamespace(message_id=message_id)
 
 
 def channel_update(
@@ -88,6 +107,7 @@ def channel_update(
     chat_id: int = -2001,
     message_id: int = 4001,
     date: datetime | None = None,
+    edit_date: datetime | None = None,
 ):
     message = FakeMessage(
         message_id=message_id,
@@ -98,6 +118,7 @@ def channel_update(
         sender_chat=SimpleNamespace(id=-3001, type="channel"),
         is_automatic_forward=True,
         date=date,
+        edit_date=edit_date,
     )
     update = SimpleNamespace(
         effective_message=message,
@@ -117,11 +138,11 @@ def command_update(*, chat_id: int = -2001, message_id: int = 4101, user_id: int
     return update, message
 
 
-def make_context(sample_db, *, config=None, args=()):
+def make_context(sample_db, *, config=None, args=(), bot=None):
     config = config or BotConfig(rate_limit_per_minute=10, owner_user_id=11)
     return SimpleNamespace(
         args=list(args),
-        bot=FakeBot(),
+        bot=bot or FakeBot(),
         application=SimpleNamespace(
             bot_data={
                 SERVICE_KEY: TermService(sample_db),
@@ -130,6 +151,9 @@ def make_context(sample_db, *, config=None, args=()):
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 ADMIN_CACHE_KEY: AdminStatusCache(),
+                CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(
+                    ttl_seconds=config.channel_max_age_seconds
+                ),
             }
         ),
     )
@@ -500,3 +524,206 @@ def test_strip_telegram_html_unescapes_and_never_raises():
     assert strip_telegram_html("&lt;b&gt;") == "<b>"
     for nasty in ("<b>x", "<<<>>>", "<a href='x", "", "<![CDATA[x]]>", "&#x4e00;"):
         assert isinstance(strip_telegram_html(nasty), str)
+
+
+# --- channel-post edit dedup (Option B: edit-in-place, update-only) ---
+#
+# FakeMessage.reply_text returns message_id + 1000, so the bot's reply to a
+# post with id N is tracked as reply id N + 1000.
+
+
+def test_edit_updates_existing_reply_in_place(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+
+    # New post -> normal in-thread HTML reply, remembered.
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4200)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("translated", "HTML", 4200)]
+
+    # Same post edited (same message_id, edit_date set) arrives as its own
+    # update -> the tracked reply (5200) is edited in place; no new reply.
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4200, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == [("translated", "HTML", -2001, 5200)]
+    assert len(calls) == 2  # the edit re-translated
+
+
+def test_edit_with_no_tracked_reply_is_silent(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+
+    # An edit with nothing remembered (e.g. after a restart dropped the map):
+    # never translate, never reply, never edit.
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4210, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == []
+    assert calls == []
+
+
+def test_edit_re_translates_and_consumes_a_throttle_slot(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    # limit=2: the new post (slot 1) and its edit (slot 2) exhaust the budget,
+    # so a second distinct post is throttled -> the edit DID consume a slot.
+    context = make_context(
+        sample_db, config=BotConfig(rate_limit_per_minute=2, owner_user_id=11)
+    )
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4220)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("translated", "HTML", 4220)]
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4220, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+    assert context.bot.edits == [("translated", "HTML", -2001, 5220)]
+    assert len(calls) == 2
+
+    third_update, third_message = channel_update(text=CN_TEXT, message_id=4221)
+    asyncio.run(channel_post_handler(third_update, context))
+    assert third_message.replies == []  # budget drained by post + edit
+    assert len(calls) == 2
+
+
+def test_edit_dictionary_hit_updates_reply_in_place(monkeypatch, sample_db):
+    # An exact-dictionary post replies with the official term and is remembered;
+    # editing it updates that same reply in place — still zero LLM. (The
+    # dictionary short-circuit sits after the LLM-configured gate, so the
+    # endpoint must be configured even though it is never called.)
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    context = make_context(sample_db)
+
+    new_update, new_message = channel_update(text="声骸", message_id=4270)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("Echo", None, 4270)]
+
+    edit_update, edit_message = channel_update(
+        text="声骸", message_id=4270, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == [("Echo", None, -2001, 5270)]
+    assert calls == []
+
+
+def test_edit_identical_translation_is_silent_noop(monkeypatch, sample_db):
+    # Telegram rejects an unchanged edit with "message is not modified"; that is
+    # the dedup ideal and must be a silent no-op, never a crash.
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    bot = FakeBot(edit_raises=lambda *_: BadRequest("Message is not modified"))
+    context = make_context(sample_db, bot=bot)
+
+    new_update, _ = channel_update(text=CN_TEXT, message_id=4230)
+    asyncio.run(channel_post_handler(new_update, context))
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4230, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))  # must not raise
+
+    assert edit_message.replies == []
+    assert len(bot.edit_attempts) == 1  # attempted then swallowed
+    assert bot.edits == []  # nothing recorded as applied
+
+
+def test_edit_invalid_html_falls_back_to_plain_edit(monkeypatch, sample_db):
+    # An HTML edit Telegram rejects re-raises into the plain-edit fallback,
+    # mirroring the new-post fallback — formatting never fails the update.
+    def response(_locked_text, locks):
+        jinhsi = placeholder_for(locks, "Jinhsi")
+        echo = placeholder_for(locks, "Echo")
+        return f'<b>{jinhsi}</b> says <a href="https://example.com">{echo}</a> is strong'
+
+    calls = []
+    enable_mock_llm(monkeypatch, calls, response)
+
+    def raise_on_html(text, parse_mode, chat_id, message_id):
+        return BadRequest("Can't parse entities: bad") if parse_mode == "HTML" else None
+
+    bot = FakeBot(edit_raises=raise_on_html)
+    context = make_context(sample_db, bot=bot)
+
+    new_update, _ = channel_update(
+        text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4240
+    )
+    asyncio.run(channel_post_handler(new_update, context))
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT,
+        text_html=CN_TEXT_HTML,
+        message_id=4240,
+        edit_date=datetime.now(timezone.utc),
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert bot.edit_attempts[0][1] == "HTML"  # HTML attempted first
+    assert bot.edits == [("Jinhsi says Echo is strong", None, -2001, 5240)]
+
+
+def test_edit_reply_gone_is_skipped_silently(monkeypatch, sample_db):
+    # If the tracked reply was deleted, the edit fails ("not found"); swallow it
+    # — never crash the listener, never post a new reply.
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    bot = FakeBot(edit_raises=lambda *_: BadRequest("Message to edit not found"))
+    context = make_context(sample_db, bot=bot)
+
+    new_update, _ = channel_update(text=CN_TEXT, message_id=4250)
+    asyncio.run(channel_post_handler(new_update, context))
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4250, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))  # must not raise
+
+    assert edit_message.replies == []
+    assert bot.edits == []
+    assert len(bot.edit_attempts) >= 1
+
+
+def test_edit_with_no_tracked_reply_consumes_zero_throttle(monkeypatch, sample_db):
+    # The untracked-edit skip happens BEFORE the throttle, so it must not drain
+    # the per-chat budget: a following fresh post still translates at limit=1.
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(
+        sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
+    )
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4260, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+    assert edit_message.replies == []
+    assert context.bot.edits == []
+    assert calls == []
+
+    fresh_update, fresh_message = channel_update(text=CN_TEXT, message_id=4261)
+    asyncio.run(channel_post_handler(fresh_update, context))
+    assert fresh_message.replies == [("translated", "HTML", 4261)]
+    assert len(calls) == 1
+
+
+def test_channel_reply_index_remembers_gets_and_expires():
+    index = ChannelReplyIndex(ttl_seconds=300.0)
+    index.remember(-2001, 4001, 5001, now=0.0)
+
+    assert index.get(-2001, 4001, now=299.9) == 5001
+    assert index.get(-2001, 4001, now=300.0) is None  # expired at TTL
+    assert index.get(-2001, 9999, now=0.0) is None  # unknown key
