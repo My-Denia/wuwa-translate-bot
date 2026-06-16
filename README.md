@@ -1,12 +1,15 @@
 # WuWa Term Bot
 
-Self-hosted Telegram bot for Wuthering Waves Chinese terms to exact official
-English localization and term-locked sentence translation.
+Self-hosted Telegram bot for Wuthering Waves official localization: Chinese
+terms to exact official English and the reverse, with term-locked sentence
+translation in both directions.
 
-The bot is dictionary-first: exact database hits return the English string from
-the local SQLite database byte-for-byte. Other Chinese input is translated
-through an OpenAI-compatible endpoint after known DB terms are locked, so
-official terms are not paraphrased.
+The bot is dictionary-first: an exact database hit returns the official string
+from the local SQLite database byte-for-byte. Direction is auto-detected by
+script — a Chinese source translates to English (the default), an English/Latin
+source translates to Chinese. Free text in either language goes through an
+OpenAI-compatible endpoint after known DB terms are locked, so official terms
+are restored verbatim in the target language rather than paraphrased.
 
 ## Data Source
 
@@ -87,8 +90,11 @@ Optional LLM environment variables:
   everyone (fail-closed) and a startup warning is logged
 - `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on; set `0`/`false`/`no`/`off`
   to disable the linked-channel auto-translation listener (kill switch)
-- `WUWATERM_CHANNEL_MIN_CJK`, default `1`; minimum number of CJK
-  ideographs a channel post must contain to be auto-translated
+- `WUWATERM_CHANNEL_MIN_CJK`, default `1`; minimum number of CJK ideographs a
+  channel post needs to be auto-translated Chinese -> English
+- `WUWATERM_CHANNEL_MIN_LATIN`, default `2`; for a channel post with no CJK,
+  the minimum number of Latin letters it needs to be auto-translated
+  English -> Chinese (below both thresholds the post is skipped)
 - `WUWATERM_CHANNEL_TEXT_LIMIT`, default `4096`; max text-post length for
   auto-translation (Telegram's own text limit)
 - `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`; max caption length for
@@ -121,7 +127,8 @@ admin (see that section).
   (default replies). Rejected calls never invoke the LLM but still consume
   the per-chat throttle budget.
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
-  `/tr <Chinese sentence>` translates with DB terms locked.
+  `/tr <sentence>` translates with DB terms locked. Direction is auto-detected:
+  Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
   user id; everyone else gets a short bilingual reply, default
@@ -134,25 +141,29 @@ admin (see that section).
 ### Linked-Channel Auto-Translation
 
 When the channel linked to a group posts, Telegram auto-forwards the post
-into the group. The bot detects Chinese content in that forward and replies
-in-thread with an English translation that preserves the original Telegram
-formatting (bold, links, spoilers, ...). No command is involved.
+into the group. The bot auto-detects the post's language and replies in-thread
+with a translation that preserves the original Telegram formatting (bold,
+links, spoilers, ...): a Chinese post is translated to English, an English
+post to Chinese. No command is involved.
 
 - Trigger (hard boundary): only automatic forwards whose sender is a
   channel (`is_automatic_forward` + channel `sender_chat`). Ordinary member
   messages, manual forwards of channel posts, and anonymous-admin posts
   never trigger it. No authorization gate applies: posting rights in the
   linked channel are already owner-controlled.
-- Posts without Chinese characters are skipped silently with zero LLM
-  calls and zero throttle consumption. The minimum CJK ideograph count is
-  configurable (`WUWATERM_CHANNEL_MIN_CJK`).
+- Direction by script: a post with enough Chinese (`WUWATERM_CHANNEL_MIN_CJK`,
+  default 1) is translated to English; a post with no Chinese but enough Latin
+  letters (`WUWATERM_CHANNEL_MIN_LATIN`, default 2) is translated to Chinese; a
+  post with neither (emoji / links / numbers only) is skipped silently with
+  zero LLM calls and zero throttle consumption.
 - The reply uses Telegram HTML (`parse_mode=HTML`) rendered from the
   post's entities, with DB terms locked before the LLM call. If the
   translated markup fails validation against Telegram's HTML subset, the
   bot strips the tags and sends a plain-text reply instead — formatting
   never fails the reply.
 - Dictionary-first still applies: a post that is exactly one official term
-  gets the official English string byte-for-byte, plain, without the LLM.
+  gets the official string byte-for-byte (English for a Chinese term, Chinese
+  for an English term), plain, without the LLM.
 - Caption posts (photo/video announcements) are handled the same as text
   posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
   instead of the 1000-char command cap.

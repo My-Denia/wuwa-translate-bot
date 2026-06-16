@@ -117,7 +117,7 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(locked_text, locks):
+    def fake_call(locked_text, locks, to_chinese=False):
         calls.append((locked_text, locks))
         return response_factory(locked_text, locks)
 
@@ -306,7 +306,35 @@ def test_stylized_unicode_cartethyia_matches_ascii(sample_db):
 
     asyncio.run(term_command(update, context))
 
-    assert message.replies == [("Cartethyia", None)]
+    # Stylized fullwidth English normalizes to "Cartethyia" and matches the
+    # term's English side; an English query now auto-translates to the
+    # official Chinese (EN->ZH direction).
+    assert message.replies == [("卡提希娅", None)]
+
+
+def test_tr_english_term_returns_official_chinese(sample_db):
+    update, message = fake_update()
+    context = fake_context(sample_db, ["Echo"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("声骸", None)]
+
+
+def test_tr_english_sentence_translates_to_chinese(monkeypatch, sample_db):
+    calls = []
+
+    def response(_locked_text, locks):
+        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+
+    enable_mock_llm(monkeypatch, calls, response)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["Jinhsi equips Echo"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("今汐装备了声骸", None)]
+    assert len(calls) == 1
 
 
 def test_rate_limit_is_per_chat(sample_db):
@@ -995,12 +1023,12 @@ def test_sentence_reply_to_chinese_message_translates_replied_content(monkeypatc
 
 def test_usage_notices_are_bilingual(sample_db):
     assert TERM_USAGE_NOTICE == (
-        "用法：/tr <中文>（或回复一条消息后发 /tr 直接翻译）\n"
-        "Usage: /tr <Chinese text> (or reply to a message, then send /tr to translate it)"
+        "用法：/tr <中文或英文>（自动判向：中→英 / 英→中；或回复一条消息后发 /tr 直接翻译）\n"
+        "Usage: /tr <Chinese or English> (direction auto-detected; or reply to a message, then send /tr)"
     )
     assert SENTENCE_USAGE_NOTICE == (
-        "用法：/sentence <中文句子>（或回复一条消息后发 /sentence 直接翻译）\n"
-        "Usage: /sentence <Chinese sentence> (or reply to a message, then send /sentence to translate it)"
+        "用法：/sentence <中文或英文句子>（自动判向：中→英 / 英→中；或回复一条消息后发 /sentence 直接翻译）\n"
+        "Usage: /sentence <Chinese or English sentence> (direction auto-detected; or reply to a message, then send /sentence)"
     )
     # Bare command, no inline text and no reply -> the bilingual Usage hint.
     update, message = fake_update()

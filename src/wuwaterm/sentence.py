@@ -36,10 +36,10 @@ class LockedSentence:
     locked_text: str
     locks: tuple[tuple[str, str, str], ...]
 
-    def restore(self, translated: str) -> str:
+    def restore(self, translated: str, *, to_en: bool = True) -> str:
         result = translated
-        for placeholder, _zh, en in self.locks:
-            result = result.replace(placeholder, en)
+        for placeholder, zh, en in self.locks:
+            result = result.replace(placeholder, en if to_en else zh)
         return result
 
 
@@ -61,36 +61,39 @@ class SentenceTranslator:
         locked = text
         locks: list[tuple[str, str, str]] = []
         used: set[str] = set()
-        for source, official in entries:
+        for source, (zh, en) in entries:
             if len(source) < 2 or source in used or source not in locked:
                 continue
-            if not official or "\n" in official:
+            if not zh or not en or "\n" in zh or "\n" in en:
                 continue
             placeholder = f"__TERM_{len(locks)}__"
             locked = locked.replace(source, placeholder)
-            locks.append((placeholder, source, official))
+            locks.append((placeholder, zh, en))
             used.add(source)
         return LockedSentence(locked_text=locked, locks=tuple(locks))
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, *, to_chinese: bool = False) -> str:
         prepared = self.prepare_text(text)
         if not prepared:
             return ""
         exact = self.service.lookup(prepared, limit=5)
-        if exact.exact:
-            official = self.service.term_text(prepared)
+        if exact.exact and exact.best:
+            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
             if official:
                 return official
         locked = self._lock_terms(prepared)
         if not _llm_configured():
-            return locked.restore(locked.locked_text)
+            return locked.restore(locked.locked_text, to_en=not to_chinese)
         try:
-            translated = _call_llm(locked.locked_text, locked.locks)
+            if to_chinese:
+                translated = _call_llm(locked.locked_text, locked.locks, to_chinese=True)
+            else:
+                translated = _call_llm(locked.locked_text, locked.locks)
         except LLMTranslationError as exc:
             return exc.user_message
-        return locked.restore(translated)
+        return locked.restore(translated, to_en=not to_chinese)
 
-    def translate_html(self, html_text: str) -> str:
+    def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
         """Translate Telegram-HTML text with DB terms locked and tags untouched.
 
         Skips ``prepare_text``/``normalize_user_text`` on purpose: normalization
@@ -98,8 +101,13 @@ class SentenceTranslator:
         propagates to the caller so the passive channel path can stay silent.
         """
         locked = self._lock_terms(html_text)
-        translated = _call_llm(locked.locked_text, locked.locks, html_mode=True)
-        return locked.restore(translated)
+        if to_chinese:
+            translated = _call_llm(
+                locked.locked_text, locked.locks, html_mode=True, to_chinese=True
+            )
+        else:
+            translated = _call_llm(locked.locked_text, locked.locks, html_mode=True)
+        return locked.restore(translated, to_en=not to_chinese)
 
     def _resolve_speaker_prefix(self, line: str) -> str:
         match = SPEAKER_PREFIX_RE.match(line)
@@ -121,13 +129,19 @@ class SentenceTranslator:
             return None
         return official
 
-    def _lockable_sources(self) -> set[tuple[str, str]]:
-        sources: dict[str, str] = {}
+    def _lockable_sources(self) -> set[tuple[str, tuple[str, str]]]:
+        # Each source text (Chinese OR English form) maps to the official
+        # (zh, en) pair, so a locked placeholder can be restored in either
+        # direction. Only terms whose both forms are single-line are lockable.
+        sources: dict[str, tuple[str, str]] = {}
         for entry in self.service.entries():
-            if entry.zh and "\n" not in entry.en:
-                sources.setdefault(entry.zh, entry.en)
-            if entry.en and "\n" not in entry.en:
-                sources.setdefault(entry.en, entry.en)
+            if "\n" in entry.zh or "\n" in entry.en:
+                continue
+            official = (entry.zh, entry.en)
+            if entry.zh:
+                sources.setdefault(entry.zh, official)
+            if entry.en:
+                sources.setdefault(entry.en, official)
         return set(sources.items())
 
 
@@ -146,24 +160,45 @@ _HTML_MODE_INSTRUCTION = (
     "human-readable text between tags, and return English only with the "
     "same tags.\n"
 )
+_HTML_MODE_INSTRUCTION_ZH = (
+    "The input contains Telegram HTML tags (<b>, <i>, <u>, <s>, <a href>, "
+    "<code>, <pre>, <blockquote>, <tg-spoiler>, <tg-emoji>); copy every tag "
+    "and attribute through exactly unchanged, translate only the "
+    "human-readable text between tags, and return Chinese only with the "
+    "same tags.\n"
+)
 
 
 def _call_llm(
     locked_text: str,
     locks: tuple[tuple[str, str, str], ...],
     html_mode: bool = False,
+    to_chinese: bool = False,
 ) -> str:
     base_url = (os.getenv("WUWATERM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = os.getenv("WUWATERM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
     model = os.getenv("WUWATERM_OPENAI_MODEL") or ""
-    lock_lines = "\n".join(f"{placeholder} = {en}" for placeholder, _zh, en in locks)
-    system_content = (
-        "Translate Chinese Wuthering Waves text into English. "
-        "Keep placeholders like __TERM_0__ exactly unchanged. "
-        "Do not paraphrase locked official terms. Return English only.\n"
-    )
-    if html_mode:
-        system_content += _HTML_MODE_INSTRUCTION
+    # locks are (placeholder, zh_official, en_official); show the model the
+    # official term in the TARGET language so the locked placeholder maps to
+    # the right side on restore.
+    official_index = 1 if to_chinese else 2
+    lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
+    if to_chinese:
+        system_content = (
+            "Translate English Wuthering Waves text into Simplified Chinese. "
+            "Keep placeholders like __TERM_0__ exactly unchanged. "
+            "Do not paraphrase locked official terms. Return Chinese only.\n"
+        )
+        if html_mode:
+            system_content += _HTML_MODE_INSTRUCTION_ZH
+    else:
+        system_content = (
+            "Translate Chinese Wuthering Waves text into English. "
+            "Keep placeholders like __TERM_0__ exactly unchanged. "
+            "Do not paraphrase locked official terms. Return English only.\n"
+        )
+        if html_mode:
+            system_content += _HTML_MODE_INSTRUCTION
     system_content += f"Locked terms:\n{lock_lines}"
     payload = {
         "model": model,

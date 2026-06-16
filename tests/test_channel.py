@@ -164,7 +164,7 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(locked_text, locks, html_mode=False):
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
         calls.append((locked_text, locks, html_mode))
         return response_factory(locked_text, locks)
 
@@ -211,19 +211,21 @@ def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, samp
     ]
 
 
-def test_english_post_is_silent_and_consumes_no_throttle(monkeypatch, sample_db):
+def test_non_translatable_post_is_silent_and_consumes_no_throttle(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
         sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
     )
-    en_update, en_message = channel_update(
-        text="Patch notes are live now!", message_id=4010
+    # No Chinese and no Latin letters -> nothing worth translating -> silent,
+    # and the gate returns before any throttle slot is consumed.
+    noise_update, noise_message = channel_update(
+        text="🔥🔥🔥 123 !!!", message_id=4010
     )
 
-    asyncio.run(channel_post_handler(en_update, context))
+    asyncio.run(channel_post_handler(noise_update, context))
 
-    assert en_message.replies == []
+    assert noise_message.replies == []
     assert calls == []
 
     cn_update, cn_message = channel_update(text=CN_TEXT, message_id=4011)
@@ -231,6 +233,44 @@ def test_english_post_is_silent_and_consumes_no_throttle(monkeypatch, sample_db)
 
     assert cn_message.replies == [("translated", "HTML", 4011)]
     assert len(calls) == 1
+
+
+def test_english_post_translates_to_chinese_html(monkeypatch, sample_db):
+    calls = []
+
+    def response(_locked_text, locks):
+        jinhsi = placeholder_for(locks, "Jinhsi")
+        echo = placeholder_for(locks, "Echo")
+        return f"<b>{jinhsi}</b>装备了<tg-spoiler>{echo}</tg-spoiler>"
+
+    enable_mock_llm(monkeypatch, calls, response)
+    update, message = channel_update(
+        text="Jinhsi equips Echo",
+        text_html="<b>Jinhsi</b> equips <tg-spoiler>Echo</tg-spoiler>",
+        message_id=4012,
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == [
+        ("<b>今汐</b>装备了<tg-spoiler>声骸</tg-spoiler>", "HTML", 4012)
+    ]
+    assert len(calls) == 1
+    assert calls[0][2] is True  # HTML pipeline used
+
+
+def test_english_exact_term_post_emits_official_chinese(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    update, message = channel_update(text="Echo", text_html="Echo", message_id=4013)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    # Dictionary-first, zero LLM: English term -> official Chinese, plain.
+    assert message.replies == [("声骸", None, 4013)]
+    assert calls == []
 
 
 def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):

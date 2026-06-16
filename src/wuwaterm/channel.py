@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
@@ -21,13 +20,12 @@ from .bot import (
     _consume_rate_limit,
 )
 from .lookup import TermService
+from .normalize import count_cjk, count_latin
 from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
 
 
 LOGGER = logging.getLogger(__name__)
 
-# CJK Ext A, CJK Unified, CJK Compatibility Ideographs, CJK Ext B-F.
-CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿\U00020000-\U0002ebef]")
 
 # Telegram's HTML subset: https://core.telegram.org/bots/api#html-style
 ALLOWED_TAGS = frozenset(
@@ -50,10 +48,6 @@ ALLOWED_TAGS = frozenset(
         "tg-emoji",
     }
 )
-
-
-def count_cjk(text: str) -> int:
-    return len(CJK_RE.findall(text))
 
 
 class _TelegramHTMLValidator(HTMLParser):
@@ -208,7 +202,15 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if not html_text:
         return
-    if count_cjk(plain) < config.channel_min_cjk:
+    # Direction by script: enough Chinese -> translate to English (default);
+    # no Chinese but enough Latin letters -> translate to Chinese. Anything
+    # else (emoji / links / numbers only) is not worth translating -> skip.
+    cjk = count_cjk(plain)
+    if cjk >= config.channel_min_cjk:
+        to_chinese = False
+    elif cjk == 0 and count_latin(plain) >= config.channel_min_latin:
+        to_chinese = True
+    else:
         # Free check: no LLM call and no throttle consumption.
         return
     if len(plain) > length_limit:
@@ -227,8 +229,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     service: TermService = context.application.bot_data[SERVICE_KEY]
-    if service.lookup(plain).exact:
-        official = service.term_text(plain)
+    lookup_result = service.lookup(plain)
+    if lookup_result.exact and lookup_result.best:
+        official = (
+            lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
+        )
         if official:
             # Dictionary-first invariant: official text byte-for-byte,
             # plain, trumps formatting. Zero LLM.
@@ -248,7 +253,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
     try:
-        translated = translator.translate_html(html_text)
+        translated = translator.translate_html(html_text, to_chinese=to_chinese)
     except LLMTranslationError:
         # Budget exhaustion and generic LLM failure both skip silently;
         # no chat/user ids, no response-body echo.

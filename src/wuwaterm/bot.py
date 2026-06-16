@@ -23,6 +23,7 @@ from telegram.ext import (
 )
 
 from .lookup import TermService
+from .normalize import has_cjk
 from .sentence import SentenceTranslator, _llm_configured
 
 
@@ -51,12 +52,12 @@ DEFAULT_PRIVATE_TR_REJECT_TEXT = (
 )
 # Usage hints (bilingual; also point out the reply-to-translate shortcut).
 TERM_USAGE_NOTICE = (
-    "用法：/tr <中文>（或回复一条消息后发 /tr 直接翻译）\n"
-    "Usage: /tr <Chinese text> (or reply to a message, then send /tr to translate it)"
+    "用法：/tr <中文或英文>（自动判向：中→英 / 英→中；或回复一条消息后发 /tr 直接翻译）\n"
+    "Usage: /tr <Chinese or English> (direction auto-detected; or reply to a message, then send /tr)"
 )
 SENTENCE_USAGE_NOTICE = (
-    "用法：/sentence <中文句子>（或回复一条消息后发 /sentence 直接翻译）\n"
-    "Usage: /sentence <Chinese sentence> (or reply to a message, then send /sentence to translate it)"
+    "用法：/sentence <中文或英文句子>（自动判向：中→英 / 英→中；或回复一条消息后发 /sentence 直接翻译）\n"
+    "Usage: /sentence <Chinese or English sentence> (direction auto-detected; or reply to a message, then send /sentence)"
 )
 # Appended to a short query that misses the dictionary. The data version
 # (pinned commit) lives in /about, never in this user-facing line.
@@ -83,6 +84,7 @@ class BotConfig:
     owner_user_id: int | None = None
     channel_autotranslate: bool = True
     channel_min_cjk: int = 1
+    channel_min_latin: int = 2
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
     channel_max_age_seconds: int = 300
@@ -107,6 +109,7 @@ class BotConfig:
                 not in _FALSY_ENV_VALUES
             ),
             channel_min_cjk=int(os.getenv("WUWATERM_CHANNEL_MIN_CJK", "1")),
+            channel_min_latin=int(os.getenv("WUWATERM_CHANNEL_MIN_LATIN", "2")),
             channel_text_limit=int(os.getenv("WUWATERM_CHANNEL_TEXT_LIMIT", "4096")),
             channel_caption_limit=int(
                 os.getenv("WUWATERM_CHANNEL_CAPTION_LIMIT", "1024")
@@ -399,16 +402,19 @@ def translate_query(service: TermService, translator: SentenceTranslator, query:
     prepared = translator.prepare_text(query)
     if not prepared:
         return "Nothing to translate after removing metadata."
+    # Direction is auto-detected: a Chinese source -> English (default), an
+    # all-Latin/English source -> Chinese. Both dictionary and LLM honor it.
+    to_chinese = not has_cjk(prepared)
     result = service.lookup(prepared, limit=5)
-    if result.exact:
-        official = service.term_text(prepared)
+    if result.exact and result.best:
+        official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return official
     if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
-        return result.best.entry.en
+        return result.best.entry.zh if to_chinese else result.best.entry.en
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
-    translated = translator.translate(prepared)
+    translated = translator.translate(prepared, to_chinese=to_chinese)
     if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
         translated = f"{translated}\n\n{DICT_MISS_FLAG}"
     return translated

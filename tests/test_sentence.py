@@ -92,3 +92,39 @@ def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, s
     translator = SentenceTranslator(sample_db)
 
     assert translator.translate("这是一个需要翻译的句子。") == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_translate_english_exact_term_returns_official_chinese(sample_db):
+    translator = SentenceTranslator(sample_db)
+
+    # Exact English term, dictionary-first, no LLM: returns the official zh.
+    assert translator.translate("Echo", to_chinese=True) == "声骸"
+
+
+def test_restore_to_chinese_swaps_in_zh_official(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("Use Jinhsi plus Resonator")
+
+    restored = locked.restore("Use __TERM_0__ plus __TERM_1__", to_en=False)
+    assert set(restored.removeprefix("Use ").split(" plus ")) == {"今汐", "共鸣者"}
+
+
+def test_translate_english_sentence_locks_and_restores_chinese(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        # English source -> Chinese target: the model keeps placeholders and
+        # is shown the zh official; restore swaps placeholders to zh.
+        assert to_chinese is True
+        assert "Jinhsi" not in locked_text and "Echo" not in locked_text
+        by_en = {en: placeholder for placeholder, _zh, en in locks}
+        return f"{by_en['Jinhsi']}装备了{by_en['Echo']}"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    assert (
+        translator.translate("Jinhsi equips Echo", to_chinese=True) == "今汐装备了声骸"
+    )

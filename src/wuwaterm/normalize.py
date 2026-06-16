@@ -17,6 +17,9 @@ SPOILER_RE = re.compile(
 )
 QUOTE_BAR_RE = re.compile(r"(?m)^\s*(?:[>|｜│┃▌▍▏]+\s*)+")
 BLANK_LINES_RE = re.compile(r"\n{3,}")
+# CJK Ext A, CJK Unified, CJK Compatibility Ideographs, CJK Ext B-F.
+CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿\U00020000-\U0002ebef]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 
 
 def strip_markup(value: str) -> str:
@@ -66,3 +69,20 @@ def pinyin_for(value: str) -> str:
 def pinyin_abbrev_for(value: str) -> str:
     parts = lazy_pinyin(value, style=Style.FIRST_LETTER)
     return normalize_ascii("".join(parts))
+
+
+def count_cjk(text: str) -> int:
+    return len(CJK_RE.findall(text))
+
+
+def count_latin(text: str) -> int:
+    return len(LATIN_RE.findall(text))
+
+
+def has_cjk(text: str) -> bool:
+    """True when the text contains at least one CJK ideograph.
+
+    Used to pick translation direction: Chinese source -> English (the
+    default), English/Latin source -> Chinese.
+    """
+    return CJK_RE.search(text) is not None
