@@ -31,7 +31,9 @@ The active Arikatsu source profile uses sparse checkout for only:
 - `Textmaps`
 
 Bulk TextMap data and generated `terms.db` are local artifacts and are ignored
-by Git.
+by Git. This project does **not** redistribute Wuthering Waves game data; only a
+small derived term dictionary is built locally from the public source above. All
+Wuthering Waves game data and in-game terminology are © Kuro Games.
 
 ## Setup
 
@@ -235,3 +237,14 @@ do not create false mismatches.
 Live Telegram smoke is owner-gated. If `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_TEST_CHAT_ID` are not supplied, only the live smoke criterion is
 blocked; offline handler tests still validate the bot code.
+
+## Maintenance
+
+This is a personal hobby project, maintained on a best-effort basis. There is no
+guarantee of responses to issues or pull requests.
+
+## License
+
+Released under the [MIT License](LICENSE), © 2026 My-Denia. The MIT license
+covers this project's source code only — not the upstream Wuthering Waves game
+data or in-game terminology, which are © Kuro Games (see [Data Source](#data-source)).
