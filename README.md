@@ -119,10 +119,11 @@ those channel auto-forwards at all requires the bot to be a discussion-group
 admin (see that section).
 
 - All translate commands — `/tr`, `/term`, `/sentence`, `/sent` — share one
-  authorization gate and are admin-only in groups: each call resolves the
-  sender via `getChatMember`, and only `creator`/`administrator` may use
-  them. Anonymous group admins (posting as the group itself) are allowed.
-  Membership verdicts are cached about 5 minutes per (chat, user).
+  authorization gate. By default they are admin-only in groups: each call
+  resolves the sender via `getChatMember`, and only `creator`/`administrator`
+  may use them. Anonymous group admins (posting as the group itself) are
+  allowed. Membership verdicts are cached about 5 minutes per (chat, user).
+  An admin may open a chat to all members with `/public on` (see below).
 - Unauthorized callers get a short bilingual reply (Chinese line then
   English), default `仅群管理员可用 /tr` then `Only group admins can use /tr`;
   the wording is configurable, and a config flag switches to silent ignore
@@ -139,6 +140,23 @@ admin (see that section).
   Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
+
+### Opening a Group to Non-Admins (`/public`)
+
+Admins can open translate commands to everyone in a specific group with
+`/public on`, and restrict them back to admins with `/public off`. The default
+for every new chat is admin-only (no behavior change for groups that don't
+opt in).
+
+- `/public on` — open `/tr`, `/term`, `/sentence`, `/sent` to all members.
+- `/public off` — restrict back to admins (default).
+- `/public` or `/public status` — report the current state.
+- `/public` is ALWAYS admin-only — public mode never unlocks the toggle
+  itself, so a non-admin can never flip a public chat back off or on.
+- Per-chat throttling and the 1000-char LLM cap still apply.
+- State is persisted to `WUWATERM_SETTINGS_PATH` (default
+  `<db parent>/chat_settings.json`); on the supported Docker layout this lives
+  in the bind-mounted `data/` volume and survives image rebuilds.
 
 ### Linked-Channel Auto-Translation
 

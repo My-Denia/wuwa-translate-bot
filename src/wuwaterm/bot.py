@@ -25,6 +25,7 @@ from telegram.ext import (
 from .lookup import TermService
 from .normalize import has_cjk
 from .sentence import SentenceTranslator, _llm_configured
+from .settings import ChatSettings
 
 
 SERVICE_KEY = "wuwaterm_service"
@@ -34,6 +35,7 @@ RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
 REJECT_LIMITER_KEY = "wuwaterm_reject_limiter"
 ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
 CHANNEL_REPLY_INDEX_KEY = "wuwaterm_channel_reply_index"
+CHAT_SETTINGS_KEY = "wuwaterm_chat_settings"
 LOGGER = logging.getLogger(__name__)
 
 # User-facing operational notices are bilingual: Chinese line first, then an
@@ -64,6 +66,38 @@ SENTENCE_USAGE_NOTICE = (
 DICT_MISS_FLAG = (
     "(词典外,机器直译)\n"
     "(Not in official dictionary; machine-translated)"
+)
+# /public toggles whether non-admin members of a group can use the translate
+# commands. Default is admin-only. The /public command itself is always
+# admin-only (never bypassed by public mode), so a public group cannot have
+# its switch flipped by a non-admin.
+PUBLIC_USAGE_NOTICE = (
+    "用法：/public on | off | status（仅群管理员）\n"
+    "Usage: /public on | off | status (group admins only)"
+)
+PUBLIC_ENABLED_NOTICE = (
+    "已对所有群成员开放翻译命令（/tr 等）\n"
+    "Translate commands (/tr etc.) are now open to all members in this chat."
+)
+PUBLIC_DISABLED_NOTICE = (
+    "翻译命令已恢复为仅群管理员可用\n"
+    "Translate commands restricted to group admins again."
+)
+PUBLIC_STATUS_ON = (
+    "当前状态：公开（所有群成员可用 /tr 等）\n"
+    "Current state: public (all members may use /tr etc.)."
+)
+PUBLIC_STATUS_OFF = (
+    "当前状态：仅群管理员可用\n"
+    "Current state: admins-only."
+)
+PUBLIC_ONLY_GROUPS_NOTICE = (
+    "/public 仅在群里有效\n"
+    "/public only works in groups."
+)
+PUBLIC_REJECT_NOTICE = (
+    "仅群管理员可用 /public\n"
+    "Only group admins can use /public"
 )
 LLM_INPUT_CHAR_LIMIT = 1000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
@@ -283,12 +317,15 @@ def create_application(
     token: str,
     db_path: str | Path,
     config: BotConfig | None = None,
+    chat_settings: ChatSettings | None = None,
 ) -> Application:
     # Imported here because channel.py imports the shared bot_data keys and
     # the rate-limit helper from this module (circular at import time).
     from .channel import channel_post_handler
 
     config = config or BotConfig.from_env()
+    if chat_settings is None:
+        chat_settings = ChatSettings(_chat_settings_path_from_env(db_path))
     app = ApplicationBuilder().token(token).build()
     app.bot_data[SERVICE_KEY] = TermService(db_path)
     app.bot_data[TRANSLATOR_KEY] = SentenceTranslator(db_path)
@@ -299,9 +336,11 @@ def create_application(
     app.bot_data[CHANNEL_REPLY_INDEX_KEY] = ChannelReplyIndex(
         ttl_seconds=config.channel_max_age_seconds
     )
+    app.bot_data[CHAT_SETTINGS_KEY] = chat_settings
     app.add_handler(CommandHandler(["tr", "term"], term_command))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
     app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("public", public_command))
     app.add_handler(
         MessageHandler(
             filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL,
@@ -309,6 +348,15 @@ def create_application(
         )
     )
     return app
+
+
+def _chat_settings_path_from_env(db_path: str | Path) -> Path:
+    """Settings file lives alongside the DB by default so the container's
+    bind-mounted data/ volume preserves it across image rebuilds."""
+    explicit = os.getenv("WUWATERM_SETTINGS_PATH", "").strip()
+    if explicit:
+        return Path(explicit)
+    return Path(db_path).resolve().parent / "chat_settings.json"
 
 
 def run_bot(db_path: str | Path, token: str | None = None) -> None:
@@ -361,6 +409,48 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
     await reply_to_user(update, translate_query(service, translator, text))
+
+
+async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only switch: open translate commands to all group members, or
+    restrict them back to admins. Works in groups only.
+
+    Subcommands: on | off | status (empty = status). The /public command
+    itself ALWAYS requires admin — public mode does not unlock it, so a
+    non-admin can never flip it back off.
+    """
+    message = update.effective_message
+    if not message:
+        return
+    if not is_group_chat(update):
+        await reply_to_user(update, PUBLIC_ONLY_GROUPS_NOTICE)
+        return
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    if not await _is_group_admin(update, context):
+        # Re-use the reject limiter so non-admin /public spam can't flood the
+        # chat or starve translation budget; respect the silent override.
+        if not config.tr_reject_silent and _consume_reject_limit(update, context):
+            await reply_to_user(update, PUBLIC_REJECT_NOTICE)
+        return
+    if not _consume_rate_limit(update, context):
+        await reply_to_user(update, THROTTLE_NOTICE)
+        return
+    chat = update.effective_chat
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    arg = context.args[0].strip().lower() if context.args else ""
+    if arg in {"on", "open", "enable"}:
+        settings.set_public(chat.id, True)
+        await reply_to_user(update, PUBLIC_ENABLED_NOTICE)
+    elif arg in {"off", "close", "disable"}:
+        settings.set_public(chat.id, False)
+        await reply_to_user(update, PUBLIC_DISABLED_NOTICE)
+    elif arg in {"", "status"}:
+        await reply_to_user(
+            update,
+            PUBLIC_STATUS_ON if settings.is_public(chat.id) else PUBLIC_STATUS_OFF,
+        )
+    else:
+        await reply_to_user(update, PUBLIC_USAGE_NOTICE)
 
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,9 +561,14 @@ async def _is_authorized_sender(
     )
 
 
-async def _is_authorized_group_sender(
+async def _is_group_admin(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
+    """Pure admin check (no public-mode bypass).
+
+    Used by /public itself — public mode must never let a non-admin flip
+    the switch back off. Also the base layer of _is_authorized_group_sender.
+    """
     chat = update.effective_chat
     message = update.effective_message
     sender_chat = getattr(message, "sender_chat", None)
@@ -496,6 +591,23 @@ async def _is_authorized_group_sender(
     verdict = getattr(member, "status", None) in ADMIN_ALLOWED_STATUSES
     cache.put(chat.id, user.id, verdict)
     return verdict
+
+
+async def _is_authorized_group_sender(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Authorization for translate commands in a group.
+
+    Admin always allowed. Non-admin allowed only when an admin has flipped
+    the chat to public mode via /public on.
+    """
+    if await _is_group_admin(update, context):
+        return True
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    return settings.is_public(chat.id)
 
 
 def _consume_rate_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
