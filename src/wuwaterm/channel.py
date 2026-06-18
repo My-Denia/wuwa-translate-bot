@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 
 from .bot import (
     CHANNEL_REPLY_INDEX_KEY,
+    CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     SERVICE_KEY,
     TRANSLATOR_KEY,
@@ -22,6 +23,7 @@ from .bot import (
 from .lookup import TermService
 from .normalize import count_cjk, count_latin
 from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
+from .settings import ChatSettings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -167,6 +169,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     chat_id = chat.id if chat else None
     chat_type = chat.type if chat else "unknown"
+
+    # Authorization gate (fail-closed): only translate for groups on the
+    # allowlist. Slash commands are gated in _is_authorized_group_sender; this
+    # mirrors it for the auto-forward path so an unauthorized or revoked group
+    # the bot has not yet left (e.g. a leave_chat that failed) cannot keep
+    # getting its linked-channel posts translated and burn LLM budget.
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    if chat_id is None or not settings.is_allowed(chat_id):
+        LOGGER.info(
+            "channel autotranslate skipped: chat not authorized chat_id=%s",
+            chat_id,
+        )
+        return
 
     # Edit dedup: an edited post (edit_date set) updates the reply already
     # sent for it. With no tracked reply there is nothing to update, so skip
