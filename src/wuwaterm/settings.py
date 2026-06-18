@@ -120,24 +120,31 @@ class ChatSettings:
             return True
 
     def disallow(self, chat_id: int) -> bool:
-        """Remove a chat from the allowlist; returns True iff it persisted.
+        """Remove a chat from the allowlist and persist; returns True iff the
+        in-memory set changed.
 
         Asymmetric with allow() on a write failure, by design. allow() rolls
         back so an un-persisted authorization never grants service (fail-closed
         for GRANTING). disallow() does the opposite: it KEEPS the in-memory
-        removal even when the disk write fails (fail-closed for REVOKING). A
-        /revoke whose save failed therefore still denies service this session —
-        is_allowed() returns False — instead of silently re-allowing the chat so
-        a re-add or a restart could restore it. The write failure still
-        propagates (the caller surfaces it and asks the owner to re-run /revoke),
-        and the on-disk file self-heals to match on the next successful save.
+        removal even when the disk write fails (fail-closed for REVOKING), so a
+        /revoke whose save failed still denies service this session — is_allowed()
+        returns False — instead of silently re-allowing the chat so a re-add or a
+        restart could restore it.
+
+        It ALWAYS attempts the save, even when the chat is already absent from
+        the in-memory set. That is what lets the owner retry: after a failed save
+        the chat is gone from memory but still authorized on disk, so a re-run
+        /revoke must rewrite the file rather than short-circuit as a no-op and
+        leave the stale on-disk authorization in place. The write failure still
+        propagates so the caller can surface it.
         """
         with self._lock:
-            if chat_id not in self._allowed:
-                return False
+            changed = chat_id in self._allowed
             self._allowed.discard(chat_id)
-            self._save()  # may raise; intentionally NOT rolled back (deny wins)
-            return True
+            # Always persist (even on a no-op removal) so a /revoke retry after a
+            # failed save rewrites the stale file; not rolled back (deny wins).
+            self._save()
+            return changed
 
     def allowed_chats(self) -> list[int]:
         with self._lock:

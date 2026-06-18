@@ -207,8 +207,13 @@ post to Chinese. No command is involved.
 - Trigger (hard boundary): only automatic forwards whose sender is a
   channel (`is_automatic_forward` + channel `sender_chat`). Ordinary member
   messages, manual forwards of channel posts, and anonymous-admin posts
-  never trigger it. No authorization gate applies: posting rights in the
-  linked channel are already owner-controlled.
+  never trigger it.
+- Authorization: the discussion group must be on the same authorization
+  allowlist as the slash commands. An unauthorized or revoked group — including
+  one the bot has not yet managed to leave (e.g. a `leave_chat` that failed) —
+  gets no auto-translations and burns no LLM budget. (Posting rights in the
+  linked channel are owner-controlled, but the allowlist is what bounds where
+  the bot will spend tokens.)
 - Direction by script: a post with enough Chinese (`WUWATERM_CHANNEL_MIN_CJK`,
   default 1) is translated to English; a post with no Chinese but enough Latin
   letters (`WUWATERM_CHANNEL_MIN_LATIN`, default 2) is translated to Chinese; a

@@ -160,6 +160,33 @@ def test_save_failure_keeps_disallow_removed(tmp_path: Path, monkeypatch):
     assert reloaded.is_allowed(-2001) is True
 
 
+def test_disallow_retry_after_failed_save_persists(tmp_path: Path, monkeypatch):
+    # After a failed-save disallow the chat is gone from memory but still on
+    # disk; a retry once storage recovers must REWRITE the file rather than
+    # short-circuit as a no-op and leave the stale on-disk authorization.
+    path = tmp_path / "chat_settings.json"
+    settings = ChatSettings(path)
+    settings.allow(-2001)
+
+    real_save = settings._save
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_save()
+
+    monkeypatch.setattr(settings, "_save", flaky)
+    with pytest.raises(OSError):
+        settings.disallow(-2001)  # first attempt: the write fails
+    assert settings.is_allowed(-2001) is False  # denied in memory...
+    assert ChatSettings(path).is_allowed(-2001) is True  # ...but disk still stale
+
+    settings.disallow(-2001)  # retry once storage recovers
+    assert ChatSettings(path).is_allowed(-2001) is False  # now durable on disk
+
+
 def test_public_and_allowlist_coexist_in_one_file(tmp_path: Path):
     path = tmp_path / "chat_settings.json"
     s = ChatSettings(path)

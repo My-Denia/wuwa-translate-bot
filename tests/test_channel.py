@@ -343,6 +343,21 @@ def test_throttle_is_shared_with_commands_and_skips_silently(monkeypatch, sample
     assert tr_message.replies == [(THROTTLE_NOTICE, None, 4050)]
 
 
+def test_channel_post_skipped_when_chat_not_allowlisted(monkeypatch, sample_db):
+    # Finding B: the linked-channel auto-translate path is also gated on the
+    # allowlist, so an unauthorized or revoked group (e.g. one where leave_chat
+    # failed) cannot keep getting posts translated and burning LLM budget.
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db, allowlist=())  # -2001 NOT allowlisted
+    update, message = channel_update(text=CN_TEXT, message_id=4600)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == []  # nothing translated/posted
+    assert calls == []  # zero LLM calls
+
+
 def test_budget_exhaustion_is_silent_with_one_clean_warning(
     monkeypatch, sample_db, caplog
 ):
