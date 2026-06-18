@@ -120,13 +120,24 @@ def fake_member_update(
     new_status: str = "member",
     from_id: int | None = 11,
     title: str = "g",
+    old_is_member: bool | None = None,
+    new_is_member: bool | None = None,
 ):
-    """Build a my_chat_member update (the bot's OWN membership change)."""
+    """Build a my_chat_member update (the bot's OWN membership change).
+
+    old_is_member / new_is_member set the ChatMemberRestricted.is_member flag
+    when given (None = attribute absent, as for non-restricted statuses)."""
     chat = SimpleNamespace(id=chat_id, type=chat_type, title=title)
     from_user = SimpleNamespace(id=from_id) if from_id is not None else None
+    old_member = SimpleNamespace(status=old_status)
+    new_member = SimpleNamespace(status=new_status)
+    if old_is_member is not None:
+        old_member.is_member = old_is_member
+    if new_is_member is not None:
+        new_member.is_member = new_is_member
     cmu = SimpleNamespace(
-        old_chat_member=SimpleNamespace(status=old_status),
-        new_chat_member=SimpleNamespace(status=new_status),
+        old_chat_member=old_member,
+        new_chat_member=new_member,
         from_user=from_user,
         chat=chat,
     )
@@ -1547,6 +1558,74 @@ def test_owner_unset_leaves_unauthorized_group(sample_db):
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
 
 
+def test_left_to_restricted_nonmember_is_not_added(sample_db):
+    # left -> restricted(is_member=False): the bot is NOT actually in the chat,
+    # so this is not an "added" edge and the gate must not fire.
+    context = fake_context(sample_db, [])
+    update = fake_member_update(
+        chat_id=-2001,
+        from_id=42,
+        old_status="left",
+        new_status="restricted",
+        new_is_member=False,
+    )
+
+    asyncio.run(my_chat_member_handler(update, context))
+
+    assert context.bot.left_chats == []
+    assert context.bot.sent_messages == []
+
+
+def test_restricted_nonmember_to_member_is_added_and_gated(sample_db):
+    # restricted(is_member=False) -> member: the bot just BECAME a member, so a
+    # non-owner cannot use this transition to sneak the bot past the gate.
+    context = fake_context(sample_db, [])
+    update = fake_member_update(
+        chat_id=-2001,
+        from_id=42,
+        old_status="restricted",
+        old_is_member=False,
+        new_status="member",
+    )
+
+    asyncio.run(my_chat_member_handler(update, context))
+
+    assert context.bot.left_chats == [-2001]
+
+
+def test_restricted_member_to_admin_is_not_added(sample_db):
+    # restricted(is_member=True) -> administrator: already a member, not an add.
+    context = fake_context(sample_db, [])
+    update = fake_member_update(
+        chat_id=-2001,
+        from_id=42,
+        old_status="restricted",
+        old_is_member=True,
+        new_status="administrator",
+    )
+
+    asyncio.run(my_chat_member_handler(update, context))
+
+    assert context.bot.left_chats == []
+
+
+def test_owner_add_that_cannot_persist_leaves_fail_closed(monkeypatch, sample_db):
+    # If owner-add authorization cannot be written (disk full), fail closed:
+    # leave rather than stay in a chat we cannot remember authorizing.
+    context = fake_context(sample_db, [])
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+
+    def boom(chat_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "allow", boom)
+    update = fake_member_update(chat_id=-2001, from_id=11)  # owner adds
+
+    asyncio.run(my_chat_member_handler(update, context))
+
+    assert context.bot.left_chats == [-2001]
+
+
 # --- /authorize, /revoke (owner-only) ---
 
 
@@ -1631,3 +1710,23 @@ def test_revoke_by_id_in_private_leaves_target(sample_db):
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2002) is False
     assert context.bot.left_chats == [-2002]
     assert message.replies == [("已撤销并退出 / Revoked and left chat_id=-2002", None)]
+
+
+def test_revoke_leaves_even_if_confirmation_reply_fails(sample_db):
+    # A TelegramError from the confirmation reply must NOT abort the leave —
+    # otherwise a revoked group could keep being served.
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=905, user_id=11
+    )
+
+    async def _raise_reply(*args, **kwargs):
+        raise TelegramError("send failed")
+
+    message.reply_text = _raise_reply
+    context = fake_context(sample_db, [])
+    context.application.bot_data[CHAT_SETTINGS_KEY].allow(-2001)
+
+    asyncio.run(revoke_command(update, context))
+
+    assert context.bot.left_chats == [-2001]
+    assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False

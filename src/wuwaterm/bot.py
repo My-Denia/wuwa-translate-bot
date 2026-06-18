@@ -497,15 +497,19 @@ async def _persist_public(
         return False
 
 
-_ADDED_FROM_STATES = frozenset({ChatMember.LEFT, ChatMember.BANNED})
-_ADDED_TO_STATES = frozenset(
-    {
-        ChatMember.MEMBER,
-        ChatMember.ADMINISTRATOR,
-        ChatMember.OWNER,
-        ChatMember.RESTRICTED,
-    }
-)
+def _chat_member_is_in(member) -> bool:
+    """Whether a ChatMember object means the bot is actually IN the chat.
+
+    RESTRICTED can be is_member True (in the chat) or False (not in it), so it
+    must be classified by is_member rather than status alone; the other "in"
+    statuses imply membership and left/kicked imply non-membership.
+    """
+    status = getattr(member, "status", None)
+    if status in {ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
+        return True
+    if status == ChatMember.RESTRICTED:
+        return bool(getattr(member, "is_member", False))
+    return False
 
 
 def _is_owner(update: Update, config: BotConfig) -> bool:
@@ -519,18 +523,22 @@ def _is_owner(update: Update, config: BotConfig) -> bool:
 
 
 def _bot_added_to_chat(update: Update) -> bool:
-    """True only on the genuine 'added' edge (left/kicked -> joined).
+    """True only on the genuine 'added' edge: the bot went from not-a-member to
+    a-member.
 
-    Promotions, demotions, restrictions, and removals inside a chat the bot
-    already belongs to do NOT count — this is what protects an already-joined
-    authorized group from being auto-left on an unrelated status change.
+    Membership is computed with is_member (a RESTRICTED member can be a
+    non-member), so a restricted-non-member -> member transition counts as an
+    add and a left -> restricted-non-member transition does not. Promotions,
+    demotions, and removals inside a chat the bot already belongs to do NOT
+    count — this protects an already-joined authorized group from being
+    auto-left on an unrelated status change.
     """
     cmu = getattr(update, "my_chat_member", None)
     if cmu is None:
         return False
-    old = getattr(cmu.old_chat_member, "status", None)
-    new = getattr(cmu.new_chat_member, "status", None)
-    return old in _ADDED_FROM_STATES and new in _ADDED_TO_STATES
+    return not _chat_member_is_in(cmu.old_chat_member) and _chat_member_is_in(
+        cmu.new_chat_member
+    )
 
 
 async def _leave_chat_quietly(
@@ -542,6 +550,15 @@ async def _leave_chat_quietly(
         await context.bot.leave_chat(chat_id)
     except TelegramError as exc:
         LOGGER.warning("leave_chat failed chat_id=%s: %r", chat_id, exc)
+
+
+def _disallow_quietly(settings: ChatSettings, chat_id: int) -> None:
+    """disallow that never raises — /revoke must still leave the chat even if
+    the allowlist write fails."""
+    try:
+        settings.disallow(chat_id)
+    except OSError as exc:
+        LOGGER.warning("revoke: could not persist disallow chat_id=%s: %r", chat_id, exc)
 
 
 async def my_chat_member_handler(
@@ -564,7 +581,20 @@ async def my_chat_member_handler(
         and adder is not None
         and adder.id == config.owner_user_id
     ):
-        settings.allow(chat.id)
+        try:
+            settings.allow(chat.id)
+        except OSError as exc:
+            # Could not persist the authorization (disk full / read-only). Fail
+            # closed: leave rather than stay in a chat we cannot remember
+            # authorizing. The owner can re-add once the file is writable.
+            LOGGER.warning(
+                "owner-add authorization could not be persisted, leaving "
+                "chat_id=%s: %r",
+                chat.id,
+                exc,
+            )
+            await _leave_chat_quietly(context, chat.id)
+            return
         LOGGER.info(
             "added by owner; chat authorized chat_id=%s type=%s", chat.id, chat.type
         )
@@ -638,12 +668,16 @@ async def revoke_command(
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
-        settings.disallow(cid)
-        # Reply before leaving — the bot cannot post once it has left.
-        await reply_to_user(
-            update,
-            f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid}).",
-        )
+        _disallow_quietly(settings, cid)
+        # Best-effort reply BEFORE leaving (the bot cannot post once it leaves);
+        # the leave MUST still run even if the reply fails.
+        try:
+            await reply_to_user(
+                update,
+                f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid}).",
+            )
+        except TelegramError as exc:
+            LOGGER.warning("revoke confirmation reply failed chat_id=%s: %r", cid, exc)
         await _leave_chat_quietly(context, cid)
         return
     try:
@@ -651,7 +685,7 @@ async def revoke_command(
     except ValueError:
         await reply_to_user(update, REVOKE_USAGE)
         return
-    settings.disallow(target)
+    _disallow_quietly(settings, target)
     await _leave_chat_quietly(context, target)
     await reply_to_user(update, f"已撤销并退出 / Revoked and left chat_id={target}")
 
