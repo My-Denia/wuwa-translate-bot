@@ -141,6 +141,33 @@ admin (see that section).
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 1000 characters.
 
+### Group Authorization / auto-leave (`/authorize`, `/revoke`)
+
+The bot only stays in groups the owner has authorized. When it is added to a
+chat that is not on the allowlist, it posts a short bilingual notice and then
+leaves automatically — this keeps a public bot from being pulled into arbitrary
+groups and abused.
+
+- The owner adding the bot to a group auto-authorizes that group (its id goes on
+  the allowlist), so the owner can drop the bot into their own groups with no
+  extra step.
+- `/authorize` (owner only) — in a group, authorizes the current chat; in
+  private chat, `/authorize <chat_id>` authorizes by id and `/authorize list`
+  shows the allowlist.
+- `/revoke` (owner only) — removes a chat from the allowlist (current chat in a
+  group, or `/revoke <chat_id>` in private).
+- Only the genuine "added" event triggers the leave. A promotion, demotion, or
+  any status change inside a group the bot already belongs to never makes it
+  leave, so an existing authorized group is safe.
+- Requires `OWNER_USER_ID`. With it unset (fail-closed) the bot is not
+  authorized to stay in any newly-added group.
+- The allowlist is persisted in the same file as the `/public` state
+  (`WUWATERM_SETTINGS_PATH`).
+
+> First deploy into an existing group: the bot is already a member there, so it
+> does not auto-leave (no "added" event fires). Run `/authorize` once inside
+> that group to add it to the allowlist permanently.
+
 ### Opening a Group to Non-Admins (`/public`)
 
 Admins can open translate commands to everyone in a specific group with

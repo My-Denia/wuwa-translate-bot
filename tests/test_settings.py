@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from wuwaterm.settings import ChatSettings
 
 
@@ -58,7 +60,7 @@ def test_corrupt_file_does_not_crash_loader(tmp_path: Path):
     # Writing again rewrites the file cleanly (overwrites the garbage).
     settings.set_public(-2001, True)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload == {"public": {"-2001": True}}
+    assert payload == {"public": {"-2001": True}, "allowed": []}
 
 
 def test_atomic_write_does_not_leave_partial_file(tmp_path: Path):
@@ -70,7 +72,7 @@ def test_atomic_write_does_not_leave_partial_file(tmp_path: Path):
     siblings = [p.name for p in tmp_path.iterdir()]
     assert siblings == ["chat_settings.json"]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload == {"public": {"-2001": True}}
+    assert payload == {"public": {"-2001": True}, "allowed": []}
 
 
 def test_independent_chats_have_independent_state(tmp_path: Path):
@@ -81,3 +83,69 @@ def test_independent_chats_have_independent_state(tmp_path: Path):
     assert settings.is_public(-2001) is True
     assert settings.is_public(-2002) is False
     assert settings.is_public(-2003) is False  # untouched chat defaults to closed
+
+
+def test_save_failure_rolls_back_public(tmp_path: Path, monkeypatch):
+    settings = ChatSettings(tmp_path / "chat_settings.json")
+
+    def boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "_save", boom)
+    with pytest.raises(OSError):
+        settings.set_public(-2001, True)
+    # In-memory state must match the (unwritten) disk: still at the default.
+    assert settings.is_public(-2001) is False
+
+
+def test_allowlist_round_trips_and_persists(tmp_path: Path):
+    path = tmp_path / "chat_settings.json"
+    settings = ChatSettings(path)
+    assert settings.is_allowed(-2001) is False
+    assert settings.allow(-2001) is True
+    assert settings.is_allowed(-2001) is True
+    assert settings.allow(-2001) is False  # idempotent, no change
+
+    reloaded = ChatSettings(path)
+    assert reloaded.is_allowed(-2001) is True
+    assert reloaded.is_allowed(-2002) is False
+    assert reloaded.allowed_chats() == [-2001]
+
+
+def test_disallow_removes_from_allowlist(tmp_path: Path):
+    path = tmp_path / "chat_settings.json"
+    a = ChatSettings(path)
+    a.allow(-2001)
+    a.allow(-2002)
+    assert a.disallow(-2001) is True
+    assert a.disallow(-2001) is False  # already gone
+
+    b = ChatSettings(path)
+    assert b.is_allowed(-2001) is False
+    assert b.is_allowed(-2002) is True
+    assert b.allowed_chats() == [-2002]
+
+
+def test_save_failure_rolls_back_allowlist(tmp_path: Path, monkeypatch):
+    settings = ChatSettings(tmp_path / "chat_settings.json")
+
+    def boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "_save", boom)
+    with pytest.raises(OSError):
+        settings.allow(-2001)
+    assert settings.is_allowed(-2001) is False
+
+
+def test_public_and_allowlist_coexist_in_one_file(tmp_path: Path):
+    path = tmp_path / "chat_settings.json"
+    s = ChatSettings(path)
+    s.set_public(-2001, True)
+    s.allow(-3001)
+
+    reloaded = ChatSettings(path)
+    assert reloaded.is_public(-2001) is True
+    assert reloaded.is_allowed(-3001) is True
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {"public": {"-2001": True}, "allowed": [-3001]}

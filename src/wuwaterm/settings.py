@@ -22,12 +22,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ChatSettings:
-    """Per-chat is_public flag with atomic JSON persistence."""
+    """Per-chat is_public flags + a group authorization allowlist, atomically persisted."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._lock = Lock()
         self._public: dict[int, bool] = {}
+        self._allowed: set[int] = set()
         self._load()
 
     def _load(self) -> None:
@@ -38,21 +39,32 @@ class ChatSettings:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
             # A corrupt or unreadable settings file must NOT crash the bot:
-            # the bot keeps running with every chat at the default (closed).
+            # the bot keeps running with every chat at its default.
             LOGGER.warning("chat settings unreadable, starting empty: %r", exc)
             return
-        raw = data.get("public") if isinstance(data, dict) else None
-        if not isinstance(raw, dict):
+        if not isinstance(data, dict):
             return
-        for key, value in raw.items():
-            try:
-                self._public[int(key)] = bool(value)
-            except (TypeError, ValueError):
-                continue
+        public = data.get("public")
+        if isinstance(public, dict):
+            for key, value in public.items():
+                try:
+                    self._public[int(key)] = bool(value)
+                except (TypeError, ValueError):
+                    continue
+        allowed = data.get("allowed")
+        if isinstance(allowed, list):
+            for item in allowed:
+                try:
+                    self._allowed.add(int(item))
+                except (TypeError, ValueError):
+                    continue
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"public": {str(k): v for k, v in self._public.items()}}
+        payload = {
+            "public": {str(k): v for k, v in self._public.items()},
+            "allowed": sorted(self._allowed),
+        }
         # Temp file in the same directory so os.replace is atomic on the
         # same filesystem; a half-written file can never become path.
         fd, tmp = tempfile.mkstemp(prefix=".chat_settings.", dir=self.path.parent)
@@ -78,8 +90,48 @@ class ChatSettings:
         admin running /public on twice in a row.
         """
         with self._lock:
-            if self._public.get(chat_id, False) == value:
+            old = self._public.get(chat_id, False)
+            if old == value:
                 return False
             self._public[chat_id] = value
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                self._public[chat_id] = old  # keep memory == disk on write failure
+                raise
             return True
+
+    def is_allowed(self, chat_id: int) -> bool:
+        """True iff the chat is on the group authorization allowlist."""
+        with self._lock:
+            return chat_id in self._allowed
+
+    def allow(self, chat_id: int) -> bool:
+        """Add a chat to the allowlist; returns True iff it changed."""
+        with self._lock:
+            if chat_id in self._allowed:
+                return False
+            self._allowed.add(chat_id)
+            try:
+                self._save()
+            except Exception:
+                self._allowed.discard(chat_id)
+                raise
+            return True
+
+    def disallow(self, chat_id: int) -> bool:
+        """Remove a chat from the allowlist; returns True iff it changed."""
+        with self._lock:
+            if chat_id not in self._allowed:
+                return False
+            self._allowed.discard(chat_id)
+            try:
+                self._save()
+            except Exception:
+                self._allowed.add(chat_id)
+                raise
+            return True
+
+    def allowed_chats(self) -> list[int]:
+        with self._lock:
+            return sorted(self._allowed)
