@@ -13,10 +13,18 @@ from telegram.ext import CommandHandler, MessageHandler
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
+    CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
     DEFAULT_PRIVATE_TR_REJECT_TEXT,
     LLM_INPUT_CHAR_LIMIT,
+    PUBLIC_DISABLED_NOTICE,
+    PUBLIC_ENABLED_NOTICE,
+    PUBLIC_ONLY_GROUPS_NOTICE,
+    PUBLIC_REJECT_NOTICE,
+    PUBLIC_STATUS_OFF,
+    PUBLIC_STATUS_ON,
+    PUBLIC_USAGE_NOTICE,
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
     SENTENCE_USAGE_NOTICE,
@@ -29,6 +37,7 @@ from wuwaterm.bot import (
     PerChatRateLimiter,
     about_command,
     create_application,
+    public_command,
     sentence_command,
     term_command,
 )
@@ -38,6 +47,7 @@ from wuwaterm.sentence import (
     SentenceTranslator,
     _llm_error_from_response,
 )
+from wuwaterm.settings import ChatSettings
 
 
 class FakeMessage:
@@ -93,9 +103,13 @@ def fake_context(
     member_status="administrator",
     member_overrides=None,
     config=None,
+    chat_settings=None,
 ):
     config = config or BotConfig(rate_limit_per_minute=limit, owner_user_id=11)
     bot = FakeBot(default_status=member_status, overrides=member_overrides)
+    if chat_settings is None:
+        # Each test gets its own settings file under sample_db's per-test tmp dir.
+        chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
     return SimpleNamespace(
         args=args,
         bot=bot,
@@ -107,6 +121,7 @@ def fake_context(
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 ADMIN_CACHE_KEY: AdminStatusCache(),
+                CHAT_SETTINGS_KEY: chat_settings,
             }
         ),
     )
@@ -386,16 +401,21 @@ def test_commandhandler_accepts_bot_username(sample_db):
 
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
-    """Pin evolution (deliberate): three command handlers (/tr+/term,
-    /sentence+/sent, /about) plus exactly one passive listener whose filter is
-    the linked-channel hard boundary."""
-    app = create_application("123:ABC", sample_db, config=BotConfig())
+    """Pin evolution (deliberate): four command handlers (/tr+/term,
+    /sentence+/sent, /about, /public) plus exactly one passive listener whose
+    filter is the linked-channel hard boundary."""
+    app = create_application(
+        "123:ABC",
+        sample_db,
+        config=BotConfig(),
+        chat_settings=ChatSettings(sample_db.parent / "chat_settings.json"),
+    )
     handlers = [handler for group in app.handlers.values() for handler in group]
     command_handlers = [h for h in handlers if isinstance(h, CommandHandler)]
     message_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
 
-    assert len(handlers) == 4
-    assert len(command_handlers) == 3
+    assert len(handlers) == 5
+    assert len(command_handlers) == 4
     assert len(message_handlers) == 1
     # Repr verified against the installed PTB 22.7 in this venv.
     assert str(message_handlers[0].filters) == (
@@ -1126,3 +1146,185 @@ def test_about_contains_full_commit_from_db(sample_db):
     reply = message.replies[0][0]
     assert "e9234ffe094b2d944d16b222d31102e8ab32d954" in reply
     assert re.search(r"[0-9a-f]{40}", reply) is not None
+
+
+# --- /public toggle ---
+
+
+def test_public_on_enables_and_persists_for_admin(sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=600
+    )
+    context = fake_context(sample_db, ["on"], member_status="administrator")
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    assert settings.is_public(-2001) is False  # default
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == [(PUBLIC_ENABLED_NOTICE, 600)]
+    assert settings.is_public(-2001) is True
+
+
+def test_public_off_disables_for_admin(sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=601
+    )
+    context = fake_context(sample_db, ["off"], member_status="administrator")
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == [(PUBLIC_DISABLED_NOTICE, 601)]
+    assert (
+        context.application.bot_data[CHAT_SETTINGS_KEY].is_public(-2001) is False
+    )
+
+
+def test_public_status_reports_current_state(sample_db):
+    update_off, msg_off = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=602
+    )
+    context = fake_context(sample_db, [], member_status="administrator")
+    asyncio.run(public_command(update_off, context))
+    assert msg_off.replies == [(PUBLIC_STATUS_OFF, 602)]
+
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
+    update_on, msg_on = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=603
+    )
+    context.args = ["status"]
+    asyncio.run(public_command(update_on, context))
+    assert msg_on.replies == [(PUBLIC_STATUS_ON, 603)]
+
+
+def test_public_bad_arg_returns_usage_notice(sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=604
+    )
+    context = fake_context(sample_db, ["maybe"], member_status="administrator")
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == [(PUBLIC_USAGE_NOTICE, 604)]
+    # Bad arg must not silently flip the state.
+    assert (
+        context.application.bot_data[CHAT_SETTINGS_KEY].is_public(-2001) is False
+    )
+
+
+def test_public_non_admin_rejected_with_bilingual_notice(sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=605, user_id=42
+    )
+    context = fake_context(sample_db, ["on"], member_status="member")
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == [(PUBLIC_REJECT_NOTICE, 605)]
+    # Non-admin attempt must not flip the state.
+    assert (
+        context.application.bot_data[CHAT_SETTINGS_KEY].is_public(-2001) is False
+    )
+
+
+def test_public_non_admin_silent_when_reject_silent(sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=606, user_id=42
+    )
+    context = fake_context(
+        sample_db,
+        ["on"],
+        member_status="member",
+        config=BotConfig(
+            rate_limit_per_minute=10, owner_user_id=11, tr_reject_silent=True
+        ),
+    )
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == []
+    assert (
+        context.application.bot_data[CHAT_SETTINGS_KEY].is_public(-2001) is False
+    )
+
+
+def test_public_in_private_chat_returns_groups_only_notice(sample_db):
+    update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
+    context = fake_context(sample_db, ["on"])
+
+    asyncio.run(public_command(update, context))
+
+    assert message.replies == [(PUBLIC_ONLY_GROUPS_NOTICE, None)]
+
+
+def test_public_mode_allows_non_admin_translate_commands(sample_db):
+    # An admin flips the chat to public.
+    admin_update, _admin_msg = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=610
+    )
+    context = fake_context(sample_db, ["on"], member_status="administrator")
+    asyncio.run(public_command(admin_update, context))
+
+    # Now a non-admin's /tr works (still throttled, but not rejected).
+    context.args = ["声骸"]
+    member_update, member_msg = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=611, user_id=42
+    )
+    # Override the bot to return 'member' for this user; admin status is cached
+    # per (chat, user), so the new user is a fresh lookup and returns 'member'
+    # from the default. To make the cache return 'member' for user 42, swap the
+    # FakeBot default.
+    context.bot.default_status = "member"
+    # Clear admin cache so the new user isn't poisoned by the prior admin lookup.
+    context.application.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
+
+    asyncio.run(term_command(member_update, context))
+
+    assert member_msg.replies == [("Echo", 611)]
+
+
+def test_public_command_is_admin_only_even_when_public_mode_is_on(sample_db):
+    # Public mode must NOT let a non-admin flip the switch back off — otherwise
+    # any group member could disable a public chat. This is the central
+    # invariant of the /public design.
+    context = fake_context(sample_db, ["off"], member_status="member")
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
+
+    member_update, member_msg = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=620, user_id=42
+    )
+
+    asyncio.run(public_command(member_update, context))
+
+    assert member_msg.replies == [(PUBLIC_REJECT_NOTICE, 620)]
+    # The chat must still be public.
+    assert (
+        context.application.bot_data[CHAT_SETTINGS_KEY].is_public(-2001) is True
+    )
+
+
+def test_public_off_in_one_chat_does_not_affect_another(sample_db):
+    context = fake_context(sample_db, ["on"], member_status="administrator")
+    chat_a, chat_b = -2001, -2002
+
+    update_a, _ = fake_update(
+        chat_id=chat_a, chat_type="supergroup", message_id=700
+    )
+    asyncio.run(public_command(update_a, context))
+
+    context.args = ["on"]
+    update_b, _ = fake_update(
+        chat_id=chat_b, chat_type="supergroup", message_id=701
+    )
+    asyncio.run(public_command(update_b, context))
+
+    # Turning chat A off must leave chat B public.
+    context.args = ["off"]
+    update_a_off, _ = fake_update(
+        chat_id=chat_a, chat_type="supergroup", message_id=702
+    )
+    asyncio.run(public_command(update_a_off, context))
+
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    assert settings.is_public(chat_a) is False
+    assert settings.is_public(chat_b) is True
