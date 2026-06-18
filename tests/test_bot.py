@@ -13,7 +13,6 @@ from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
-    AUTHORIZE_USAGE,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
@@ -29,7 +28,6 @@ from wuwaterm.bot import (
     PUBLIC_USAGE_NOTICE,
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
-    REVOKE_USAGE,
     SENTENCE_USAGE_NOTICE,
     SERVICE_KEY,
     TERM_USAGE_NOTICE,
