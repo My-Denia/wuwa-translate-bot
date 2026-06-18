@@ -100,7 +100,7 @@ PUBLIC_REJECT_NOTICE = (
     "仅群管理员可用 /public\n"
     "Only group admins can use /public"
 )
-PUBLIC_SAVE_FAILED_NOTICE = (
+SETTINGS_SAVE_FAILED_NOTICE = (
     "设置保存失败，请稍后再试（状态未更改）。\n"
     "Could not save the setting, please try again later (state unchanged)."
 )
@@ -493,7 +493,7 @@ async def _persist_public(
         return True
     except OSError as exc:
         LOGGER.warning("settings save failed on /public: %r", exc)
-        await reply_to_user(update, PUBLIC_SAVE_FAILED_NOTICE)
+        await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
         return False
 
 
@@ -552,13 +552,16 @@ async def _leave_chat_quietly(
         LOGGER.warning("leave_chat failed chat_id=%s: %r", chat_id, exc)
 
 
-def _disallow_quietly(settings: ChatSettings, chat_id: int) -> None:
-    """disallow that never raises — /revoke must still leave the chat even if
-    the allowlist write fails."""
+def _try_persist(action, chat_id: int) -> bool:
+    """Run a settings mutation that may raise on a write failure; return whether
+    it persisted. ChatSettings rolls back its in-memory state on failure, so a
+    False result means nothing changed and the caller should surface it."""
     try:
-        settings.disallow(chat_id)
+        action(chat_id)
+        return True
     except OSError as exc:
-        LOGGER.warning("revoke: could not persist disallow chat_id=%s: %r", chat_id, exc)
+        LOGGER.warning("settings write failed chat_id=%s: %r", chat_id, exc)
+        return False
 
 
 async def my_chat_member_handler(
@@ -581,17 +584,13 @@ async def my_chat_member_handler(
         and adder is not None
         and adder.id == config.owner_user_id
     ):
-        try:
-            settings.allow(chat.id)
-        except OSError as exc:
+        if not _try_persist(settings.allow, chat.id):
             # Could not persist the authorization (disk full / read-only). Fail
             # closed: leave rather than stay in a chat we cannot remember
             # authorizing. The owner can re-add once the file is writable.
             LOGGER.warning(
-                "owner-add authorization could not be persisted, leaving "
-                "chat_id=%s: %r",
+                "owner-add authorization could not be persisted, leaving chat_id=%s",
                 chat.id,
-                exc,
             )
             await _leave_chat_quietly(context, chat.id)
             return
@@ -631,7 +630,9 @@ async def authorize_command(
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
-        settings.allow(cid)
+        if not _try_persist(settings.allow, cid):
+            await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
+            return
         await reply_to_user(
             update,
             f"已授权本群（chat_id={cid}）\nThis chat is authorized (chat_id={cid}).",
@@ -647,7 +648,9 @@ async def authorize_command(
     except ValueError:
         await reply_to_user(update, AUTHORIZE_USAGE)
         return
-    settings.allow(target)
+    if not _try_persist(settings.allow, target):
+        await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
+        return
     await reply_to_user(update, f"已授权 / Authorized chat_id={target}")
 
 
@@ -668,14 +671,16 @@ async def revoke_command(
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
-        _disallow_quietly(settings, cid)
+        persisted = _try_persist(settings.disallow, cid)
+        note = (
+            f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid})."
+            if persisted
+            else f"未能保存撤销，仍退出本群（chat_id={cid}）；请稍后重试 /revoke。\nCouldn't persist the de-authorization; leaving anyway (chat_id={cid}) — please re-run /revoke later."
+        )
         # Best-effort reply BEFORE leaving (the bot cannot post once it leaves);
         # the leave MUST still run even if the reply fails.
         try:
-            await reply_to_user(
-                update,
-                f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid}).",
-            )
+            await reply_to_user(update, note)
         except TelegramError as exc:
             LOGGER.warning("revoke confirmation reply failed chat_id=%s: %r", cid, exc)
         await _leave_chat_quietly(context, cid)
@@ -685,9 +690,14 @@ async def revoke_command(
     except ValueError:
         await reply_to_user(update, REVOKE_USAGE)
         return
-    _disallow_quietly(settings, target)
+    persisted = _try_persist(settings.disallow, target)
     await _leave_chat_quietly(context, target)
-    await reply_to_user(update, f"已撤销并退出 / Revoked and left chat_id={target}")
+    note = (
+        f"已撤销并退出 / Revoked and left chat_id={target}"
+        if persisted
+        else f"已退出但未能保存撤销，请稍后重试 / Left, but couldn't persist; re-run /revoke later (chat_id={target})."
+    )
+    await reply_to_user(update, note)
 
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -843,14 +853,20 @@ async def _is_authorized_group_sender(
 ) -> bool:
     """Authorization for translate commands in a group.
 
-    Admin always allowed. Non-admin allowed only when an admin has flipped
-    the chat to public mode via /public on.
+    The chat must be on the allowlist at all: the bot only serves groups it is
+    authorized for, so any chat it should have left (an unauthorized add, a
+    /revoke, or a leave that failed) stops being served even before the bot is
+    actually removed. Within an allowlisted chat: admins always; non-admins only
+    when an admin has flipped /public on.
     """
-    if await _is_group_admin(update, context):
-        return True
     chat = update.effective_chat
     if chat is None:
         return False
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    if not settings.is_allowed(chat.id):
+        return False
+    if await _is_group_admin(update, context):
+        return True
     # Public mode opens the door only for ORDINARY member messages — never for
     # a foreign sender_chat identity (a channel posting as itself, or a
     # linked-channel auto-forward whose text happens to start with /tr). The
@@ -861,7 +877,6 @@ async def _is_authorized_group_sender(
         or getattr(message, "sender_chat", None) is not None
     ):
         return False
-    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     return settings.is_public(chat.id)
 
 

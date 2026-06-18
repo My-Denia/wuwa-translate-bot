@@ -120,16 +120,23 @@ class ChatSettings:
             return True
 
     def disallow(self, chat_id: int) -> bool:
-        """Remove a chat from the allowlist; returns True iff it changed."""
+        """Remove a chat from the allowlist; returns True iff it persisted.
+
+        Asymmetric with allow() on a write failure, by design. allow() rolls
+        back so an un-persisted authorization never grants service (fail-closed
+        for GRANTING). disallow() does the opposite: it KEEPS the in-memory
+        removal even when the disk write fails (fail-closed for REVOKING). A
+        /revoke whose save failed therefore still denies service this session —
+        is_allowed() returns False — instead of silently re-allowing the chat so
+        a re-add or a restart could restore it. The write failure still
+        propagates (the caller surfaces it and asks the owner to re-run /revoke),
+        and the on-disk file self-heals to match on the next successful save.
+        """
         with self._lock:
             if chat_id not in self._allowed:
                 return False
             self._allowed.discard(chat_id)
-            try:
-                self._save()
-            except Exception:
-                self._allowed.add(chat_id)
-                raise
+            self._save()  # may raise; intentionally NOT rolled back (deny wins)
             return True
 
     def allowed_chats(self) -> list[int]:

@@ -119,11 +119,14 @@ those channel auto-forwards at all requires the bot to be a discussion-group
 admin (see that section).
 
 - All translate commands — `/tr`, `/term`, `/sentence`, `/sent` — share one
-  authorization gate. By default they are admin-only in groups: each call
-  resolves the sender via `getChatMember`, and only `creator`/`administrator`
-  may use them. Anonymous group admins (posting as the group itself) are
-  allowed. Membership verdicts are cached about 5 minutes per (chat, user).
-  An admin may open a chat to all members with `/public on` (see below).
+  authorization gate. In a group the chat must first be on the authorization
+  allowlist (see below); commands in a non-authorized group are rejected
+  outright, even for admins and even in public mode. Within an authorized group
+  they are admin-only by default: each call resolves the sender via
+  `getChatMember`, and only `creator`/`administrator` may use them. Anonymous
+  group admins (posting as the group itself) are allowed. Membership verdicts
+  are cached about 5 minutes per (chat, user). An admin may open an authorized
+  chat to all members with `/public on` (see below).
 - Unauthorized callers get a short bilingual reply (Chinese line then
   English), default `仅群管理员可用 /tr` then `Only group admins can use /tr`;
   the wording is configurable, and a config flag switches to silent ignore
@@ -146,7 +149,10 @@ admin (see that section).
 The bot only stays in groups the owner has authorized. When it is added to a
 chat that is not on the allowlist, it posts a short bilingual notice and then
 leaves automatically — this keeps a public bot from being pulled into arbitrary
-groups and abused.
+groups and abused. The allowlist is also the serving gate: translate commands
+only run in a group that is on it, so even if the auto-leave or the
+persisted-write fails, an unauthorized group still gets no translations
+(fail-closed).
 
 - The owner adding the bot to a group auto-authorizes that group (its id goes on
   the allowlist), so the owner can drop the bot into their own groups with no
@@ -165,8 +171,11 @@ groups and abused.
   (`WUWATERM_SETTINGS_PATH`).
 
 > First deploy into an existing group: the bot is already a member there, so it
-> does not auto-leave (no "added" event fires). Run `/authorize` once inside
-> that group to add it to the allowlist permanently.
+> does not auto-leave (no "added" event fires) — but because serving is gated on
+> the allowlist, `/tr` and the other commands will NOT respond there until the
+> group is authorized. Run `/authorize` once inside that group (or
+> `/authorize <chat_id>` from a private chat with the owner) to add it to the
+> allowlist; translations resume immediately.
 
 ### Opening a Group to Non-Admins (`/public`)
 
@@ -180,6 +189,8 @@ opt in).
 - `/public` or `/public status` — report the current state.
 - `/public` is ALWAYS admin-only — public mode never unlocks the toggle
   itself, so a non-admin can never flip a public chat back off or on.
+- Public mode only applies inside an authorized group; it never bypasses the
+  authorization allowlist (an un-authorized group serves no one, public or not).
 - Per-chat throttling and the 1000-char LLM cap still apply.
 - State is persisted to `WUWATERM_SETTINGS_PATH` (default
   `<db parent>/chat_settings.json`); on the supported Docker layout this lives

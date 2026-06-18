@@ -138,6 +138,28 @@ def test_save_failure_rolls_back_allowlist(tmp_path: Path, monkeypatch):
     assert settings.is_allowed(-2001) is False
 
 
+def test_save_failure_keeps_disallow_removed(tmp_path: Path, monkeypatch):
+    # disallow is fail-closed: a write failure must NOT roll the removal back,
+    # so a /revoke whose save fails still denies service for this session.
+    path = tmp_path / "chat_settings.json"
+    settings = ChatSettings(path)
+    settings.allow(-2001)
+    assert settings.is_allowed(-2001) is True
+
+    def boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "_save", boom)
+    with pytest.raises(OSError):
+        settings.disallow(-2001)
+    # Removal is kept in memory (deny wins) even though the disk write failed.
+    assert settings.is_allowed(-2001) is False
+    # On-disk file is unchanged (still authorized) until a later successful save
+    # heals it — the durable revoke needs a retry the owner is told to make.
+    reloaded = ChatSettings(path)
+    assert reloaded.is_allowed(-2001) is True
+
+
 def test_public_and_allowlist_coexist_in_one_file(tmp_path: Path):
     path = tmp_path / "chat_settings.json"
     s = ChatSettings(path)

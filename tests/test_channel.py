@@ -13,6 +13,7 @@ from telegram.error import BadRequest
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
+    CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
@@ -33,6 +34,7 @@ from wuwaterm.channel import (
 )
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import SentenceTranslator, _llm_error_from_response
+from wuwaterm.settings import ChatSettings
 
 
 CN_TEXT = "今汐说声骸很强"
@@ -138,8 +140,11 @@ def command_update(*, chat_id: int = -2001, message_id: int = 4101, user_id: int
     return update, message
 
 
-def make_context(sample_db, *, config=None, args=(), bot=None):
+def make_context(sample_db, *, config=None, args=(), bot=None, allowlist=(-2001,)):
     config = config or BotConfig(rate_limit_per_minute=10, owner_user_id=11)
+    chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
+    for cid in allowlist:
+        chat_settings.allow(cid)
     return SimpleNamespace(
         args=list(args),
         bot=bot or FakeBot(),
@@ -154,6 +159,7 @@ def make_context(sample_db, *, config=None, args=(), bot=None):
                 CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(
                     ttl_seconds=config.channel_max_age_seconds
                 ),
+                CHAT_SETTINGS_KEY: chat_settings,
             }
         ),
     )

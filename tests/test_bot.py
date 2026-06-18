@@ -23,7 +23,7 @@ from wuwaterm.bot import (
     PUBLIC_ENABLED_NOTICE,
     PUBLIC_ONLY_GROUPS_NOTICE,
     PUBLIC_REJECT_NOTICE,
-    PUBLIC_SAVE_FAILED_NOTICE,
+    SETTINGS_SAVE_FAILED_NOTICE,
     PUBLIC_STATUS_OFF,
     PUBLIC_STATUS_ON,
     PUBLIC_USAGE_NOTICE,
@@ -158,12 +158,17 @@ def fake_context(
     member_overrides=None,
     config=None,
     chat_settings=None,
+    allowlist=(-2001, -2002, -2003),
 ):
     config = config or BotConfig(rate_limit_per_minute=limit, owner_user_id=11)
     bot = FakeBot(default_status=member_status, overrides=member_overrides)
     if chat_settings is None:
         # Each test gets its own settings file under sample_db's per-test tmp dir.
+        # The bot only serves allowlisted groups, so the common test group ids are
+        # authorized by default; pass allowlist=() to exercise the unauthorized path.
         chat_settings = ChatSettings(sample_db.parent / "chat_settings.json")
+        for _cid in allowlist:
+            chat_settings.allow(_cid)
     return SimpleNamespace(
         args=args,
         bot=bot,
@@ -1020,6 +1025,7 @@ def test_member_lookup_failure_log_carries_no_chat_or_user_ids(caplog, sample_db
         sample_db,
         ["声骸"],
         member_overrides={(chat_id, user_id): TelegramError("temporarily unavailable")},
+        allowlist=(chat_id,),
     )
     update, message = fake_update(
         chat_id=chat_id, chat_type="supergroup", message_id=321, user_id=user_id
@@ -1477,7 +1483,7 @@ def test_public_on_replies_notice_when_save_fails(monkeypatch, sample_db):
     )
     asyncio.run(public_command(update, context))
 
-    assert message.replies == [(PUBLIC_SAVE_FAILED_NOTICE, 830)]
+    assert message.replies == [(SETTINGS_SAVE_FAILED_NOTICE, 830)]
 
 
 # --- group authorization gate: my_chat_member ---
@@ -1498,7 +1504,7 @@ def test_owner_added_group_is_authorized_and_kept(sample_db):
 
 def test_nonowner_added_unauthorized_group_gets_notice_then_leaves(sample_db):
     update = fake_member_update(chat_id=-2001, from_id=42)  # not the owner
-    context = fake_context(sample_db, [])
+    context = fake_context(sample_db, [], allowlist=())
 
     asyncio.run(my_chat_member_handler(update, context))
 
@@ -1548,7 +1554,10 @@ def test_owner_unset_leaves_unauthorized_group(sample_db):
     # Fail-closed: with no owner configured, owner-add can never match, so a
     # newly-added unauthorized group is left.
     context = fake_context(
-        sample_db, [], config=BotConfig(rate_limit_per_minute=10, owner_user_id=None)
+        sample_db,
+        [],
+        config=BotConfig(rate_limit_per_minute=10, owner_user_id=None),
+        allowlist=(),
     )
     update = fake_member_update(chat_id=-2001, from_id=11)
 
@@ -1579,7 +1588,7 @@ def test_left_to_restricted_nonmember_is_not_added(sample_db):
 def test_restricted_nonmember_to_member_is_added_and_gated(sample_db):
     # restricted(is_member=False) -> member: the bot just BECAME a member, so a
     # non-owner cannot use this transition to sneak the bot past the gate.
-    context = fake_context(sample_db, [])
+    context = fake_context(sample_db, [], allowlist=())
     update = fake_member_update(
         chat_id=-2001,
         from_id=42,
@@ -1658,7 +1667,7 @@ def test_authorize_non_owner_is_silent(sample_db):
     update, message = fake_update(
         chat_id=-2001, chat_type="supergroup", message_id=901, user_id=42
     )
-    context = fake_context(sample_db, [])
+    context = fake_context(sample_db, [], allowlist=())
 
     asyncio.run(authorize_command(update, context))
 
@@ -1671,7 +1680,10 @@ def test_authorize_owner_unset_is_silent_for_everyone(sample_db):
         chat_id=-2001, chat_type="supergroup", message_id=903, user_id=11
     )
     context = fake_context(
-        sample_db, [], config=BotConfig(rate_limit_per_minute=10, owner_user_id=None)
+        sample_db,
+        [],
+        config=BotConfig(rate_limit_per_minute=10, owner_user_id=None),
+        allowlist=(),
     )
 
     asyncio.run(authorize_command(update, context))
@@ -1730,3 +1742,85 @@ def test_revoke_leaves_even_if_confirmation_reply_fails(sample_db):
 
     assert context.bot.left_chats == [-2001]
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
+
+
+def test_tr_rejected_in_non_allowlisted_group(sample_db):
+    # Option B: the bot serves only allowlisted groups. Even an admin in a chat
+    # not on the allowlist is not served — so a revoked/unauthorized chat, or one
+    # where leave_chat failed, stops being served even before the bot is removed.
+    update, message = fake_update(
+        chat_id=-7001, chat_type="supergroup", message_id=950
+    )
+    context = fake_context(sample_db, ["声骸"], member_status="administrator")  # -7001 not allowlisted
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 950)]
+
+
+def test_authorize_save_failure_notifies_and_does_not_claim_success(monkeypatch, sample_db):
+    update, message = fake_update(
+        chat_id=-7001, chat_type="supergroup", message_id=951, user_id=11
+    )
+    context = fake_context(sample_db, [], allowlist=())
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+
+    def boom(chat_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "allow", boom)
+    asyncio.run(authorize_command(update, context))
+
+    assert message.replies == [(SETTINGS_SAVE_FAILED_NOTICE, 951)]
+    assert settings.is_allowed(-7001) is False  # not claimed authorized
+
+
+def test_revoke_save_failure_notifies_but_still_leaves(monkeypatch, sample_db):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=952, user_id=11
+    )
+    context = fake_context(sample_db, [])  # -2001 allowlisted by default
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+
+    def boom(chat_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "disallow", boom)
+    asyncio.run(revoke_command(update, context))
+
+    assert context.bot.left_chats == [-2001]  # leaves regardless of the write failure
+    assert "未能保存撤销" in message.replies[0][0]  # surfaces, does not claim success
+
+
+def test_revoke_save_failure_keeps_chat_denied_and_unserved(monkeypatch, sample_db):
+    # End-to-end fail-closed proof (Codex finding: "Fail closed when revoke
+    # cannot persist"). When the disk WRITE fails, the real disallow() keeps the
+    # chat removed in memory rather than rolling it back, so the chat is denied
+    # AND a follow-up admin /tr there is rejected. A continued admin or a re-add
+    # cannot keep using the bot after a failed-persist revoke.
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=953, user_id=11
+    )
+    context = fake_context(sample_db, [])  # -2001 allowlisted by default
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+
+    def boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "_save", boom)  # the WRITE fails; real disallow runs
+    asyncio.run(revoke_command(update, context))
+
+    assert settings.is_allowed(-2001) is False  # deny kept despite the write failure
+    assert context.bot.left_chats == [-2001]  # still leaves
+    assert "未能保存撤销" in message.replies[0][0]  # surfaces the failure
+
+    # Serving is actually denied now: an admin /tr in the same chat is rejected
+    # because the gate consults is_allowed, which the failed revoke left False.
+    tr_update, tr_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=954, user_id=11
+    )
+    tr_context = fake_context(sample_db, ["声骸"], member_status="administrator")
+    tr_context.application.bot_data[CHAT_SETTINGS_KEY] = settings  # the now-denied state
+    asyncio.run(term_command(tr_update, tr_context))
+
+    assert tr_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 954)]
