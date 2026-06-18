@@ -1601,7 +1601,7 @@ def test_authorize_owner_unset_is_silent_for_everyone(sample_db):
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
 
 
-def test_revoke_in_group_removes_current_chat(sample_db):
+def test_revoke_in_group_leaves_and_removes_current_chat(sample_db):
     update, message = fake_update(
         chat_id=-2001, chat_type="supergroup", message_id=902, user_id=11
     )
@@ -1610,7 +1610,24 @@ def test_revoke_in_group_removes_current_chat(sample_db):
 
     asyncio.run(revoke_command(update, context))
 
-    assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    assert settings.is_allowed(-2001) is False
+    assert context.bot.left_chats == [-2001]  # /revoke actually stops service
     assert message.replies == [
-        ("已撤销本群授权（chat_id=-2001）\nThis chat is no longer authorized (chat_id=-2001).", 902)
+        (
+            "已撤销本群授权并退出本群（chat_id=-2001）\nRevoked; leaving this chat (chat_id=-2001).",
+            902,
+        )
     ]
+
+
+def test_revoke_by_id_in_private_leaves_target(sample_db):
+    update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
+    context = fake_context(sample_db, ["-2002"])
+    context.application.bot_data[CHAT_SETTINGS_KEY].allow(-2002)
+
+    asyncio.run(revoke_command(update, context))
+
+    assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2002) is False
+    assert context.bot.left_chats == [-2002]
+    assert message.replies == [("已撤销并退出 / Revoked and left chat_id=-2002", None)]

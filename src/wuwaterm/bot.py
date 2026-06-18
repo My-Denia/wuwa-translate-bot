@@ -533,6 +533,17 @@ def _bot_added_to_chat(update: Update) -> bool:
     return old in _ADDED_FROM_STATES and new in _ADDED_TO_STATES
 
 
+async def _leave_chat_quietly(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    """leave_chat that never raises — the bot may already be absent from the
+    target chat (e.g. /revoke <id> for a chat it is not currently in)."""
+    try:
+        await context.bot.leave_chat(chat_id)
+    except TelegramError as exc:
+        LOGGER.warning("leave_chat failed chat_id=%s: %r", chat_id, exc)
+
+
 async def my_chat_member_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -571,10 +582,7 @@ async def my_chat_member_handler(
         await context.bot.send_message(chat.id, UNAUTHORIZED_GROUP_NOTICE)
     except TelegramError as exc:
         LOGGER.warning("unauthorized-leave notice failed: %r", exc)
-    try:
-        await context.bot.leave_chat(chat.id)
-    except TelegramError as exc:
-        LOGGER.warning("leave_chat failed: %r", exc)
+    await _leave_chat_quietly(context, chat.id)
 
 
 async def authorize_command(
@@ -616,9 +624,10 @@ async def authorize_command(
 async def revoke_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Owner-only: remove a chat from the allowlist. In a group, /revoke removes
-    the current chat; in private, /revoke <chat_id> removes by id. Non-owners
-    get no reply."""
+    """Owner-only: remove a chat from the allowlist AND make the bot leave it,
+    so revoking actually stops service (the allowlist otherwise only gates
+    joining). In a group, /revoke targets the current chat; in private,
+    /revoke <chat_id> targets by id. Non-owners get no reply."""
     message = update.effective_message
     if not message:
         return
@@ -630,10 +639,12 @@ async def revoke_command(
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
         settings.disallow(cid)
+        # Reply before leaving — the bot cannot post once it has left.
         await reply_to_user(
             update,
-            f"已撤销本群授权（chat_id={cid}）\nThis chat is no longer authorized (chat_id={cid}).",
+            f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid}).",
         )
+        await _leave_chat_quietly(context, cid)
         return
     try:
         target = int(arg)
@@ -641,7 +652,8 @@ async def revoke_command(
         await reply_to_user(update, REVOKE_USAGE)
         return
     settings.disallow(target)
-    await reply_to_user(update, f"已撤销 / Revoked chat_id={target}")
+    await _leave_chat_quietly(context, target)
+    await reply_to_user(update, f"已撤销并退出 / Revoked and left chat_id={target}")
 
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
