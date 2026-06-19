@@ -241,7 +241,9 @@ post to Chinese. No command is involved.
   post's entities, with DB terms locked before the LLM call. If the
   translated markup fails validation against Telegram's HTML subset, the
   bot strips the tags and sends a plain-text reply instead — formatting
-  never fails the reply.
+  never fails the reply. If the translated output exceeds Telegram's
+  4096-character text message limit, the bot strips HTML formatting and sends
+  the full translation as tracked plain-text chunks.
 - Dictionary-first still applies: a post that is exactly one official term
   gets the official string byte-for-byte (English for a Chinese term, Chinese
   for an English term), plain, without the LLM.
@@ -256,12 +258,13 @@ post to Chinese. No command is involved.
   (default 300) are skipped silently. Telegram replays updates — restart
   backlog, or a burst of recent group history when the bot is promoted to
   admin — and without this gate the bot would translate channel history.
-- Edited posts update the existing reply in place: when the linked channel
-  edits a post, the bot re-translates and edits the reply it already sent for
-  that post rather than adding a second one. The post-to-reply map is held in
-  memory, so an edit with no tracked reply — after a bot restart, for a post
-  that was never translated, or an edit made after the freshness window — is
-  skipped silently; an edit never produces a duplicate reply.
+- Edited posts update the existing tracked reply chunks in place: when the
+  linked channel edits a post, the bot re-translates and edits existing chunks,
+  adds continuation chunks, or deletes stale extras instead of adding untracked
+  duplicates. The post-to-reply map is held in memory, so an edit with no
+  tracked reply — after a bot restart, for a post that was never translated, or
+  an edit made after the freshness window — is skipped silently; an edit never
+  produces a duplicate reply.
 - Delivery precondition: Telegram privacy mode withholds channel
   auto-forwards from non-admin bots (slash commands still arrive). Make
   the bot an admin of the discussion group (any single right suffices);
