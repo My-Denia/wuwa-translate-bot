@@ -128,6 +128,7 @@ REVOKE_USAGE = (
     "private to remove by id."
 )
 LLM_INPUT_CHAR_LIMIT = 2000
+TELEGRAM_TEXT_MESSAGE_LIMIT = 4096
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
@@ -402,21 +403,36 @@ async def reply_to_user(update: Update, text: str) -> None:
         return
     chat = update.effective_chat
     chat_type = chat.type if chat else "unknown"
-    if is_group_chat(update):
-        sent_message = await message.reply_text(text, reply_to_message_id=message.message_id)
-        reply_to_message_id = message.message_id
-    else:
-        sent_message = await message.reply_text(text)
-        reply_to_message_id = None
-    LOGGER.info(
-        "bot_reply chat_type=%s incoming_message_id=%s reply_message_id=%s "
-        "reply_to_message_id=%s text=%r",
-        chat_type,
-        message.message_id,
-        getattr(sent_message, "message_id", None),
-        reply_to_message_id,
-        text,
-    )
+    chunks = _telegram_text_chunks(text)
+    first_reply_to_message_id = message.message_id if is_group_chat(update) else None
+    for index, chunk in enumerate(chunks):
+        reply_to_message_id = first_reply_to_message_id if index == 0 else None
+        if reply_to_message_id is None:
+            sent_message = await message.reply_text(chunk)
+        else:
+            sent_message = await message.reply_text(
+                chunk, reply_to_message_id=reply_to_message_id
+            )
+        LOGGER.info(
+            "bot_reply chat_type=%s incoming_message_id=%s reply_message_id=%s "
+            "reply_to_message_id=%s chunk=%s/%s text=%r",
+            chat_type,
+            message.message_id,
+            getattr(sent_message, "message_id", None),
+            reply_to_message_id,
+            index + 1,
+            len(chunks),
+            chunk,
+        )
+
+
+def _telegram_text_chunks(
+    text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
+) -> list[str]:
+    """Split plain Telegram replies before Bot API rejects messages >4096 chars."""
+    if len(text) <= limit:
+        return [text]
+    return [text[start : start + limit] for start in range(0, len(text), limit)]
 
 
 def create_application(
