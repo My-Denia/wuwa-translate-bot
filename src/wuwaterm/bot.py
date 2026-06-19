@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import logging
 import re
 import time
@@ -25,7 +26,12 @@ from telegram.ext import (
 
 from .lookup import TermService
 from .normalize import has_cjk
-from .sentence import SentenceTranslator, _llm_configured
+from .sentence import (
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_TIMEOUT_SECONDS,
+    SentenceTranslator,
+    _llm_configured,
+)
 from .settings import ChatSettings
 
 
@@ -144,6 +150,8 @@ class BotConfig:
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
     channel_max_age_seconds: int = 300
+    llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
+    llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -172,6 +180,21 @@ class BotConfig:
             ),
             channel_max_age_seconds=int(
                 os.getenv("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "300")
+            ),
+            llm_timeout_seconds=float(
+                os.getenv(
+                    "WUWATERM_LLM_TIMEOUT_SECONDS",
+                    str(DEFAULT_LLM_TIMEOUT_SECONDS),
+                )
+            ),
+            llm_max_concurrency=max(
+                1,
+                int(
+                    os.getenv(
+                        "WUWATERM_LLM_MAX_CONCURRENCY",
+                        str(DEFAULT_LLM_MAX_CONCURRENCY),
+                    )
+                ),
             ),
         )
 
@@ -255,6 +278,10 @@ class ChannelReplyIndex:
     def __init__(self, ttl_seconds: float = 300.0):
         self.ttl_seconds = ttl_seconds
         self._entries: dict[tuple[int, int], tuple[float, int]] = {}
+        self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
+        self._latest_edit_tokens: dict[tuple[int, int], int] = {}
+        self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._next_edit_token = 0
 
     def remember(
         self,
@@ -268,6 +295,7 @@ class ChannelReplyIndex:
             self._entries = {
                 key: entry for key, entry in self._entries.items() if entry[0] > now
             }
+            self._prune_edit_state()
         self._entries[(chat_id, message_id)] = (now + self.ttl_seconds, reply_message_id)
 
     def get(
@@ -281,8 +309,64 @@ class ChannelReplyIndex:
         expires_at, reply_message_id = entry
         if now >= expires_at:
             del self._entries[key]
+            self._latest_edit_tokens.pop(key, None)
+            lock = self._edit_delivery_locks.get(key)
+            if lock is not None and not lock.locked():
+                self._edit_delivery_locks.pop(key, None)
             return None
         return reply_message_id
+
+    def begin_edit(
+        self, chat_id: int, message_id: int, update_id: int | None = None
+    ) -> int:
+        key = (chat_id, message_id)
+        latest = self._latest_edit_tokens.get(key)
+        if update_id is None:
+            floor = latest if latest is not None else 0
+            self._next_edit_token = max(self._next_edit_token, floor) + 1
+            token = self._next_edit_token
+        else:
+            token = update_id
+            self._next_edit_token = max(self._next_edit_token, token)
+        if latest is None or token > latest:
+            self._latest_edit_tokens[key] = token
+        return token
+
+    def is_latest_edit(self, chat_id: int, message_id: int, token: int) -> bool:
+        return self._latest_edit_tokens.get((chat_id, message_id)) == token
+
+    def edit_delivery_lock(self, chat_id: int, message_id: int) -> asyncio.Lock:
+        return self._edit_delivery_locks.setdefault(
+            (chat_id, message_id), asyncio.Lock()
+        )
+
+    def _prune_edit_state(self) -> None:
+        live_keys = set(self._entries)
+        self._latest_edit_tokens = {
+            key: token
+            for key, token in self._latest_edit_tokens.items()
+            if key in live_keys
+        }
+        self._edit_delivery_locks = {
+            key: lock
+            for key, lock in self._edit_delivery_locks.items()
+            if key in live_keys or lock.locked()
+        }
+
+    def mark_in_flight(self, chat_id: int, message_id: int) -> None:
+        self._in_flight.setdefault((chat_id, message_id), asyncio.Event())
+
+    async def wait_in_flight(self, chat_id: int, message_id: int) -> bool:
+        event = self._in_flight.get((chat_id, message_id))
+        if event is None:
+            return False
+        await event.wait()
+        return True
+
+    def finish_in_flight(self, chat_id: int, message_id: int) -> None:
+        event = self._in_flight.pop((chat_id, message_id), None)
+        if event is not None:
+            event.set()
 
 
 def is_group_chat(update: Update) -> bool:
@@ -350,7 +434,11 @@ def create_application(
         chat_settings = ChatSettings(_chat_settings_path_from_env(db_path))
     app = ApplicationBuilder().token(token).build()
     app.bot_data[SERVICE_KEY] = TermService(db_path)
-    app.bot_data[TRANSLATOR_KEY] = SentenceTranslator(db_path)
+    app.bot_data[TRANSLATOR_KEY] = SentenceTranslator(
+        db_path,
+        llm_timeout_seconds=config.llm_timeout_seconds,
+        llm_max_concurrency=config.llm_max_concurrency,
+    )
     app.bot_data[CONFIG_KEY] = config
     app.bot_data[RATE_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[REJECT_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
@@ -359,8 +447,8 @@ def create_application(
         ttl_seconds=config.channel_max_age_seconds
     )
     app.bot_data[CHAT_SETTINGS_KEY] = chat_settings
-    app.add_handler(CommandHandler(["tr", "term"], term_command))
-    app.add_handler(CommandHandler(["sentence", "sent"], sentence_command))
+    app.add_handler(CommandHandler(["tr", "term"], term_command, block=False))
+    app.add_handler(CommandHandler(["sentence", "sent"], sentence_command, block=False))
     app.add_handler(CommandHandler("about", about_command))
     app.add_handler(CommandHandler("public", public_command))
     app.add_handler(CommandHandler("authorize", authorize_command))
@@ -369,6 +457,7 @@ def create_application(
         MessageHandler(
             filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL,
             channel_post_handler,
+            block=False,
         )
     )
     app.add_handler(
@@ -416,7 +505,11 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    await reply_to_user(update, translate_query(service, translator, query))
+    translated = await translate_query_async(service, translator, query)
+    if not await _passes_delivery_gate(update, context):
+        LOGGER.info("translation reply skipped: authorization changed before delivery")
+        return
+    await reply_to_user(update, translated)
 
 
 async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -435,7 +528,11 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    await reply_to_user(update, translate_query(service, translator, text))
+    translated = await translate_query_async(service, translator, text)
+    if not await _passes_delivery_gate(update, context):
+        LOGGER.info("translation reply skipped: authorization changed before delivery")
+        return
+    await reply_to_user(update, translated)
 
 
 async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -757,6 +854,30 @@ def translate_query(service: TermService, translator: SentenceTranslator, query:
     return translated
 
 
+async def translate_query_async(
+    service: TermService, translator: SentenceTranslator, query: str
+) -> str:
+    prepared = translator.prepare_text(query)
+    if not prepared:
+        return "Nothing to translate after removing metadata."
+    # Direction is auto-detected: a Chinese source -> English (default), an
+    # all-Latin/English source -> Chinese. Both dictionary and LLM honor it.
+    to_chinese = not has_cjk(prepared)
+    result = service.lookup(prepared, limit=5)
+    if result.exact and result.best:
+        official = result.best.entry.zh if to_chinese else result.best.entry.en
+        if official:
+            return official
+    if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
+        return result.best.entry.zh if to_chinese else result.best.entry.en
+    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
+        return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
+    translated = await translator.translate_async(prepared, to_chinese=to_chinese)
+    if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+        translated = f"{translated}\n\n{DICT_MISS_FLAG}"
+    return translated
+
+
 def _is_ascii_fuzzy_query(text: str) -> bool:
     return bool(text) and text.isascii() and SHORT_QUERY_RE.match(text) is not None
 
@@ -788,6 +909,38 @@ async def _passes_authorization(
         )
         await reply_to_user(update, reject_text)
     return False
+
+
+async def _passes_delivery_gate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Silent pre-send auth check for non-blocking translation tasks.
+
+    A slow LLM call can finish after /public off or /revoke has already changed
+    the chat policy. Initial rejection remains user-visible; this late gate is
+    deliberately silent and consumes no reject or translation budget.
+    """
+    if is_group_chat(update):
+        chat = update.effective_chat
+        if chat is None:
+            return False
+        settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+        if not settings.is_allowed(chat.id):
+            return False
+        if await _is_group_admin(update, context, use_cache=False):
+            return True
+        message = update.effective_message
+        if (
+            update.effective_user is None
+            or getattr(message, "sender_chat", None) is not None
+        ):
+            return False
+        return settings.is_public(chat.id)
+    chat = update.effective_chat
+    if chat is None or chat.type != "private":
+        return False
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    return _is_owner(update, config)
 
 
 async def _is_authorized_sender(

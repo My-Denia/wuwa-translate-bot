@@ -45,6 +45,7 @@ from wuwaterm.bot import (
     revoke_command,
     sentence_command,
     term_command,
+    translate_query_async,
 )
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
@@ -173,7 +174,11 @@ def fake_context(
         application=SimpleNamespace(
             bot_data={
                 SERVICE_KEY: TermService(sample_db),
-                TRANSLATOR_KEY: SentenceTranslator(sample_db),
+                TRANSLATOR_KEY: SentenceTranslator(
+                    sample_db,
+                    llm_timeout_seconds=config.llm_timeout_seconds,
+                    llm_max_concurrency=config.llm_max_concurrency,
+                ),
                 CONFIG_KEY: config,
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
@@ -189,11 +194,18 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(locked_text, locks, to_chinese=False):
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
         calls.append((locked_text, locks))
         return response_factory(locked_text, locks)
 
-    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
 
 
 def placeholder_for(locks, official):
@@ -311,12 +323,19 @@ def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sam
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(_locked_text, _locks):
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
         raise _llm_error_from_response(
             httpx.Response(429, text='{"error":"max_budget exceeded"}')
         )
 
-    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=558)
     context = fake_context(sample_db, ["这是一个需要翻译的句子。"])
 
@@ -409,6 +428,224 @@ def test_tr_english_sentence_translates_to_chinese(monkeypatch, sample_db):
     assert len(calls) == 1
 
 
+def test_slow_llm_does_not_block_control_commands_or_other_chat(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_call(
+            _locked_text,
+            locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            started.set()
+            await release.wait()
+            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = fake_context(sample_db, ["今汐说声骸很强"], limit=10)
+        slow_update, slow_message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=4300
+        )
+        slow_task = asyncio.create_task(term_command(slow_update, context))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        context.args = ["off"]
+        public_update, public_message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=4301
+        )
+        await asyncio.wait_for(public_command(public_update, context), timeout=0.05)
+        assert public_message.replies == [(PUBLIC_DISABLED_NOTICE, 4301)]
+
+        context.args = ["-2999"]
+        authorize_update, authorize_message = fake_update(
+            chat_id=1, chat_type="private", message_id=4302, user_id=11
+        )
+        await asyncio.wait_for(
+            authorize_command(authorize_update, context), timeout=0.05
+        )
+        assert authorize_message.replies == [("已授权 / Authorized chat_id=-2999", None)]
+
+        context.args = ["-2999"]
+        revoke_update, revoke_message = fake_update(
+            chat_id=1, chat_type="private", message_id=4303, user_id=11
+        )
+        await asyncio.wait_for(revoke_command(revoke_update, context), timeout=0.05)
+        assert revoke_message.replies == [
+            ("已撤销并退出 / Revoked and left chat_id=-2999", None)
+        ]
+        assert context.bot.left_chats == [-2999]
+
+        context.args = ["声骸"]
+        other_update, other_message = fake_update(
+            chat_id=-2002, chat_type="supergroup", message_id=4304
+        )
+        await asyncio.wait_for(term_command(other_update, context), timeout=0.05)
+        assert other_message.replies == [("Echo", 4304)]
+        assert slow_message.replies == []
+
+        release.set()
+        await asyncio.wait_for(slow_task, timeout=0.2)
+        assert slow_message.replies == [("Jinhsi says Echo", 4300)]
+
+    asyncio.run(run())
+
+
+def test_public_mode_reply_is_skipped_if_public_closes_during_llm(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_call(
+            _locked_text,
+            locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            started.set()
+            await release.wait()
+            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = fake_context(
+            sample_db,
+            ["今汐说声骸很强"],
+            member_status="administrator",
+            member_overrides={(-2001, 22): "member"},
+        )
+        settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+        settings.set_public(-2001, True)
+        slow_update, slow_message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=4310, user_id=22
+        )
+        slow_task = asyncio.create_task(term_command(slow_update, context))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        context.args = ["off"]
+        public_update, public_message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=4311, user_id=11
+        )
+        await asyncio.wait_for(public_command(public_update, context), timeout=0.05)
+        assert public_message.replies == [(PUBLIC_DISABLED_NOTICE, 4311)]
+
+        release.set()
+        await asyncio.wait_for(slow_task, timeout=0.2)
+
+        assert slow_message.replies == []
+
+    asyncio.run(run())
+
+
+def test_group_reply_is_skipped_if_chat_revoked_during_llm(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_call(
+            _locked_text,
+            locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            started.set()
+            await release.wait()
+            return f"{placeholder_for(locks, 'Jinhsi')} says {placeholder_for(locks, 'Echo')}"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = fake_context(sample_db, ["今汐说声骸很强"])
+        slow_update, slow_message = fake_update(
+            chat_id=-2001, chat_type="supergroup", message_id=4320, user_id=11
+        )
+        slow_task = asyncio.create_task(term_command(slow_update, context))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        context.args = ["-2001"]
+        revoke_update, revoke_message = fake_update(
+            chat_id=1, chat_type="private", message_id=4321, user_id=11
+        )
+        await asyncio.wait_for(revoke_command(revoke_update, context), timeout=0.05)
+        assert revoke_message.replies == [
+            ("已撤销并退出 / Revoked and left chat_id=-2001", None)
+        ]
+
+        release.set()
+        await asyncio.wait_for(slow_task, timeout=0.2)
+
+        assert slow_message.replies == []
+
+    asyncio.run(run())
+
+
+def test_llm_concurrency_limit_bounds_inflight_calls(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        in_flight = 0
+        max_in_flight = 0
+
+        async def fake_call(
+            _locked_text,
+            locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                return (
+                    f"{placeholder_for(locks, 'Jinhsi')} says "
+                    f"{placeholder_for(locks, 'Echo')}"
+                )
+            finally:
+                in_flight -= 1
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        translator = SentenceTranslator(sample_db, llm_max_concurrency=2)
+        service = TermService(sample_db)
+        tasks = [
+            asyncio.create_task(
+                translate_query_async(service, translator, "今汐说声骸很强")
+            )
+            for _ in range(5)
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        assert results == ["Jinhsi says Echo"] * 5
+        assert max_in_flight == 2
+
+    asyncio.run(run())
+
+
 def test_rate_limit_is_per_chat(sample_db):
     context = fake_context(sample_db, ["声骸"], limit=10)
     for idx in range(10):
@@ -481,6 +718,27 @@ def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
     assert str(message_handlers[0].filters) == (
         "<filters.IS_AUTOMATIC_FORWARD and filters.SenderChat.CHANNEL>"
     )
+
+
+def test_data_plane_handlers_are_non_blocking_control_handlers_block(sample_db):
+    app = create_application(
+        "123:ABC",
+        sample_db,
+        config=BotConfig(),
+        chat_settings=ChatSettings(sample_db.parent / "chat_settings.json"),
+    )
+    handlers = [handler for group in app.handlers.values() for handler in group]
+    command_handlers = [h for h in handlers if isinstance(h, CommandHandler)]
+    message_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
+
+    by_commands = {frozenset(handler.commands): handler for handler in command_handlers}
+
+    assert by_commands[frozenset({"tr", "term"})].block is False
+    assert by_commands[frozenset({"sentence", "sent"})].block is False
+    assert message_handlers[0].block is False
+    assert bool(by_commands[frozenset({"public"})].block) is True
+    assert bool(by_commands[frozenset({"authorize"})].block) is True
+    assert bool(by_commands[frozenset({"revoke"})].block) is True
 
 
 def test_ordinary_member_message_never_triggers_any_handler(sample_db):
@@ -925,6 +1183,17 @@ def test_from_env_owner_valid_int_no_warning(monkeypatch, caplog):
 
     assert config.owner_user_id == 654321
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_from_env_parses_llm_timeout_and_concurrency(monkeypatch):
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv("WUWATERM_LLM_TIMEOUT_SECONDS", "7.5")
+    monkeypatch.setenv("WUWATERM_LLM_MAX_CONCURRENCY", "2")
+
+    config = BotConfig.from_env()
+
+    assert config.llm_timeout_seconds == 7.5
+    assert config.llm_max_concurrency == 2
 
 
 def test_from_env_reject_overrides_win_verbatim_and_are_not_auto_bilingual(monkeypatch):

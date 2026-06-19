@@ -95,6 +95,8 @@ Optional LLM environment variables:
 - `WUWATERM_OPENAI_BASE_URL`, set explicitly to your LiteLLM gateway URL
 - `WUWATERM_OPENAI_API_KEY`
 - `WUWATERM_OPENAI_MODEL`
+- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `30`
+- `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`; max in-flight LLM calls
 - `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
 - `WUWATERM_GROUP_TR_REJECT_TEXT`, default is the bilingual two-line reply
   `仅群管理员可用 /tr` then `Only group admins can use /tr`

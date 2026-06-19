@@ -108,6 +108,7 @@ def channel_update(
     caption_html: str | None = None,
     chat_id: int = -2001,
     message_id: int = 4001,
+    update_id: int | None = None,
     date: datetime | None = None,
     edit_date: datetime | None = None,
 ):
@@ -123,6 +124,7 @@ def channel_update(
         edit_date=edit_date,
     )
     update = SimpleNamespace(
+        update_id=update_id,
         effective_message=message,
         effective_chat=SimpleNamespace(id=chat_id, type="supergroup"),
         effective_user=None,
@@ -151,7 +153,11 @@ def make_context(sample_db, *, config=None, args=(), bot=None, allowlist=(-2001,
         application=SimpleNamespace(
             bot_data={
                 SERVICE_KEY: TermService(sample_db),
-                TRANSLATOR_KEY: SentenceTranslator(sample_db),
+                TRANSLATOR_KEY: SentenceTranslator(
+                    sample_db,
+                    llm_timeout_seconds=config.llm_timeout_seconds,
+                    llm_max_concurrency=config.llm_max_concurrency,
+                ),
                 CONFIG_KEY: config,
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
@@ -170,11 +176,18 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
         calls.append((locked_text, locks, html_mode))
         return response_factory(locked_text, locks)
 
-    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
 
 
 def placeholder_for(locks, official):
@@ -358,6 +371,47 @@ def test_channel_post_skipped_when_chat_not_allowlisted(monkeypatch, sample_db):
     assert calls == []  # zero LLM calls
 
 
+def test_channel_reply_is_skipped_if_chat_revoked_during_llm(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return "translated"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        update, message = channel_update(text=CN_TEXT, message_id=4601)
+        task = asyncio.create_task(channel_post_handler(update, context))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+        settings.disallow(-2001)
+        release.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
+        assert calls == 1
+        assert message.replies == []
+
+    asyncio.run(run())
+
+
 def test_budget_exhaustion_is_silent_with_one_clean_warning(
     monkeypatch, sample_db, caplog
 ):
@@ -365,12 +419,19 @@ def test_budget_exhaustion_is_silent_with_one_clean_warning(
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
-    def fake_call(_locked_text, _locks, html_mode=False):
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
         raise _llm_error_from_response(
             httpx.Response(429, text='{"error":"max_budget exceeded"}')
         )
 
-    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     update, message = channel_update(text=CN_TEXT, message_id=4060)
     context = make_context(sample_db)
 
@@ -613,6 +674,125 @@ def test_edit_updates_existing_reply_in_place(monkeypatch, sample_db):
     assert edit_message.replies == []
     assert context.bot.edits == [("translated", "HTML", -2001, 5200)]
     assert len(calls) == 2  # the edit re-translated
+
+
+def test_edit_waits_for_original_inflight_reply(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                await release_first.wait()
+                return "original translation"
+            return "edited translation"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        new_update, new_message = channel_update(text=CN_TEXT, message_id=4205)
+        new_task = asyncio.create_task(channel_post_handler(new_update, context))
+        edit_update, edit_message = channel_update(
+            text=CN_TEXT, message_id=4205, edit_date=datetime.now(timezone.utc)
+        )
+        edit_task = asyncio.create_task(channel_post_handler(edit_update, context))
+        await asyncio.wait_for(first_started.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert not edit_task.done()
+        assert edit_message.replies == []
+
+        release_first.set()
+        await asyncio.wait_for(new_task, timeout=0.2)
+        await asyncio.wait_for(edit_task, timeout=0.2)
+
+        assert new_message.replies == [("original translation", "HTML", 4205)]
+        assert edit_message.replies == []
+        assert context.bot.edits == [("edited translation", "HTML", -2001, 5205)]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_concurrent_edits_do_not_overwrite_newer_translation(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        first_edit_started = asyncio.Event()
+        release_first_edit = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "original translation"
+            if calls == 2:
+                first_edit_started.set()
+                await release_first_edit.wait()
+                return "older edit translation"
+            return "newer edit translation"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        new_update, new_message = channel_update(
+            text=CN_TEXT, message_id=4215, update_id=100
+        )
+        await channel_post_handler(new_update, context)
+        assert new_message.replies == [("original translation", "HTML", 4215)]
+
+        older_update, _ = channel_update(
+            text=f"{CN_TEXT}旧",
+            message_id=4215,
+            update_id=101,
+            edit_date=datetime.now(timezone.utc),
+        )
+        newer_update, _ = channel_update(
+            text=f"{CN_TEXT}新",
+            message_id=4215,
+            update_id=102,
+            edit_date=datetime.now(timezone.utc),
+        )
+        older_task = asyncio.create_task(channel_post_handler(older_update, context))
+        await asyncio.wait_for(first_edit_started.wait(), timeout=0.2)
+
+        newer_task = asyncio.create_task(channel_post_handler(newer_update, context))
+        await asyncio.wait_for(newer_task, timeout=0.2)
+        assert context.bot.edits == [
+            ("newer edit translation", "HTML", -2001, 5215)
+        ]
+
+        release_first_edit.set()
+        await asyncio.wait_for(older_task, timeout=0.2)
+
+        assert context.bot.edits == [
+            ("newer edit translation", "HTML", -2001, 5215)
+        ]
+        assert calls == 3
+
+    asyncio.run(run())
 
 
 def test_edit_with_no_tracked_reply_is_silent(monkeypatch, sample_db):

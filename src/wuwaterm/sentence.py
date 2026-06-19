@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import asyncio
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -23,6 +27,8 @@ TRANSLATION_UNAVAILABLE_NOTICE = (
     "翻译服务暂时不可用，请稍后再试。\n"
     "Translation service is temporarily unavailable. Please try again later."
 )
+DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
+DEFAULT_LLM_MAX_CONCURRENCY = 4
 
 
 class LLMTranslationError(RuntimeError):
@@ -44,8 +50,18 @@ class LockedSentence:
 
 
 class SentenceTranslator:
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+        llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
+    ):
         self.service = TermService(db_path)
+        self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
+        self.llm_max_concurrency = max(1, int(llm_max_concurrency))
+        self._llm_slots: asyncio.Semaphore | None = None
+        self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
 
     def prepare_text(self, text: str) -> str:
         text = normalize_user_text(text)
@@ -86,9 +102,36 @@ class SentenceTranslator:
             return locked.restore(locked.locked_text, to_en=not to_chinese)
         try:
             if to_chinese:
-                translated = _call_llm(locked.locked_text, locked.locks, to_chinese=True)
+                translated = self._call_llm_sync(
+                    locked.locked_text, locked.locks, to_chinese=True
+                )
             else:
-                translated = _call_llm(locked.locked_text, locked.locks)
+                translated = self._call_llm_sync(locked.locked_text, locked.locks)
+        except LLMTranslationError as exc:
+            return exc.user_message
+        return locked.restore(translated, to_en=not to_chinese)
+
+    async def translate_async(self, text: str, *, to_chinese: bool = False) -> str:
+        prepared = self.prepare_text(text)
+        if not prepared:
+            return ""
+        exact = self.service.lookup(prepared, limit=5)
+        if exact.exact and exact.best:
+            official = exact.best.entry.zh if to_chinese else exact.best.entry.en
+            if official:
+                return official
+        locked = self._lock_terms(prepared)
+        if not _llm_configured():
+            return locked.restore(locked.locked_text, to_en=not to_chinese)
+        try:
+            if to_chinese:
+                translated = await self._call_llm_async_limited(
+                    locked.locked_text, locked.locks, to_chinese=True
+                )
+            else:
+                translated = await self._call_llm_async_limited(
+                    locked.locked_text, locked.locks
+                )
         except LLMTranslationError as exc:
             return exc.user_message
         return locked.restore(translated, to_en=not to_chinese)
@@ -102,12 +145,75 @@ class SentenceTranslator:
         """
         locked = self._lock_terms(html_text)
         if to_chinese:
-            translated = _call_llm(
+            translated = self._call_llm_sync(
                 locked.locked_text, locked.locks, html_mode=True, to_chinese=True
             )
         else:
-            translated = _call_llm(locked.locked_text, locked.locks, html_mode=True)
+            translated = self._call_llm_sync(
+                locked.locked_text, locked.locks, html_mode=True
+            )
         return locked.restore(translated, to_en=not to_chinese)
+
+    async def translate_html_async(
+        self, html_text: str, *, to_chinese: bool = False
+    ) -> str:
+        """Async version of translate_html; LLMTranslationError propagates."""
+        locked = self._lock_terms(html_text)
+        if to_chinese:
+            translated = await self._call_llm_async_limited(
+                locked.locked_text,
+                locked.locks,
+                html_mode=True,
+                to_chinese=True,
+            )
+        else:
+            translated = await self._call_llm_async_limited(
+                locked.locked_text, locked.locks, html_mode=True
+            )
+        return locked.restore(translated, to_en=not to_chinese)
+
+    async def _call_llm_async_limited(
+        self,
+        locked_text: str,
+        locks: tuple[tuple[str, str, str], ...],
+        html_mode: bool = False,
+        to_chinese: bool = False,
+    ) -> str:
+        async with self._current_llm_slots():
+            return await _call_llm_async(
+                locked_text,
+                locks,
+                html_mode=html_mode,
+                to_chinese=to_chinese,
+                timeout_seconds=self.llm_timeout_seconds,
+            )
+
+    def _call_llm_sync(
+        self,
+        locked_text: str,
+        locks: tuple[tuple[str, str, str], ...],
+        html_mode: bool = False,
+        to_chinese: bool = False,
+    ) -> str:
+        kwargs: dict[str, object] = {}
+        supported = inspect.signature(_call_llm).parameters
+        for name, value in (
+            ("html_mode", html_mode),
+            ("to_chinese", to_chinese),
+            ("timeout_seconds", self.llm_timeout_seconds),
+        ):
+            if name in supported:
+                kwargs[name] = value
+        return _call_llm(locked_text, locks, **kwargs)
+
+    def _current_llm_slots(self) -> asyncio.Semaphore:
+        # Tests may create a translator once and drive it through multiple
+        # asyncio.run loops; bind the semaphore lazily to the active loop.
+        loop = asyncio.get_running_loop()
+        if self._llm_slots is None or self._llm_slots_loop is not loop:
+            self._llm_slots = asyncio.Semaphore(self.llm_max_concurrency)
+            self._llm_slots_loop = loop
+        return self._llm_slots
 
     def _resolve_speaker_prefix(self, line: str) -> str:
         match = SPEAKER_PREFIX_RE.match(line)
@@ -174,6 +280,26 @@ def _call_llm(
     locks: tuple[tuple[str, str, str], ...],
     html_mode: bool = False,
     to_chinese: bool = False,
+    timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+) -> str:
+    return asyncio.run(
+        _call_llm_async(
+            locked_text,
+            locks,
+            html_mode=html_mode,
+            to_chinese=to_chinese,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
+async def _call_llm_async(
+    locked_text: str,
+    locks: tuple[tuple[str, str, str], ...],
+    html_mode: bool = False,
+    to_chinese: bool = False,
+    timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     base_url = (os.getenv("WUWATERM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = os.getenv("WUWATERM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -208,18 +334,45 @@ def _call_llm(
         ],
         "temperature": 0,
     }
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-        )
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds), transport=transport
+        ) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+            )
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise _llm_error_from_response(exc.response) from exc
         data = response.json()
-    return str(data["choices"][0]["message"]["content"]).strip()
+        return _extract_llm_content(data)
+    except LLMTranslationError:
+        raise
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE) from exc
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE) from exc
+
+
+def _extract_llm_content(data: Any) -> str:
+    if not isinstance(data, dict):
+        raise ValueError("LLM response is not an object")
+    choices = data["choices"]
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("LLM response has no choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError("LLM choice is not an object")
+    message = first["message"]
+    if not isinstance(message, dict):
+        raise ValueError("LLM message is not an object")
+    content = message["content"]
+    if not isinstance(content, str):
+        raise ValueError("LLM content is not text")
+    return content.strip()
 
 
 def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:

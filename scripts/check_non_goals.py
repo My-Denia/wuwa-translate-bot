@@ -50,7 +50,7 @@ ALLOWED = {
 # nothing else. Must mirror the pin in tests/test_bot.py.
 CHANNEL_LISTENER_RE = re.compile(
     r"MessageHandler\(\s*filters\.IS_AUTOMATIC_FORWARD\s*&\s*"
-    r"filters\.SenderChat\.CHANNEL,\s*channel_post_handler,?\s*\)"
+    r"filters\.SenderChat\.CHANNEL,\s*channel_post_handler,\s*block=False,?\s*\)"
 )
 
 
