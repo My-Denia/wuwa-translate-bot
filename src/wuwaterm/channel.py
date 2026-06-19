@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 from telegram import Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from .bot import (
@@ -201,11 +201,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if chat_id is not None
             else None
         )
-        if existing_reply_id is None and chat_id is not None:
+        if chat_id is not None:
             waited_for_original = await reply_index.wait_in_flight(
                 chat_id, message.message_id
             )
-            if not waited_for_original:
+            if not waited_for_original and existing_reply_id is None:
                 # With a non-blocking handler, PTB may schedule an edit task
                 # before the original post task has run far enough to mark
                 # itself in-flight. Yield once so that already-scheduled
@@ -548,7 +548,7 @@ async def _edit_reply_chunks(
     if chat_id is None or not existing_reply_ids:
         return
     remembered_reply_ids = list(existing_reply_ids)
-    for reply_message_id, chunk in zip(existing_reply_ids, chunks):
+    for index, (reply_message_id, chunk) in enumerate(zip(existing_reply_ids, chunks)):
         edit_applied = await _edit_existing_reply(
             context,
             message=message,
@@ -560,6 +560,14 @@ async def _edit_reply_chunks(
             mode=mode,
         )
         if not edit_applied:
+            if index == 0:
+                await _delete_reply_chunks(
+                    context,
+                    message=message,
+                    chat_id=chat_id,
+                    reply_message_ids=existing_reply_ids[1:],
+                )
+                reply_index.forget(chat_id, message.message_id)
             return
     if len(chunks) > len(existing_reply_ids):
         for chunk in chunks[len(existing_reply_ids) :]:
@@ -576,21 +584,36 @@ async def _edit_reply_chunks(
                 )
             _log_emit(chat_type, message, reply_message_id, mode, edited=False)
     elif len(chunks) < len(existing_reply_ids):
-        for reply_message_id in existing_reply_ids[len(chunks) :]:
-            try:
-                await context.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=reply_message_id,
-                )
-            except BadRequest:
-                LOGGER.info(
-                    "channel edit extra chunk delete skipped "
-                    "incoming_message_id=%s reply_message_id=%s",
-                    message.message_id,
-                    reply_message_id,
-                )
+        await _delete_reply_chunks(
+            context,
+            message=message,
+            chat_id=chat_id,
+            reply_message_ids=existing_reply_ids[len(chunks) :],
+        )
         del remembered_reply_ids[len(chunks) :]
     reply_index.remember_many(chat_id, message.message_id, tuple(remembered_reply_ids))
+
+
+async def _delete_reply_chunks(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    message,
+    chat_id: int,
+    reply_message_ids: tuple[int, ...],
+) -> None:
+    for reply_message_id in reply_message_ids:
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=reply_message_id,
+            )
+        except TelegramError:
+            LOGGER.info(
+                "channel edit extra chunk delete skipped "
+                "incoming_message_id=%s reply_message_id=%s",
+                message.message_id,
+                reply_message_id,
+            )
 
 
 async def _edit_existing_reply(

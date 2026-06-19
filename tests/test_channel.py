@@ -1162,8 +1162,105 @@ def test_long_channel_edit_reply_gone_does_not_send_continuation_chunks(
     assert bot.edits == []
     assert len(bot.edit_attempts) == 1
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
-    assert reply_index.get_many(-2001, 4298) == (5298,)
+    assert reply_index.get_many(-2001, 4298) == ()
     assert len(calls) == 2
+
+
+def test_channel_edit_reply_gone_prunes_tracked_continuation_chunks(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(["H" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6), "shorter translation"])
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    bot = FakeBot(edit_raises=lambda *_: BadRequest("Message to edit not found"))
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4299)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4299, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert bot.edits == []
+    assert bot.deleted_messages == [(-2001, 5300)]
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4299) == ()
+    assert len(calls) == 2
+
+
+def test_edit_waits_for_long_original_delivery_after_first_chunk_remembered(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        calls = []
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                return "G" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 5)
+            return "edited short translation"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        new_update, new_message = channel_update(text=CN_TEXT, message_id=4300)
+
+        second_chunk_started = asyncio.Event()
+        release_second_chunk = asyncio.Event()
+        original_reply_text = new_message.reply_text
+
+        async def blocking_reply_text(text: str, **kwargs):
+            if len(new_message.replies) == 1:
+                second_chunk_started.set()
+                await release_second_chunk.wait()
+            return await original_reply_text(text, **kwargs)
+
+        new_message.reply_text = blocking_reply_text
+        new_task = asyncio.create_task(channel_post_handler(new_update, context))
+        await asyncio.wait_for(second_chunk_started.wait(), timeout=0.2)
+
+        reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+        assert reply_index.get_many(-2001, 4300) == (5300,)
+
+        edit_update, edit_message = channel_update(
+            text=f"{CN_TEXT}新",
+            message_id=4300,
+            update_id=102,
+            edit_date=datetime.now(timezone.utc),
+        )
+        edit_task = asyncio.create_task(channel_post_handler(edit_update, context))
+        await asyncio.sleep(0.05)
+
+        assert not edit_task.done()
+        assert calls == [1]
+
+        release_second_chunk.set()
+        await asyncio.wait_for(new_task, timeout=0.2)
+        await asyncio.wait_for(edit_task, timeout=0.2)
+
+        assert edit_message.replies == []
+        assert context.bot.edits == [
+            ("edited short translation", "HTML", -2001, 5300)
+        ]
+        assert context.bot.deleted_messages == [(-2001, 5301)]
+        assert reply_index.get_many(-2001, 4300) == (5300,)
+        assert calls == [1, 2]
+
+    asyncio.run(run())
 
 
 def test_edit_identical_translation_is_silent_noop(monkeypatch, sample_db):

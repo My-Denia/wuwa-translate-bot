@@ -348,6 +348,14 @@ class ChannelReplyIndex:
             return ()
         return reply_message_ids
 
+    def forget(self, chat_id: int, message_id: int) -> None:
+        key = (chat_id, message_id)
+        self._entries.pop(key, None)
+        self._latest_edit_tokens.pop(key, None)
+        lock = self._edit_delivery_locks.get(key)
+        if lock is not None and not lock.locked():
+            self._edit_delivery_locks.pop(key, None)
+
     def begin_edit(
         self, chat_id: int, message_id: int, update_id: int | None = None
     ) -> int:
