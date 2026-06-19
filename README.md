@@ -159,7 +159,7 @@ admin (see that section).
   With the owner id unset, private chat rejects everyone (fail-closed).
   Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
-- LLM-path input is capped at 1000 characters.
+- LLM-path input is capped at 2000 characters.
 
 ### Group Authorization / auto-leave (`/authorize`, `/revoke`)
 
@@ -208,7 +208,7 @@ opt in).
   itself, so a non-admin can never flip a public chat back off or on.
 - Public mode only applies inside an authorized group; it never bypasses the
   authorization allowlist (an un-authorized group serves no one, public or not).
-- Per-chat throttling and the 1000-char LLM cap still apply.
+- Per-chat throttling and the 2000-char LLM cap still apply.
 - State is persisted to `WUWATERM_SETTINGS_PATH` (default
   `<db parent>/chat_settings.json`); on the supported Docker layout this lives
   in the bind-mounted `data/` volume and survives image rebuilds.
@@ -246,7 +246,7 @@ post to Chinese. No command is involved.
   for an English term), plain, without the LLM.
 - Caption posts (photo/video announcements) are handled the same as text
   posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
-  instead of the 1000-char command cap.
+  instead of the 2000-char command cap.
 - The per-chat throttle is shared with the slash commands. Throttle denials
   and budget exhaustion on this path skip silently with one log line — no
   notice comment under the post (command paths keep their visible notices).
