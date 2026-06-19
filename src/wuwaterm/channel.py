@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
@@ -198,6 +199,22 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if chat_id is not None
             else None
         )
+        if existing_reply_id is None and chat_id is not None:
+            waited_for_original = await reply_index.wait_in_flight(
+                chat_id, message.message_id
+            )
+            if not waited_for_original:
+                # With a non-blocking handler, PTB may schedule an edit task
+                # before the original post task has run far enough to mark
+                # itself in-flight. Yield once so that already-scheduled
+                # original task can register; true restart/no-entry edits still
+                # skip without reaching throttle or LLM work.
+                await asyncio.sleep(0)
+                waited_for_original = await reply_index.wait_in_flight(
+                    chat_id, message.message_id
+                )
+            if waited_for_original:
+                existing_reply_id = reply_index.get(chat_id, message.message_id)
         if existing_reply_id is None:
             LOGGER.info(
                 "channel autotranslate skipped: edit with no tracked reply "
@@ -205,118 +222,177 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 message.message_id,
             )
             return
-    if message.text:
-        plain = message.text
-        html_text = message.text_html
-        length_limit = config.channel_text_limit
-    elif message.caption:
-        plain = message.caption
-        html_text = message.caption_html
-        length_limit = config.channel_caption_limit
-    else:
-        return
-    if not html_text:
-        return
-    # Direction by script: enough Chinese -> translate to English (default);
-    # no Chinese but enough Latin letters -> translate to Chinese. Anything
-    # else (emoji / links / numbers only) is not worth translating -> skip.
-    cjk = count_cjk(plain)
-    if cjk >= config.channel_min_cjk:
-        to_chinese = False
-    elif cjk == 0 and count_latin(plain) >= config.channel_min_latin:
-        to_chinese = True
-    else:
-        # Free check: no LLM call and no throttle consumption.
-        return
-    if len(plain) > length_limit:
-        LOGGER.debug(
-            "channel autotranslate skipped: over length cap message_id=%s",
+    edit_work_token: int | None = None
+    if is_edit and chat_id is not None:
+        update_id = getattr(update, "update_id", None)
+        edit_work_token = reply_index.begin_edit(
+            chat_id,
             message.message_id,
+            update_id if isinstance(update_id, int) else None,
         )
-        return
-    if not _llm_configured():
-        LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
-        return
-    if not _consume_rate_limit(update, context):
-        LOGGER.info(
-            "channel autotranslate throttled message_id=%s", message.message_id
-        )
-        return
-
-    service: TermService = context.application.bot_data[SERVICE_KEY]
-    lookup_result = service.lookup(plain)
-    if lookup_result.exact and lookup_result.best:
-        official = (
-            lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
-        )
-        if official:
-            # Dictionary-first invariant: official text byte-for-byte,
-            # plain, trumps formatting. Zero LLM.
-            await _emit(
-                context,
-                reply_index=reply_index,
-                message=message,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                is_edit=is_edit,
-                existing_reply_id=existing_reply_id,
-                text=official,
-                parse_mode=None,
-                mode="dictionary",
-            )
-            return
-
-    translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
+    marked_in_flight = False
+    if not is_edit and chat_id is not None:
+        reply_index.mark_in_flight(chat_id, message.message_id)
+        marked_in_flight = True
     try:
-        translated = translator.translate_html(html_text, to_chinese=to_chinese)
-    except LLMTranslationError:
-        # Budget exhaustion and generic LLM failure both skip silently;
-        # no chat/user ids, no response-body echo.
-        LOGGER.warning("channel autotranslate skipped: translation unavailable")
-        return
+        if message.text:
+            plain = message.text
+            html_text = message.text_html
+            length_limit = config.channel_text_limit
+        elif message.caption:
+            plain = message.caption
+            html_text = message.caption_html
+            length_limit = config.channel_caption_limit
+        else:
+            return
+        if not html_text:
+            return
+        # Direction by script: enough Chinese -> translate to English (default);
+        # no Chinese but enough Latin letters -> translate to Chinese. Anything
+        # else (emoji / links / numbers only) is not worth translating -> skip.
+        cjk = count_cjk(plain)
+        if cjk >= config.channel_min_cjk:
+            to_chinese = False
+        elif cjk == 0 and count_latin(plain) >= config.channel_min_latin:
+            to_chinese = True
+        else:
+            # Free check: no LLM call and no throttle consumption.
+            return
+        if len(plain) > length_limit:
+            LOGGER.debug(
+                "channel autotranslate skipped: over length cap message_id=%s",
+                message.message_id,
+            )
+            return
+        if not _llm_configured():
+            LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
+            return
+        if not _consume_rate_limit(update, context):
+            LOGGER.info(
+                "channel autotranslate throttled message_id=%s", message.message_id
+            )
+            return
 
-    if validate_telegram_html(translated):
+        service: TermService = context.application.bot_data[SERVICE_KEY]
+        lookup_result = service.lookup(plain)
+        if lookup_result.exact and lookup_result.best:
+            official = (
+                lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
+            )
+            if official:
+                # Dictionary-first invariant: official text byte-for-byte,
+                # plain, trumps formatting. Zero LLM.
+                if not _passes_channel_delivery_gate(context, chat_id):
+                    LOGGER.info(
+                        "channel autotranslate skipped: chat authorization changed "
+                        "before delivery chat_id=%s",
+                        chat_id,
+                    )
+                    return
+                await _emit(
+                    context,
+                    reply_index=reply_index,
+                    message=message,
+                    chat_id=chat_id,
+                    chat_type=chat_type,
+                    is_edit=is_edit,
+                    existing_reply_id=existing_reply_id,
+                    edit_work_token=edit_work_token,
+                    text=official,
+                    parse_mode=None,
+                    mode="dictionary",
+                )
+                return
+
+        translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
         try:
-            await _emit(
-                context,
-                reply_index=reply_index,
-                message=message,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                is_edit=is_edit,
-                existing_reply_id=existing_reply_id,
-                text=translated,
-                parse_mode="HTML",
-                mode="HTML",
+            translated = await translator.translate_html_async(
+                html_text, to_chinese=to_chinese
+            )
+        except LLMTranslationError:
+            # Budget exhaustion and generic LLM failure both skip silently;
+            # no chat/user ids, no response-body echo.
+            LOGGER.warning("channel autotranslate skipped: translation unavailable")
+            return
+
+        if validate_telegram_html(translated):
+            try:
+                if not _passes_channel_delivery_gate(context, chat_id):
+                    LOGGER.info(
+                        "channel autotranslate skipped: chat authorization changed "
+                        "before delivery chat_id=%s",
+                        chat_id,
+                    )
+                    return
+                await _emit(
+                    context,
+                    reply_index=reply_index,
+                    message=message,
+                    chat_id=chat_id,
+                    chat_type=chat_type,
+                    is_edit=is_edit,
+                    existing_reply_id=existing_reply_id,
+                    edit_work_token=edit_work_token,
+                    text=translated,
+                    parse_mode="HTML",
+                    mode="HTML",
+                )
+                return
+            except BadRequest:
+                # Safety net: never let formatting fail the reply.
+                if not _passes_channel_delivery_gate(context, chat_id):
+                    LOGGER.info(
+                        "channel autotranslate skipped: chat authorization changed "
+                        "before delivery chat_id=%s",
+                        chat_id,
+                    )
+                    return
+                await _emit(
+                    context,
+                    reply_index=reply_index,
+                    message=message,
+                    chat_id=chat_id,
+                    chat_type=chat_type,
+                    is_edit=is_edit,
+                    existing_reply_id=existing_reply_id,
+                    edit_work_token=edit_work_token,
+                    text=strip_telegram_html(translated),
+                    parse_mode=None,
+                    mode="plain-after-badrequest",
+                )
+                return
+        if not _passes_channel_delivery_gate(context, chat_id):
+            LOGGER.info(
+                "channel autotranslate skipped: chat authorization changed "
+                "before delivery chat_id=%s",
+                chat_id,
             )
             return
-        except BadRequest:
-            # Safety net: never let formatting fail the reply.
-            await _emit(
-                context,
-                reply_index=reply_index,
-                message=message,
-                chat_id=chat_id,
-                chat_type=chat_type,
-                is_edit=is_edit,
-                existing_reply_id=existing_reply_id,
-                text=strip_telegram_html(translated),
-                parse_mode=None,
-                mode="plain-after-badrequest",
-            )
-            return
-    await _emit(
-        context,
-        reply_index=reply_index,
-        message=message,
-        chat_id=chat_id,
-        chat_type=chat_type,
-        is_edit=is_edit,
-        existing_reply_id=existing_reply_id,
-        text=strip_telegram_html(translated),
-        parse_mode=None,
-        mode="plain",
-    )
+        await _emit(
+            context,
+            reply_index=reply_index,
+            message=message,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            is_edit=is_edit,
+            existing_reply_id=existing_reply_id,
+            edit_work_token=edit_work_token,
+            text=strip_telegram_html(translated),
+            parse_mode=None,
+            mode="plain",
+        )
+    finally:
+        if marked_in_flight and chat_id is not None:
+            reply_index.finish_in_flight(chat_id, message.message_id)
+
+
+def _passes_channel_delivery_gate(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int | None
+) -> bool:
+    if chat_id is None:
+        return False
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    return settings.is_allowed(chat_id)
 
 
 async def _emit(
@@ -328,6 +404,7 @@ async def _emit(
     chat_type: str,
     is_edit: bool,
     existing_reply_id: int | None,
+    edit_work_token: int | None,
     text: str,
     parse_mode: str | None,
     mode: str,
@@ -343,33 +420,39 @@ async def _emit(
     crash the listener or leave a duplicate.
     """
     if is_edit:
-        try:
-            await context.bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=existing_reply_id,
-                parse_mode=parse_mode,
-            )
-        except BadRequest as exc:
-            if "not modified" in str(exc).lower():
-                LOGGER.info(
-                    "channel edit no-op (unchanged translation) "
-                    "incoming_message_id=%s reply_message_id=%s",
-                    message.message_id,
-                    existing_reply_id,
+        if chat_id is not None and edit_work_token is not None:
+            async with reply_index.edit_delivery_lock(chat_id, message.message_id):
+                if not reply_index.is_latest_edit(
+                    chat_id, message.message_id, edit_work_token
+                ):
+                    LOGGER.info(
+                        "channel edit skipped: stale translation "
+                        "incoming_message_id=%s reply_message_id=%s",
+                        message.message_id,
+                        existing_reply_id,
+                    )
+                    return
+                await _edit_existing_reply(
+                    context,
+                    message=message,
+                    chat_type=chat_type,
+                    existing_reply_id=existing_reply_id,
+                    text=text,
+                    chat_id=chat_id,
+                    parse_mode=parse_mode,
+                    mode=mode,
                 )
                 return
-            if parse_mode is not None:
-                # HTML edit rejected -> let the caller retry as plain.
-                raise
-            LOGGER.info(
-                "channel edit skipped: reply not updatable "
-                "incoming_message_id=%s reply_message_id=%s",
-                message.message_id,
-                existing_reply_id,
-            )
-            return
-        _log_emit(chat_type, message, existing_reply_id, mode, edited=True)
+        await _edit_existing_reply(
+            context,
+            message=message,
+            chat_type=chat_type,
+            existing_reply_id=existing_reply_id,
+            text=text,
+            chat_id=chat_id,
+            parse_mode=parse_mode,
+            mode=mode,
+        )
         return
 
     sent_message = await message.reply_text(
@@ -379,6 +462,46 @@ async def _emit(
     if chat_id is not None and reply_message_id is not None:
         reply_index.remember(chat_id, message.message_id, reply_message_id)
     _log_emit(chat_type, message, reply_message_id, mode, edited=False)
+
+
+async def _edit_existing_reply(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    message,
+    chat_type: str,
+    existing_reply_id: int | None,
+    text: str,
+    chat_id: int | None,
+    parse_mode: str | None,
+    mode: str,
+) -> None:
+    try:
+        await context.bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=existing_reply_id,
+            parse_mode=parse_mode,
+        )
+    except BadRequest as exc:
+        if "not modified" in str(exc).lower():
+            LOGGER.info(
+                "channel edit no-op (unchanged translation) "
+                "incoming_message_id=%s reply_message_id=%s",
+                message.message_id,
+                existing_reply_id,
+            )
+            return
+        if parse_mode is not None:
+            # HTML edit rejected -> let the caller retry as plain.
+            raise
+        LOGGER.info(
+            "channel edit skipped: reply not updatable "
+            "incoming_message_id=%s reply_message_id=%s",
+            message.message_id,
+            existing_reply_id,
+        )
+        return
+    _log_emit(chat_type, message, existing_reply_id, mode, edited=True)
 
 
 def _log_emit(chat_type: str, message, reply_message_id, mode: str, *, edited: bool) -> None:

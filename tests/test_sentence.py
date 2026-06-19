@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
+import pytest
 
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     TRANSLATION_UNAVAILABLE_NOTICE,
     LLMTranslationError,
     SentenceTranslator,
+    _call_llm_async,
     _llm_error_from_response,
 )
 
@@ -92,6 +96,123 @@ def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, s
     translator = SentenceTranslator(sample_db)
 
     assert translator.translate("这是一个需要翻译的句子。") == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [
+        httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(
+                httpx.ConnectError("connect failed", request=request)
+            )
+        ),
+        httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(
+                httpx.ReadTimeout("read timed out", request=request)
+            )
+        ),
+        httpx.MockTransport(lambda _request: httpx.Response(200, text="{not-json")),
+        httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+        httpx.MockTransport(lambda _request: httpx.Response(200, json={"choices": []})),
+        httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"choices": [{"message": {}}]})
+        ),
+    ],
+)
+def test_async_llm_failures_have_one_unavailable_error(monkeypatch, transport):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        with pytest.raises(LLMTranslationError) as exc_info:
+            await _call_llm_async("hello", (), transport=transport)
+        assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+    asyncio.run(run())
+
+
+def test_async_llm_budget_error_keeps_budget_notice(monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(429, text='{"error":"max_budget exceeded"}')
+    )
+
+    async def run():
+        with pytest.raises(LLMTranslationError) as exc_info:
+            await _call_llm_async("hello", (), transport=transport)
+        assert exc_info.value.user_message == BUDGET_EXHAUSTED_NOTICE
+
+    asyncio.run(run())
+
+
+def test_sync_translator_passes_configured_timeout(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    seen: list[float] = []
+
+    def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+    ):
+        seen.append(timeout_seconds)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db, llm_timeout_seconds=7.5)
+
+    assert translator.translate("这是一个需要翻译的句子。") == "translated"
+    assert seen == [7.5]
+
+
+def test_cancelled_async_translation_releases_concurrency_slot(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            locked_text,
+            locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await asyncio.Event().wait()
+            by_en = {en: placeholder for placeholder, _zh, en in locks}
+            return f"{by_en['Jinhsi']} says {by_en['Echo']}"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        translator = SentenceTranslator(sample_db, llm_max_concurrency=1)
+        first = asyncio.create_task(translator.translate_async("今汐说声骸很强"))
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        result = await asyncio.wait_for(
+            translator.translate_async("今汐说声骸很强"), timeout=0.2
+        )
+        assert result == "Jinhsi says Echo"
+        assert calls == 2
+
+    asyncio.run(run())
 
 
 def test_translate_english_exact_term_returns_official_chinese(sample_db):
