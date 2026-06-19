@@ -318,6 +318,29 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         if validate_telegram_html(translated):
+            plain_translated = strip_telegram_html(translated)
+            if _telegram_text_units(plain_translated) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+                if not _passes_channel_delivery_gate(context, chat_id):
+                    LOGGER.info(
+                        "channel autotranslate skipped: chat authorization changed "
+                        "before delivery chat_id=%s",
+                        chat_id,
+                    )
+                    return
+                await _emit(
+                    context,
+                    reply_index=reply_index,
+                    message=message,
+                    chat_id=chat_id,
+                    chat_type=chat_type,
+                    is_edit=is_edit,
+                    existing_reply_id=existing_reply_id,
+                    edit_work_token=edit_work_token,
+                    text=plain_translated,
+                    parse_mode=None,
+                    mode="HTML",
+                )
+                return
             try:
                 if not _passes_channel_delivery_gate(context, chat_id):
                     LOGGER.info(
@@ -358,7 +381,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     is_edit=is_edit,
                     existing_reply_id=existing_reply_id,
                     edit_work_token=edit_work_token,
-                    text=strip_telegram_html(translated),
+                    text=plain_translated,
                     parse_mode=None,
                     mode="plain-after-badrequest",
                 )
@@ -547,30 +570,39 @@ async def _edit_reply_chunks(
 ) -> None:
     if chat_id is None or not existing_reply_ids:
         return
-    remembered_reply_ids = list(existing_reply_ids)
-    for index, (reply_message_id, chunk) in enumerate(zip(existing_reply_ids, chunks)):
-        edit_applied = await _edit_existing_reply(
-            context,
-            message=message,
-            chat_type=chat_type,
-            existing_reply_id=reply_message_id,
-            text=chunk,
-            chat_id=chat_id,
-            parse_mode=parse_mode,
-            mode=mode,
-        )
-        if not edit_applied:
-            if index == 0:
-                await _delete_reply_chunks(
+    remembered_reply_ids: list[int] = []
+    remaining_reply_ids = list(existing_reply_ids)
+    for chunk in chunks:
+        while remaining_reply_ids:
+            reply_message_id = remaining_reply_ids.pop(0)
+            edit_applied = await _edit_existing_reply(
+                context,
+                message=message,
+                chat_type=chat_type,
+                existing_reply_id=reply_message_id,
+                text=chunk,
+                chat_id=chat_id,
+                parse_mode=parse_mode,
+                mode=mode,
+            )
+            if edit_applied:
+                remembered_reply_ids.append(reply_message_id)
+                break
+            if not remembered_reply_ids:
+                failed_delete_ids = await _delete_reply_chunks(
                     context,
                     message=message,
                     chat_id=chat_id,
-                    reply_message_ids=existing_reply_ids[1:],
+                    reply_message_ids=tuple(remaining_reply_ids),
                 )
-                reply_index.forget(chat_id, message.message_id)
-            return
-    if len(chunks) > len(existing_reply_ids):
-        for chunk in chunks[len(existing_reply_ids) :]:
+                if failed_delete_ids:
+                    reply_index.remember_many(
+                        chat_id, message.message_id, failed_delete_ids
+                    )
+                else:
+                    reply_index.forget(chat_id, message.message_id)
+                return
+        else:
             sent_message = await message.reply_text(
                 chunk,
                 parse_mode=parse_mode,
@@ -583,15 +615,20 @@ async def _edit_reply_chunks(
                     chat_id, message.message_id, tuple(remembered_reply_ids)
                 )
             _log_emit(chat_type, message, reply_message_id, mode, edited=False)
-    elif len(chunks) < len(existing_reply_ids):
-        await _delete_reply_chunks(
+    if remaining_reply_ids:
+        failed_delete_ids = await _delete_reply_chunks(
             context,
             message=message,
             chat_id=chat_id,
-            reply_message_ids=existing_reply_ids[len(chunks) :],
+            reply_message_ids=tuple(remaining_reply_ids),
         )
-        del remembered_reply_ids[len(chunks) :]
-    reply_index.remember_many(chat_id, message.message_id, tuple(remembered_reply_ids))
+        remembered_reply_ids.extend(failed_delete_ids)
+    if remembered_reply_ids:
+        reply_index.remember_many(
+            chat_id, message.message_id, tuple(remembered_reply_ids)
+        )
+    else:
+        reply_index.forget(chat_id, message.message_id)
 
 
 async def _delete_reply_chunks(
@@ -600,20 +637,44 @@ async def _delete_reply_chunks(
     message,
     chat_id: int,
     reply_message_ids: tuple[int, ...],
-) -> None:
+) -> tuple[int, ...]:
+    failed_reply_message_ids = []
     for reply_message_id in reply_message_ids:
         try:
             await context.bot.delete_message(
                 chat_id=chat_id,
                 message_id=reply_message_id,
             )
-        except TelegramError:
+        except BadRequest as exc:
+            if _delete_error_means_already_gone(exc):
+                LOGGER.info(
+                    "channel edit extra chunk already gone "
+                    "incoming_message_id=%s reply_message_id=%s",
+                    message.message_id,
+                    reply_message_id,
+                )
+                continue
+            failed_reply_message_ids.append(reply_message_id)
             LOGGER.info(
                 "channel edit extra chunk delete skipped "
                 "incoming_message_id=%s reply_message_id=%s",
                 message.message_id,
                 reply_message_id,
             )
+        except TelegramError:
+            failed_reply_message_ids.append(reply_message_id)
+            LOGGER.info(
+                "channel edit extra chunk delete skipped "
+                "incoming_message_id=%s reply_message_id=%s",
+                message.message_id,
+                reply_message_id,
+            )
+    return tuple(failed_reply_message_ids)
+
+
+def _delete_error_means_already_gone(exc: BadRequest) -> bool:
+    text = str(exc).lower()
+    return "not found" in text or "message to delete not found" in text
 
 
 async def _edit_existing_reply(

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
@@ -89,7 +89,12 @@ class FakeMessage:
 
 
 class FakeBot:
-    def __init__(self, default_status: str = "administrator", edit_raises=None):
+    def __init__(
+        self,
+        default_status: str = "administrator",
+        edit_raises=None,
+        delete_raises=None,
+    ):
         self.default_status = default_status
         self.member_calls: list[tuple[int, int]] = []
         self.edits: list[tuple[str, str | None, int | None, int | None]] = []
@@ -97,6 +102,8 @@ class FakeBot:
         self.deleted_messages: list[tuple[int | None, int | None]] = []
         # edit_raises(text, parse_mode, chat_id, message_id) -> Exception | None
         self._edit_raises = edit_raises
+        # delete_raises(chat_id, message_id) -> Exception | None
+        self._delete_raises = delete_raises
 
     async def get_chat_member(self, chat_id: int, user_id: int):
         self.member_calls.append((chat_id, user_id))
@@ -116,6 +123,10 @@ class FakeBot:
 
     async def delete_message(self, chat_id=None, message_id=None):
         self.deleted_messages.append((chat_id, message_id))
+        if self._delete_raises is not None:
+            exc = self._delete_raises(chat_id, message_id)
+            if exc is not None:
+                raise exc
         return True
 
 
@@ -957,9 +968,11 @@ def test_long_channel_reply_remembers_sent_chunks_after_mid_send_failure(
     update, message = channel_update(text=CN_TEXT, message_id=4288)
 
     original_reply_text = message.reply_text
+    send_attempts = []
 
     async def flaky_reply_text(text: str, **kwargs):
-        if len(message.replies) == 1:
+        send_attempts.append(text)
+        if len(send_attempts) == 2:
             raise BadRequest("temporary send failed")
         return await original_reply_text(text, **kwargs)
 
@@ -969,6 +982,7 @@ def test_long_channel_reply_remembers_sent_chunks_after_mid_send_failure(
         asyncio.run(channel_post_handler(update, context))
 
     assert len(message.replies) == 1
+    assert send_attempts == ["E" * TELEGRAM_TEXT_MESSAGE_LIMIT, "E" * 12]
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
     assert reply_index.get_many(-2001, 4288) == (5288,)
     assert len(calls) == 1
@@ -1190,6 +1204,95 @@ def test_channel_edit_reply_gone_prunes_tracked_continuation_chunks(
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
     assert reply_index.get_many(-2001, 4299) == ()
     assert len(calls) == 2
+
+
+def test_channel_edit_missing_continuation_chunk_replaces_and_drops_bad_id(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        [
+            "I" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 4),
+            "J" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6),
+        ]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    bot = FakeBot(
+        edit_raises=lambda _text, _parse_mode, _chat_id, message_id: (
+            BadRequest("Message to edit not found") if message_id == 5302 else None
+        )
+    )
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4301)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4301, edit_date=datetime.now(timezone.utc)
+    )
+
+    async def replacement_reply_text(text: str, **kwargs):
+        edit_message.replies.append(
+            (text, kwargs.get("parse_mode"), kwargs.get("reply_to_message_id"))
+        )
+        return SimpleNamespace(message_id=6302)
+
+    edit_message.reply_text = replacement_reply_text
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert bot.edits == [("J" * TELEGRAM_TEXT_MESSAGE_LIMIT, None, -2001, 5301)]
+    assert bot.edit_attempts == [
+        ("J" * TELEGRAM_TEXT_MESSAGE_LIMIT, None, -2001, 5301),
+        ("J" * 6, None, -2001, 5302),
+    ]
+    assert edit_message.replies == [("J" * 6, None, 4301)]
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4301) == (5301, 6302)
+    assert len(calls) == 2
+
+
+def test_channel_edit_keeps_failed_delete_tracked_for_retry(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        ["K" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 8), "short one", "short two"]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    failed_once = True
+
+    def delete_raises(_chat_id, message_id):
+        nonlocal failed_once
+        if message_id == 5304 and failed_once:
+            failed_once = False
+            return TelegramError("temporary delete failed")
+        return None
+
+    bot = FakeBot(delete_raises=delete_raises)
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4303)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+
+    first_edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4303, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(first_edit_update, context))
+
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert bot.deleted_messages == [(-2001, 5304)]
+    assert reply_index.get_many(-2001, 4303) == (5303, 5304)
+
+    second_edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4303, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(second_edit_update, context))
+
+    assert bot.deleted_messages == [(-2001, 5304), (-2001, 5304)]
+    assert reply_index.get_many(-2001, 4303) == (5303,)
+    assert len(calls) == 3
 
 
 def test_edit_waits_for_long_original_delivery_after_first_chunk_remembered(
