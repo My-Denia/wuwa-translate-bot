@@ -425,13 +425,6 @@ async def _emit(
         text, parse_mode, mode
     )
     if is_edit:
-        existing_reply_ids = (
-            reply_index.get_many(chat_id, message.message_id)
-            if chat_id is not None
-            else ()
-        )
-        if not existing_reply_ids and existing_reply_id is not None:
-            existing_reply_ids = (existing_reply_id,)
         if chat_id is not None and edit_work_token is not None:
             async with reply_index.edit_delivery_lock(chat_id, message.message_id):
                 if not reply_index.is_latest_edit(
@@ -444,6 +437,9 @@ async def _emit(
                         existing_reply_id,
                     )
                     return
+                existing_reply_ids = reply_index.get_many(chat_id, message.message_id)
+                if not existing_reply_ids and existing_reply_id is not None:
+                    existing_reply_ids = (existing_reply_id,)
                 await _edit_reply_chunks(
                     context,
                     reply_index=reply_index,
@@ -456,6 +452,13 @@ async def _emit(
                     mode=delivery_mode,
                 )
                 return
+        existing_reply_ids = (
+            reply_index.get_many(chat_id, message.message_id)
+            if chat_id is not None
+            else ()
+        )
+        if not existing_reply_ids and existing_reply_id is not None:
+            existing_reply_ids = (existing_reply_id,)
         await _edit_reply_chunks(
             context,
             reply_index=reply_index,
@@ -479,9 +482,11 @@ async def _emit(
         reply_message_id = getattr(sent_message, "message_id", None)
         if reply_message_id is not None:
             reply_message_ids.append(reply_message_id)
+            if chat_id is not None:
+                reply_index.remember_many(
+                    chat_id, message.message_id, tuple(reply_message_ids)
+                )
         _log_emit(chat_type, message, reply_message_id, delivery_mode, edited=False)
-    if chat_id is not None and reply_message_ids:
-        reply_index.remember_many(chat_id, message.message_id, tuple(reply_message_ids))
 
 
 def _channel_delivery_chunks(
@@ -489,7 +494,7 @@ def _channel_delivery_chunks(
 ) -> tuple[list[str], str | None, str]:
     if parse_mode == "HTML":
         visible_text = strip_telegram_html(text)
-        if len(visible_text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+        if _telegram_text_units(visible_text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
             return (
                 _split_telegram_text(visible_text),
                 None,
@@ -505,9 +510,27 @@ def _channel_delivery_chunks(
 def _split_telegram_text(
     text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
 ) -> list[str]:
-    if len(text) <= limit:
+    if _telegram_text_units(text) <= limit:
         return [text]
-    return [text[start : start + limit] for start in range(0, len(text), limit)]
+    chunks = []
+    current = []
+    current_units = 0
+    for char in text:
+        char_units = _telegram_text_units(char)
+        if current and current_units + char_units > limit:
+            chunks.append("".join(current))
+            current = [char]
+            current_units = char_units
+        else:
+            current.append(char)
+            current_units += char_units
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
+
+
+def _telegram_text_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
 async def _edit_reply_chunks(
@@ -548,6 +571,9 @@ async def _edit_reply_chunks(
             reply_message_id = getattr(sent_message, "message_id", None)
             if reply_message_id is not None:
                 remembered_reply_ids.append(reply_message_id)
+                reply_index.remember_many(
+                    chat_id, message.message_id, tuple(remembered_reply_ids)
+                )
             _log_emit(chat_type, message, reply_message_id, mode, edited=False)
     elif len(chunks) < len(existing_reply_ids):
         for reply_message_id in existing_reply_ids[len(chunks) :]:
