@@ -31,6 +31,7 @@ from wuwaterm.bot import (
     SENTENCE_USAGE_NOTICE,
     SERVICE_KEY,
     TERM_USAGE_NOTICE,
+    TELEGRAM_TEXT_MESSAGE_LIMIT,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
     UNAUTHORIZED_GROUP_NOTICE,
@@ -65,6 +66,8 @@ class FakeMessage:
         self.replies: list[tuple[str, int | None]] = []
 
     async def reply_text(self, text: str, **kwargs) -> None:
+        if len(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+            raise TelegramError("Message is too long")
         self.replies.append((text, kwargs.get("reply_to_message_id")))
 
 
@@ -314,6 +317,24 @@ def test_llm_path_allows_2000_chars(monkeypatch, sample_db):
 
     assert LLM_INPUT_CHAR_LIMIT == 2000
     assert message.replies == [("translated", None)]
+    assert len(calls) == 1
+
+
+def test_llm_output_over_telegram_limit_is_split(monkeypatch, sample_db):
+    calls = []
+    translated = "A" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 17)
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: translated)
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=559)
+    context = fake_context(sample_db, ["测" * LLM_INPUT_CHAR_LIMIT])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [
+        (translated[:TELEGRAM_TEXT_MESSAGE_LIMIT], 559),
+        (translated[TELEGRAM_TEXT_MESSAGE_LIMIT:], None),
+    ]
+    assert all(len(reply) <= TELEGRAM_TEXT_MESSAGE_LIMIT for reply, _ in message.replies)
+    assert "".join(reply for reply, _ in message.replies) == translated
     assert len(calls) == 1
 
 

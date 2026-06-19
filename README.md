@@ -159,7 +159,8 @@ admin (see that section).
   With the owner id unset, private chat rejects everyone (fail-closed).
   Channel-type chats are rejected entirely.
 - Per-chat throttling defaults to 10 lookups per minute.
-- LLM-path input is capped at 2000 characters.
+- LLM-path input is capped at 2000 characters. Replies longer than Telegram's
+  4096-character text message limit are split before sending.
 
 ### Group Authorization / auto-leave (`/authorize`, `/revoke`)
 
