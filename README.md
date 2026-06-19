@@ -35,37 +35,52 @@ by Git. This project does **not** redistribute Wuthering Waves game data; only a
 small derived term dictionary is built locally from the public source above. All
 Wuthering Waves game data and in-game terminology are © Kuro Games.
 
-## Setup
+## Local Development
 
-```powershell
-python -m venv .venv
-.venv\Scripts\python -m pip install -U pip
-.venv\Scripts\python -m pip install -e ".[dev]"
+WSL/Linux is the primary development environment. Keep the checkout on the WSL
+filesystem (for example under `~/projects/...`) so file watching,
+permissions, line endings, and virtualenv scripts behave like Linux.
+
+```bash
+test -x .venv/bin/python || uv venv .venv
+uv pip install -e ".[dev]"
+```
+
+Use `uv venv --clear .venv` only when intentionally rebuilding the local
+virtualenv from scratch.
+
+If the WSL image has `python3-venv` and pip installed, the standard-library
+path also works:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
 ## Build Dictionary
 
-```powershell
-.venv\Scripts\python -m wuwaterm.cli refresh-data --dest data\wutheringdata --profile arikatsu
-.venv\Scripts\python -m wuwaterm.cli build-db --data-dir data\wutheringdata --db data\terms.db --profile arikatsu
-.venv\Scripts\python scripts\verify_db.py data\terms.db --min-category resonator --min-category weapon --min-category echo --min-category item --min-category skill --min-category sonata_effect --min-category location
+```bash
+.venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
+.venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.db --profile arikatsu
+.venv/bin/python scripts/verify_db.py data/terms.db --min-category resonator --min-category weapon --min-category echo --min-category item --min-category skill --min-category sonata_effect --min-category location
 ```
 
 ## Lookup
 
-```powershell
-.venv\Scripts\python -m wuwaterm.cli lookup --db data\terms.db 声骸
-.venv\Scripts\python -m wuwaterm.cli sentence --db data\terms.db "今汐装备了声骸"
+```bash
+.venv/bin/python -m wuwaterm.cli lookup --db data/terms.db 声骸
+.venv/bin/python -m wuwaterm.cli sentence --db data/terms.db "今汐装备了声骸"
 ```
 
 ## Telegram Bot
 
 Create the bot and token in BotFather yourself, then run:
 
-```powershell
-$env:TELEGRAM_BOT_TOKEN="..."
-$env:WUWATERM_DB_PATH="data\terms.db"
-.venv\Scripts\python -m wuwaterm.cli bot
+```bash
+export TELEGRAM_BOT_TOKEN="..."
+export WUWATERM_DB_PATH="data/terms.db"
+.venv/bin/python -m wuwaterm.cli bot
 ```
 
 Commands:
@@ -283,12 +298,13 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## Validation
 
-```powershell
-.venv\Scripts\python scripts\verify_seed_terms.py data\terms.db --discrepancies goal-runs\wuwaterm-v2-translator\seed-discrepancies.json
-.venv\Scripts\python scripts\verify_exact_hits.py data\terms.db --sample-size 500
-.venv\Scripts\python scripts\verify_idempotent_build.py --data-dir data\wutheringdata --out-dir goal-runs\wuwaterm-v2-translator --profile arikatsu
-.venv\Scripts\python scripts\check_repo_hygiene.py
-pytest
+```bash
+.venv/bin/python scripts/verify_seed_terms.py data/terms.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
+.venv/bin/python scripts/verify_exact_hits.py data/terms.db --sample-size 500
+.venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
+.venv/bin/python scripts/check_repo_hygiene.py
+.venv/bin/python scripts/check_non_goals.py
+.venv/bin/python -m pytest
 ```
 
 `verify_idempotent_build.py` compares SHA256 over LF-normalized SQLite logical
@@ -298,6 +314,18 @@ do not create false mismatches.
 Live Telegram smoke is owner-gated. If `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_TEST_CHAT_ID` are not supplied, only the live smoke criterion is
 blocked; offline handler tests still validate the bot code.
+
+### Windows Reference
+
+Windows commands are still supported when needed:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -U pip
+.venv\Scripts\python -m pip install -e ".[dev]"
+$env:TELEGRAM_BOT_TOKEN="..."
+$env:WUWATERM_DB_PATH="data\terms.db"
+```
 
 ## Maintenance
 
