@@ -16,3 +16,12 @@ __pycache__
 *.db
 *.sqlite
 *.sqlite3
+
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*.Zone.Identifier
+*.lnk
+*.stackdump
+$RECYCLE.BIN
