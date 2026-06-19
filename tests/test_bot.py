@@ -304,7 +304,20 @@ def test_short_dictionary_miss_appends_bilingual_flag_without_hash(monkeypatch, 
     assert len(calls) == 1
 
 
-def test_llm_path_rejects_over_1000_chars_before_call(monkeypatch, sample_db):
+def test_llm_path_allows_2000_chars(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    update, message = fake_update()
+    context = fake_context(sample_db, ["测" * LLM_INPUT_CHAR_LIMIT])
+
+    asyncio.run(term_command(update, context))
+
+    assert LLM_INPUT_CHAR_LIMIT == 2000
+    assert message.replies == [("translated", None)]
+    assert len(calls) == 1
+
+
+def test_llm_path_rejects_over_2000_chars_before_call(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
     update, message = fake_update()
@@ -312,6 +325,7 @@ def test_llm_path_rejects_over_1000_chars_before_call(monkeypatch, sample_db):
 
     asyncio.run(term_command(update, context))
 
+    assert LLM_INPUT_CHAR_LIMIT == 2000
     assert message.replies == [
         (f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).", None)
     ]

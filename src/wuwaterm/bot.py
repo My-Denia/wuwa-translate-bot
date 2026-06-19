@@ -127,7 +127,7 @@ REVOKE_USAGE = (
     "Usage (owner only): /revoke in a group to remove it; /revoke <chat_id> in "
     "private to remove by id."
 )
-LLM_INPUT_CHAR_LIMIT = 1000
+LLM_INPUT_CHAR_LIMIT = 2000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
