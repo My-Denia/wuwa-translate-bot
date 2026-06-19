@@ -18,6 +18,7 @@ from wuwaterm.bot import (
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
     SERVICE_KEY,
+    TELEGRAM_TEXT_MESSAGE_LIMIT,
     THROTTLE_NOTICE,
     TRANSLATOR_KEY,
     AdminStatusCache,
@@ -68,12 +69,19 @@ class FakeMessage:
         self.date = date
         self.edit_date = edit_date
         self.replies: list[tuple[str, str | None, int | None]] = []
+        self._reply_count = 0
 
     async def reply_text(self, text: str, **kwargs):
+        if len(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+            raise BadRequest("Message is too long")
+        self._reply_count += 1
         self.replies.append(
             (text, kwargs.get("parse_mode"), kwargs.get("reply_to_message_id"))
         )
-        return SimpleNamespace(message_id=self.message_id + 1000)
+        base_offset = 1001 if self.edit_date is not None else 1000
+        return SimpleNamespace(
+            message_id=self.message_id + base_offset + self._reply_count - 1
+        )
 
 
 class FakeBot:
@@ -82,6 +90,7 @@ class FakeBot:
         self.member_calls: list[tuple[int, int]] = []
         self.edits: list[tuple[str, str | None, int | None, int | None]] = []
         self.edit_attempts: list[tuple[str, str | None, int | None, int | None]] = []
+        self.deleted_messages: list[tuple[int | None, int | None]] = []
         # edit_raises(text, parse_mode, chat_id, message_id) -> Exception | None
         self._edit_raises = edit_raises
 
@@ -92,12 +101,18 @@ class FakeBot:
     async def edit_message_text(self, text=None, chat_id=None, message_id=None, **kwargs):
         parse_mode = kwargs.get("parse_mode")
         self.edit_attempts.append((text, parse_mode, chat_id, message_id))
+        if text is not None and len(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+            raise BadRequest("Message is too long")
         if self._edit_raises is not None:
             exc = self._edit_raises(text, parse_mode, chat_id, message_id)
             if exc is not None:
                 raise exc
         self.edits.append((text, parse_mode, chat_id, message_id))
         return SimpleNamespace(message_id=message_id)
+
+    async def delete_message(self, chat_id=None, message_id=None):
+        self.deleted_messages.append((chat_id, message_id))
+        return True
 
 
 def channel_update(
@@ -859,6 +874,112 @@ def test_edit_dictionary_hit_updates_reply_in_place(monkeypatch, sample_db):
     assert edit_message.replies == []
     assert context.bot.edits == [("Echo", None, -2001, 5270)]
     assert calls == []
+
+
+def test_long_channel_html_reply_is_split_to_plain_chunks(monkeypatch, sample_db):
+    calls = []
+    long_visible_text = "A" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 17)
+    enable_mock_llm(
+        monkeypatch,
+        calls,
+        lambda _locked_text, _locks: f"<b>{long_visible_text}</b>",
+    )
+    context = make_context(sample_db)
+    update, message = channel_update(text=CN_TEXT, message_id=4280)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(message.replies) == 2
+    assert all(len(text) <= TELEGRAM_TEXT_MESSAGE_LIMIT for text, _, _ in message.replies)
+    assert [parse_mode for _text, parse_mode, _reply_to in message.replies] == [
+        None,
+        None,
+    ]
+    assert [reply_to for _text, _parse_mode, reply_to in message.replies] == [
+        4280,
+        4280,
+    ]
+    assert "".join(text for text, _parse_mode, _reply_to in message.replies) == (
+        long_visible_text
+    )
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4280) == (5280, 5281)
+    assert len(calls) == 1
+
+
+def test_long_channel_edit_adds_tracked_continuation_chunks(monkeypatch, sample_db):
+    calls = []
+    responses = iter(["short translation", "B" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 9)])
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    context = make_context(sample_db)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4290)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("short translation", "HTML", 4290)]
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4290, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert context.bot.edits == [
+        ("B" * TELEGRAM_TEXT_MESSAGE_LIMIT, None, -2001, 5290)
+    ]
+    assert edit_message.replies == [("B" * 9, None, 4290)]
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4290) == (5290, 5291)
+    assert len(calls) == 2
+
+
+def test_channel_edit_deletes_stale_extra_chunks_when_translation_shrinks(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(["C" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 11), "shorter translation"])
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    context = make_context(sample_db)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4295)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4295, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == [("shorter translation", "HTML", -2001, 5295)]
+    assert context.bot.deleted_messages == [(-2001, 5296)]
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4295) == (5295,)
+    assert len(calls) == 2
+
+
+def test_long_channel_edit_reply_gone_does_not_send_continuation_chunks(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(["short translation", "D" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 13)])
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    bot = FakeBot(edit_raises=lambda *_: BadRequest("Message to edit not found"))
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4298)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("short translation", "HTML", 4298)]
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4298, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert bot.edits == []
+    assert len(bot.edit_attempts) == 1
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4298) == (5298,)
+    assert len(calls) == 2
 
 
 def test_edit_identical_translation_is_silent_noop(monkeypatch, sample_db):

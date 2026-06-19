@@ -265,20 +265,19 @@ class AdminStatusCache:
 
 
 class ChannelReplyIndex:
-    """Maps a forwarded channel post to the bot's translation reply.
+    """Maps a forwarded channel post to the bot's translation reply IDs.
 
     When the linked channel edits a post, Telegram edits the auto-forwarded
     copy in the group in place (same message_id) and the listener fires
-    again. This index lets that edit update the existing reply instead of
-    adding a second one. In-memory and bounded by age (the channel
-    freshness window); a restart drops it, after which an edit finds no
-    entry and is skipped — degrading to "no update", never to a duplicate
-    reply.
+    again. This index lets that edit update existing reply chunks instead of
+    adding untracked duplicates. In-memory and bounded by age (the channel
+    freshness window); a restart drops it, after which an edit finds no entry
+    and is skipped, degrading to "no update", never to a duplicate reply.
     """
 
     def __init__(self, ttl_seconds: float = 300.0):
         self.ttl_seconds = ttl_seconds
-        self._entries: dict[tuple[int, int], tuple[float, int]] = {}
+        self._entries: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
         self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
         self._latest_edit_tokens: dict[tuple[int, int], int] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
@@ -291,13 +290,27 @@ class ChannelReplyIndex:
         reply_message_id: int,
         now: float | None = None,
     ) -> None:
+        self.remember_many(chat_id, message_id, (reply_message_id,), now=now)
+
+    def remember_many(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_message_ids: tuple[int, ...],
+        now: float | None = None,
+    ) -> None:
+        if not reply_message_ids:
+            return
         now = time.monotonic() if now is None else now
         if len(self._entries) >= CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD:
             self._entries = {
                 key: entry for key, entry in self._entries.items() if entry[0] > now
             }
             self._prune_edit_state()
-        self._entries[(chat_id, message_id)] = (now + self.ttl_seconds, reply_message_id)
+        self._entries[(chat_id, message_id)] = (
+            now + self.ttl_seconds,
+            tuple(reply_message_ids),
+        )
 
     def get(
         self, chat_id: int, message_id: int, now: float | None = None
@@ -307,7 +320,7 @@ class ChannelReplyIndex:
         entry = self._entries.get(key)
         if entry is None:
             return None
-        expires_at, reply_message_id = entry
+        expires_at, reply_message_ids = entry
         if now >= expires_at:
             del self._entries[key]
             self._latest_edit_tokens.pop(key, None)
@@ -315,7 +328,25 @@ class ChannelReplyIndex:
             if lock is not None and not lock.locked():
                 self._edit_delivery_locks.pop(key, None)
             return None
-        return reply_message_id
+        return reply_message_ids[0] if reply_message_ids else None
+
+    def get_many(
+        self, chat_id: int, message_id: int, now: float | None = None
+    ) -> tuple[int, ...]:
+        now = time.monotonic() if now is None else now
+        key = (chat_id, message_id)
+        entry = self._entries.get(key)
+        if entry is None:
+            return ()
+        expires_at, reply_message_ids = entry
+        if now >= expires_at:
+            del self._entries[key]
+            self._latest_edit_tokens.pop(key, None)
+            lock = self._edit_delivery_locks.get(key)
+            if lock is not None and not lock.locked():
+                self._edit_delivery_locks.pop(key, None)
+            return ()
+        return reply_message_ids
 
     def begin_edit(
         self, chat_id: int, message_id: int, update_id: int | None = None

@@ -16,6 +16,7 @@ from .bot import (
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     SERVICE_KEY,
+    TELEGRAM_TEXT_MESSAGE_LIMIT,
     TRANSLATOR_KEY,
     BotConfig,
     ChannelReplyIndex,
@@ -28,6 +29,7 @@ from .settings import ChatSettings
 
 
 LOGGER = logging.getLogger(__name__)
+LONG_OUTPUT_MODE_SUFFIX = "plain-split"
 
 
 # Telegram's HTML subset: https://core.telegram.org/bots/api#html-style
@@ -409,17 +411,27 @@ async def _emit(
     parse_mode: str | None,
     mode: str,
 ) -> None:
-    """Deliver one translation, then remember it for later edits.
+    """Deliver one translation, then remember its reply chunks for later edits.
 
-    New post: send an in-thread reply and remember (chat, post) -> reply id.
-    Edit: update that remembered reply in place instead of adding a second
-    one. On the edit path a "message is not modified" error is the dedup
-    ideal (identical re-translation) and is a silent no-op; an HTML edit
-    Telegram rejects re-raises so the caller's plain fallback runs; a failed
-    plain edit (reply deleted / uneditable) is swallowed — an edit must never
-    crash the listener or leave a duplicate.
+    New post: send one or more in-thread replies and remember their IDs.
+    Edit: update those remembered replies in place, add continuation chunks,
+    or delete stale extras. On the edit path, a "message is not modified"
+    error is the dedup ideal (identical re-translation) and is a silent no-op.
+    An HTML edit Telegram rejects re-raises so the caller's plain fallback
+    runs. A failed plain edit (reply deleted / uneditable) is swallowed; an
+    edit must never crash the listener or leave a duplicate.
     """
+    chunks, delivery_parse_mode, delivery_mode = _channel_delivery_chunks(
+        text, parse_mode, mode
+    )
     if is_edit:
+        existing_reply_ids = (
+            reply_index.get_many(chat_id, message.message_id)
+            if chat_id is not None
+            else ()
+        )
+        if not existing_reply_ids and existing_reply_id is not None:
+            existing_reply_ids = (existing_reply_id,)
         if chat_id is not None and edit_work_token is not None:
             async with reply_index.edit_delivery_lock(chat_id, message.message_id):
                 if not reply_index.is_latest_edit(
@@ -432,36 +444,127 @@ async def _emit(
                         existing_reply_id,
                     )
                     return
-                await _edit_existing_reply(
+                await _edit_reply_chunks(
                     context,
+                    reply_index=reply_index,
                     message=message,
                     chat_type=chat_type,
-                    existing_reply_id=existing_reply_id,
-                    text=text,
+                    existing_reply_ids=existing_reply_ids,
+                    chunks=chunks,
                     chat_id=chat_id,
-                    parse_mode=parse_mode,
-                    mode=mode,
+                    parse_mode=delivery_parse_mode,
+                    mode=delivery_mode,
                 )
                 return
-        await _edit_existing_reply(
+        await _edit_reply_chunks(
+            context,
+            reply_index=reply_index,
+            message=message,
+            chat_type=chat_type,
+            existing_reply_ids=existing_reply_ids,
+            chunks=chunks,
+            chat_id=chat_id,
+            parse_mode=delivery_parse_mode,
+            mode=delivery_mode,
+        )
+        return
+
+    reply_message_ids = []
+    for chunk in chunks:
+        sent_message = await message.reply_text(
+            chunk,
+            parse_mode=delivery_parse_mode,
+            reply_to_message_id=message.message_id,
+        )
+        reply_message_id = getattr(sent_message, "message_id", None)
+        if reply_message_id is not None:
+            reply_message_ids.append(reply_message_id)
+        _log_emit(chat_type, message, reply_message_id, delivery_mode, edited=False)
+    if chat_id is not None and reply_message_ids:
+        reply_index.remember_many(chat_id, message.message_id, tuple(reply_message_ids))
+
+
+def _channel_delivery_chunks(
+    text: str, parse_mode: str | None, mode: str
+) -> tuple[list[str], str | None, str]:
+    if parse_mode == "HTML":
+        visible_text = strip_telegram_html(text)
+        if len(visible_text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+            return (
+                _split_telegram_text(visible_text),
+                None,
+                f"{mode}-{LONG_OUTPUT_MODE_SUFFIX}",
+            )
+        return [text], parse_mode, mode
+    chunks = _split_telegram_text(text)
+    if len(chunks) > 1:
+        return chunks, parse_mode, f"{mode}-{LONG_OUTPUT_MODE_SUFFIX}"
+    return chunks, parse_mode, mode
+
+
+def _split_telegram_text(
+    text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
+) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    return [text[start : start + limit] for start in range(0, len(text), limit)]
+
+
+async def _edit_reply_chunks(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    reply_index: ChannelReplyIndex,
+    message,
+    chat_type: str,
+    existing_reply_ids: tuple[int, ...],
+    chunks: list[str],
+    chat_id: int | None,
+    parse_mode: str | None,
+    mode: str,
+) -> None:
+    if chat_id is None or not existing_reply_ids:
+        return
+    remembered_reply_ids = list(existing_reply_ids)
+    for reply_message_id, chunk in zip(existing_reply_ids, chunks):
+        edit_applied = await _edit_existing_reply(
             context,
             message=message,
             chat_type=chat_type,
-            existing_reply_id=existing_reply_id,
-            text=text,
+            existing_reply_id=reply_message_id,
+            text=chunk,
             chat_id=chat_id,
             parse_mode=parse_mode,
             mode=mode,
         )
-        return
-
-    sent_message = await message.reply_text(
-        text, parse_mode=parse_mode, reply_to_message_id=message.message_id
-    )
-    reply_message_id = getattr(sent_message, "message_id", None)
-    if chat_id is not None and reply_message_id is not None:
-        reply_index.remember(chat_id, message.message_id, reply_message_id)
-    _log_emit(chat_type, message, reply_message_id, mode, edited=False)
+        if not edit_applied:
+            return
+    if len(chunks) > len(existing_reply_ids):
+        for chunk in chunks[len(existing_reply_ids) :]:
+            sent_message = await message.reply_text(
+                chunk,
+                parse_mode=parse_mode,
+                reply_to_message_id=message.message_id,
+            )
+            reply_message_id = getattr(sent_message, "message_id", None)
+            if reply_message_id is not None:
+                remembered_reply_ids.append(reply_message_id)
+            _log_emit(chat_type, message, reply_message_id, mode, edited=False)
+    elif len(chunks) < len(existing_reply_ids):
+        for reply_message_id in existing_reply_ids[len(chunks) :]:
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=reply_message_id,
+                )
+            except BadRequest:
+                LOGGER.info(
+                    "channel edit extra chunk delete skipped "
+                    "incoming_message_id=%s reply_message_id=%s",
+                    message.message_id,
+                    reply_message_id,
+                )
+        del remembered_reply_ids[len(chunks) :]
+    reply_index.remember_many(chat_id, message.message_id, tuple(remembered_reply_ids))
 
 
 async def _edit_existing_reply(
@@ -474,7 +577,7 @@ async def _edit_existing_reply(
     chat_id: int | None,
     parse_mode: str | None,
     mode: str,
-) -> None:
+) -> bool:
     try:
         await context.bot.edit_message_text(
             text=text,
@@ -490,7 +593,7 @@ async def _edit_existing_reply(
                 message.message_id,
                 existing_reply_id,
             )
-            return
+            return True
         if parse_mode is not None:
             # HTML edit rejected -> let the caller retry as plain.
             raise
@@ -500,8 +603,9 @@ async def _edit_existing_reply(
             message.message_id,
             existing_reply_id,
         )
-        return
+        return False
     _log_emit(chat_type, message, existing_reply_id, mode, edited=True)
+    return True
 
 
 def _log_emit(chat_type: str, message, reply_message_id, mode: str, *, edited: bool) -> None:
