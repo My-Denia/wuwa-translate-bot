@@ -298,6 +298,8 @@ class ChannelReplyIndex:
         self._latest_edit_tokens: dict[tuple[int, int], int] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._next_edit_token = 0
+        self._save_failures = 0
+        self._last_save_ok: bool | None = None
         self._load()
 
     def remember(
@@ -436,6 +438,15 @@ class ChannelReplyIndex:
         if event is not None:
             event.set()
 
+    def persistence_enabled(self) -> bool:
+        return self.storage_path is not None
+
+    def save_failure_count(self) -> int:
+        return self._save_failures
+
+    def last_save_succeeded(self) -> bool | None:
+        return self._last_save_ok
+
     def _load(self) -> None:
         if self.storage_path is None or not self.storage_path.exists():
             return
@@ -471,7 +482,11 @@ class ChannelReplyIndex:
         try:
             self._save()
         except OSError:
+            self._save_failures += 1
+            self._last_save_ok = False
             LOGGER.warning("channel reply index save failed")
+        else:
+            self._last_save_ok = True
 
     def _save(self) -> None:
         assert self.storage_path is not None
@@ -1011,6 +1026,10 @@ def _status_text(
     profile = meta.get("source_profile") or "unknown"
     llm = "yes" if _llm_configured() else "no"
     channel_auto = "on" if config.channel_autotranslate else "off"
+    # Counting prunes expired entries; if that triggers a persistence write,
+    # the health fields below report the refreshed state.
+    tracked_channel_posts = reply_index.entry_count()
+    reply_index_persistence = "on" if reply_index.persistence_enabled() else "off"
     return (
         "wuwaterm /status\n"
         f"Dictionary terms: {service.term_count()}\n"
@@ -1018,13 +1037,25 @@ def _status_text(
         f"Data commit: {short_commit}\n"
         f"LLM configured: {llm}\n"
         f"Channel autotranslate: {channel_auto}\n"
-        f"Tracked channel posts: {reply_index.entry_count()}\n"
+        f"Tracked channel posts: {tracked_channel_posts}\n"
+        f"Channel reply persistence: {reply_index_persistence}\n"
+        f"Channel reply save failures: {reply_index.save_failure_count()}\n"
+        f"Channel reply last save: {_reply_index_last_save_status(reply_index)}\n"
         f"Authorized chats: {settings.allowed_count()}\n"
         f"Public chats: {settings.public_count()}\n"
         f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
         f"LLM input limit: {LLM_INPUT_CHAR_LIMIT}\n"
         f"Telegram reply limit: {TELEGRAM_TEXT_MESSAGE_LIMIT}"
     )
+
+
+def _reply_index_last_save_status(reply_index: ChannelReplyIndex) -> str:
+    if not reply_index.persistence_enabled():
+        return "not configured"
+    last_save = reply_index.last_save_succeeded()
+    if last_save is None:
+        return "not attempted"
+    return "ok" if last_save else "failed"
 
 
 def format_term_reply(service: TermService, query: str) -> str:
