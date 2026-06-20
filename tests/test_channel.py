@@ -1519,8 +1519,55 @@ def test_channel_reply_index_ignores_corrupt_persistence_file(tmp_path, caplog):
         index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
 
     assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
     assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
     assert "-2001" not in caplog.text
+    assert "JSONDecodeError" not in caplog.text
+    assert "Expecting" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[]",
+        '{"entries": {}}',
+    ],
+)
+def test_channel_reply_index_counts_malformed_persistence_payload(
+    tmp_path, caplog, payload
+):
+    path = tmp_path / "channel_replies.json"
+    path.write_text(payload, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
+    assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "entries" not in caplog.text
+
+
+def test_channel_reply_index_counts_unreadable_persistence_path(tmp_path, caplog):
+    path = tmp_path / "channel_replies.json"
+    path.mkdir()
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
+    assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "IsADirectoryError" not in caplog.text
 
 
 def test_channel_reply_index_save_failure_does_not_block_memory(tmp_path, caplog):
