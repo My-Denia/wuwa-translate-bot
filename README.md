@@ -122,6 +122,11 @@ Optional LLM environment variables:
   than this are never auto-translated — guards against Telegram update
   replays (restart backlog, bot admin promotion) translating channel
   history
+- `WUWATERM_CHANNEL_REPLY_INDEX_PATH`, optional; defaults to
+  `<db parent>/channel_replies.json` so recent channel post reply ids survive
+  container rebuilds when `data/` is bind-mounted. This file contains Telegram
+  chat/message ids and must stay in the ignored runtime data volume, not in
+  commits or public logs.
 - `WUWATERM_SOURCE_PROFILE`, default `arikatsu`; supported profiles are listed
   by `refresh-data --help` and `build-db --help`
 
@@ -161,6 +166,10 @@ admin (see that section).
 - Per-chat throttling defaults to 10 lookups per minute.
 - LLM-path input is capped at 2000 characters. Replies longer than Telegram's
   4096-character text message limit are split before sending.
+- `/status` is owner-only and reports operational counts and flags only:
+  dictionary term count, data profile/short commit, LLM configured yes/no,
+  channel auto-translation on/off, tracked channel-post count, allowlist/public
+  counts, and message limits. It does not print secrets or chat ids.
 
 ### Group Authorization / auto-leave (`/authorize`, `/revoke`)
 
@@ -261,10 +270,12 @@ post to Chinese. No command is involved.
 - Edited posts update the existing tracked reply chunks in place: when the
   linked channel edits a post, the bot re-translates and edits existing chunks,
   adds continuation chunks, or deletes stale extras instead of adding untracked
-  duplicates. The post-to-reply map is held in memory, so an edit with no
-  tracked reply — after a bot restart, for a post that was never translated, or
-  an edit made after the freshness window — is skipped silently; an edit never
-  produces a duplicate reply.
+  duplicates. The post-to-reply map is persisted to `data/channel_replies.json`
+  by default, so recent posts can still be reconciled after a container rebuild
+  or restart while they remain inside `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no
+  tracked reply exists — for a post that was never translated, a corrupt/missing
+  persistence file, or an edit made after the freshness window — the edit is
+  skipped silently; an edit never produces a duplicate reply.
 - Delivery precondition: Telegram privacy mode withholds channel
   auto-forwards from non-admin bots (slash commands still arrive). Make
   the bot an admin of the discussion group (any single right suffices);
@@ -284,7 +295,7 @@ Prepare or refresh data without starting the service:
 ```bash
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm refresh-data
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm build-db
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm verify-db
 ```
 
@@ -320,6 +331,11 @@ do not create false mismatches.
 Live Telegram smoke is owner-gated. If `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_TEST_CHAT_ID` are not supplied, only the live smoke criterion is
 blocked; offline handler tests still validate the bot code.
+
+`scripts/deploy_smoke.py` is a deployment reachability check, not a polling
+handler E2E test. It verifies `getMe`, and when `TELEGRAM_TEST_CHAT_ID` is set
+it sends one diagnostic message without printing the token or chat id. A real
+handler E2E still requires observing the bot's reply from Telegram.
 
 ### Windows Reference
 

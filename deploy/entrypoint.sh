@@ -10,12 +10,15 @@ case "${1:-bot}" in
     exec python -m wuwaterm.cli bot --db "$DB_PATH"
     ;;
   refresh-data)
-    exec python -m wuwaterm.cli refresh-data --dest "$DATA_DIR" --profile "$SOURCE_PROFILE"
+    shift
+    exec python -m wuwaterm.cli refresh-data --dest "$DATA_DIR" --profile "$SOURCE_PROFILE" "$@"
     ;;
   build-db)
-    exec python -m wuwaterm.cli build-db --data-dir "$DATA_DIR" --db "$DB_PATH" --profile "$SOURCE_PROFILE"
+    shift
+    exec python -m wuwaterm.cli build-db --data-dir "$DATA_DIR" --db "$DB_PATH" --profile "$SOURCE_PROFILE" "$@"
     ;;
   verify-db)
+    shift
     exec python scripts/verify_db.py "$DB_PATH" \
       --min-category resonator \
       --min-category weapon \
@@ -23,7 +26,8 @@ case "${1:-bot}" in
       --min-category item \
       --min-category skill \
       --min-category sonata_effect \
-      --min-category location
+      --min-category location \
+      "$@"
     ;;
   *)
     exec "$@"

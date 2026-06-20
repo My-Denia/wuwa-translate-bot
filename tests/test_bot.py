@@ -13,6 +13,7 @@ from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
+    CHANNEL_REPLY_INDEX_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
@@ -37,6 +38,7 @@ from wuwaterm.bot import (
     UNAUTHORIZED_GROUP_NOTICE,
     AdminStatusCache,
     BotConfig,
+    ChannelReplyIndex,
     PerChatRateLimiter,
     about_command,
     authorize_command,
@@ -45,6 +47,7 @@ from wuwaterm.bot import (
     public_command,
     revoke_command,
     sentence_command,
+    status_command,
     term_command,
     translate_query_async,
 )
@@ -55,6 +58,7 @@ from wuwaterm.sentence import (
     _llm_error_from_response,
 )
 from wuwaterm.settings import ChatSettings
+from wuwaterm.telegram_text import telegram_text_units
 
 
 class FakeMessage:
@@ -66,7 +70,7 @@ class FakeMessage:
         self.replies: list[tuple[str, int | None]] = []
 
     async def reply_text(self, text: str, **kwargs) -> None:
-        if len(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+        if telegram_text_units(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
             raise TelegramError("Message is too long")
         self.replies.append((text, kwargs.get("reply_to_message_id")))
 
@@ -186,6 +190,9 @@ def fake_context(
                 RATE_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 REJECT_LIMITER_KEY: PerChatRateLimiter(limit=config.rate_limit_per_minute),
                 ADMIN_CACHE_KEY: AdminStatusCache(),
+                CHANNEL_REPLY_INDEX_KEY: ChannelReplyIndex(
+                    ttl_seconds=config.channel_max_age_seconds
+                ),
                 CHAT_SETTINGS_KEY: chat_settings,
             }
         ),
@@ -334,6 +341,25 @@ def test_llm_output_over_telegram_limit_is_split(monkeypatch, sample_db):
         (translated[TELEGRAM_TEXT_MESSAGE_LIMIT:], None),
     ]
     assert all(len(reply) <= TELEGRAM_TEXT_MESSAGE_LIMIT for reply, _ in message.replies)
+    assert "".join(reply for reply, _ in message.replies) == translated
+    assert len(calls) == 1
+
+
+def test_llm_output_split_counts_emoji_as_utf16_units(monkeypatch, sample_db):
+    calls = []
+    translated = "😀" * (TELEGRAM_TEXT_MESSAGE_LIMIT // 2 + 3)
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: translated)
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=560)
+    context = fake_context(sample_db, ["测" * LLM_INPUT_CHAR_LIMIT])
+
+    asyncio.run(term_command(update, context))
+
+    assert [telegram_text_units(reply) for reply, _ in message.replies] == [
+        TELEGRAM_TEXT_MESSAGE_LIMIT,
+        6,
+    ]
+    assert message.replies[0][1] == 560
+    assert message.replies[1][1] is None
     assert "".join(reply for reply, _ in message.replies) == translated
     assert len(calls) == 1
 
@@ -730,8 +756,8 @@ def test_commandhandler_accepts_bot_username(sample_db):
 
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
-    """Pin evolution (deliberate): six command handlers (/tr+/term,
-    /sentence+/sent, /about, /public, /authorize, /revoke), exactly one passive
+    """Pin evolution (deliberate): seven command handlers (/tr+/term,
+    /sentence+/sent, /about, /status, /public, /authorize, /revoke), exactly one passive
     channel listener (the linked-channel hard boundary), and exactly one
     MY_CHAT_MEMBER handler (the group-authorization gate)."""
     app = create_application(
@@ -745,8 +771,8 @@ def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
     message_handlers = [h for h in handlers if isinstance(h, MessageHandler)]
 
     chat_member_handlers = [h for h in handlers if isinstance(h, ChatMemberHandler)]
-    assert len(handlers) == 8  # 6 command + 1 message + 1 chat-member
-    assert len(command_handlers) == 6
+    assert len(handlers) == 9  # 7 command + 1 message + 1 chat-member
+    assert len(command_handlers) == 7
     assert len(message_handlers) == 1
     assert len(chat_member_handlers) == 1
     # Repr verified against the installed PTB in this venv.
@@ -772,6 +798,7 @@ def test_data_plane_handlers_are_non_blocking_control_handlers_block(sample_db):
     assert by_commands[frozenset({"sentence", "sent"})].block is False
     assert message_handlers[0].block is False
     assert bool(by_commands[frozenset({"public"})].block) is True
+    assert bool(by_commands[frozenset({"status"})].block) is True
     assert bool(by_commands[frozenset({"authorize"})].block) is True
     assert bool(by_commands[frozenset({"revoke"})].block) is True
 
@@ -1511,6 +1538,45 @@ def test_about_contains_full_commit_from_db(sample_db):
     reply = message.replies[0][0]
     assert "e9234ffe094b2d944d16b222d31102e8ab32d954" in reply
     assert re.search(r"[0-9a-f]{40}", reply) is not None
+
+
+# --- /status owner diagnostics ---
+
+
+def test_status_owner_gets_sanitized_counts(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(sample_db, [])
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    settings.set_public(-2001, True)
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    reply_index.remember_many(-2001, 4001, (5001, 5002))
+
+    asyncio.run(status_command(update, context))
+
+    assert len(message.replies) == 1
+    reply = message.replies[0][0]
+    assert "wuwaterm /status" in reply
+    assert "LLM configured: yes" in reply
+    assert "Tracked channel posts: 1" in reply
+    assert "Authorized chats: 3" in reply
+    assert "Public chats: 1" in reply
+    assert "LLM input limit: 2000" in reply
+    assert "-2001" not in reply
+    assert "5001" not in reply
+    assert "test-key" not in reply
+    assert re.search(r"[0-9a-f]{40}", reply) is None
+
+
+def test_status_non_owner_is_silent(sample_db):
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=22)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(status_command(update, context))
+
+    assert message.replies == []
 
 
 # --- /public toggle ---

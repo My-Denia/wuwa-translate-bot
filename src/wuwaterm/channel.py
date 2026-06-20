@@ -26,6 +26,7 @@ from .lookup import TermService
 from .normalize import count_cjk, count_latin
 from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
 from .settings import ChatSettings
+from .telegram_text import split_telegram_text, telegram_text_units
 
 
 LOGGER = logging.getLogger(__name__)
@@ -319,7 +320,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if validate_telegram_html(translated):
             plain_translated = strip_telegram_html(translated)
-            if _telegram_text_units(plain_translated) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+            if telegram_text_units(plain_translated) > TELEGRAM_TEXT_MESSAGE_LIMIT:
                 if not _passes_channel_delivery_gate(context, chat_id):
                     LOGGER.info(
                         "channel autotranslate skipped: chat authorization changed "
@@ -517,43 +518,17 @@ def _channel_delivery_chunks(
 ) -> tuple[list[str], str | None, str]:
     if parse_mode == "HTML":
         visible_text = strip_telegram_html(text)
-        if _telegram_text_units(visible_text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
+        if telegram_text_units(visible_text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
             return (
-                _split_telegram_text(visible_text),
+                split_telegram_text(visible_text),
                 None,
                 f"{mode}-{LONG_OUTPUT_MODE_SUFFIX}",
             )
         return [text], parse_mode, mode
-    chunks = _split_telegram_text(text)
+    chunks = split_telegram_text(text)
     if len(chunks) > 1:
         return chunks, parse_mode, f"{mode}-{LONG_OUTPUT_MODE_SUFFIX}"
     return chunks, parse_mode, mode
-
-
-def _split_telegram_text(
-    text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
-) -> list[str]:
-    if _telegram_text_units(text) <= limit:
-        return [text]
-    chunks = []
-    current = []
-    current_units = 0
-    for char in text:
-        char_units = _telegram_text_units(char)
-        if current and current_units + char_units > limit:
-            chunks.append("".join(current))
-            current = [char]
-            current_units = char_units
-        else:
-            current.append(char)
-            current_units += char_units
-    if current:
-        chunks.append("".join(current))
-    return chunks or [""]
-
-
-def _telegram_text_units(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
 
 
 async def _edit_reply_chunks(

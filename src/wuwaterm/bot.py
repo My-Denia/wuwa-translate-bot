@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
 import logging
 import re
+import tempfile
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque
+from typing import Callable, Deque
 
 from telegram import ChatMember, Update
 from telegram.error import TelegramError
@@ -33,6 +35,10 @@ from .sentence import (
     _llm_configured,
 )
 from .settings import ChatSettings
+from .telegram_text import (
+    TELEGRAM_TEXT_MESSAGE_LIMIT,
+    split_telegram_text,
+)
 
 
 SERVICE_KEY = "wuwaterm_service"
@@ -128,7 +134,6 @@ REVOKE_USAGE = (
     "private to remove by id."
 )
 LLM_INPUT_CHAR_LIMIT = 2000
-TELEGRAM_TEXT_MESSAGE_LIMIT = 4096
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
@@ -151,6 +156,7 @@ class BotConfig:
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
     channel_max_age_seconds: int = 300
+    channel_reply_index_path: str | None = None
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY
 
@@ -181,6 +187,9 @@ class BotConfig:
             ),
             channel_max_age_seconds=int(
                 os.getenv("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "300")
+            ),
+            channel_reply_index_path=(
+                os.getenv("WUWATERM_CHANNEL_REPLY_INDEX_PATH", "").strip() or None
             ),
             llm_timeout_seconds=float(
                 os.getenv(
@@ -270,18 +279,26 @@ class ChannelReplyIndex:
     When the linked channel edits a post, Telegram edits the auto-forwarded
     copy in the group in place (same message_id) and the listener fires
     again. This index lets that edit update existing reply chunks instead of
-    adding untracked duplicates. In-memory and bounded by age (the channel
-    freshness window); a restart drops it, after which an edit finds no entry
-    and is skipped, degrading to "no update", never to a duplicate reply.
+    adding untracked duplicates. Entries are bounded by age (the channel
+    freshness window) and can be persisted; if an edit finds no entry, it is
+    skipped, degrading to "no update", never to a duplicate reply.
     """
 
-    def __init__(self, ttl_seconds: float = 300.0):
+    def __init__(
+        self,
+        ttl_seconds: float = 300.0,
+        storage_path: str | Path | None = None,
+        clock: Callable[[], float] = time.time,
+    ):
         self.ttl_seconds = ttl_seconds
+        self.storage_path = Path(storage_path) if storage_path is not None else None
+        self._clock = clock
         self._entries: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
         self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
         self._latest_edit_tokens: dict[tuple[int, int], int] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._next_edit_token = 0
+        self._load()
 
     def remember(
         self,
@@ -301,7 +318,7 @@ class ChannelReplyIndex:
     ) -> None:
         if not reply_message_ids:
             return
-        now = time.monotonic() if now is None else now
+        now = self._clock() if now is None else now
         if len(self._entries) >= CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD:
             self._entries = {
                 key: entry for key, entry in self._entries.items() if entry[0] > now
@@ -311,50 +328,61 @@ class ChannelReplyIndex:
             now + self.ttl_seconds,
             tuple(reply_message_ids),
         )
+        self._save_best_effort()
 
     def get(
         self, chat_id: int, message_id: int, now: float | None = None
     ) -> int | None:
-        now = time.monotonic() if now is None else now
+        now = self._clock() if now is None else now
         key = (chat_id, message_id)
         entry = self._entries.get(key)
         if entry is None:
             return None
         expires_at, reply_message_ids = entry
         if now >= expires_at:
-            del self._entries[key]
-            self._latest_edit_tokens.pop(key, None)
-            lock = self._edit_delivery_locks.get(key)
-            if lock is not None and not lock.locked():
-                self._edit_delivery_locks.pop(key, None)
+            self._forget_key(key, persist=False)
             return None
         return reply_message_ids[0] if reply_message_ids else None
 
     def get_many(
         self, chat_id: int, message_id: int, now: float | None = None
     ) -> tuple[int, ...]:
-        now = time.monotonic() if now is None else now
+        now = self._clock() if now is None else now
         key = (chat_id, message_id)
         entry = self._entries.get(key)
         if entry is None:
             return ()
         expires_at, reply_message_ids = entry
         if now >= expires_at:
-            del self._entries[key]
-            self._latest_edit_tokens.pop(key, None)
-            lock = self._edit_delivery_locks.get(key)
-            if lock is not None and not lock.locked():
-                self._edit_delivery_locks.pop(key, None)
+            self._forget_key(key, persist=False)
             return ()
         return reply_message_ids
 
     def forget(self, chat_id: int, message_id: int) -> None:
-        key = (chat_id, message_id)
+        self._forget_key((chat_id, message_id), persist=True)
+
+    def entry_count(self, now: float | None = None) -> int:
+        self.prune(now=now)
+        return len(self._entries)
+
+    def prune(self, now: float | None = None) -> None:
+        now = self._clock() if now is None else now
+        before = len(self._entries)
+        self._entries = {
+            key: entry for key, entry in self._entries.items() if entry[0] > now
+        }
+        self._prune_edit_state()
+        if len(self._entries) != before:
+            self._save_best_effort()
+
+    def _forget_key(self, key: tuple[int, int], *, persist: bool) -> None:
         self._entries.pop(key, None)
         self._latest_edit_tokens.pop(key, None)
         lock = self._edit_delivery_locks.get(key)
         if lock is not None and not lock.locked():
             self._edit_delivery_locks.pop(key, None)
+        if persist:
+            self._save_best_effort()
 
     def begin_edit(
         self, chat_id: int, message_id: int, update_id: int | None = None
@@ -407,6 +435,73 @@ class ChannelReplyIndex:
         event = self._in_flight.pop((chat_id, message_id), None)
         if event is not None:
             event.set()
+
+    def _load(self) -> None:
+        if self.storage_path is None or not self.storage_path.exists():
+            return
+        try:
+            with self.storage_path.open(encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            LOGGER.warning("channel reply index unreadable, starting empty")
+            return
+        if not isinstance(payload, dict):
+            return
+        rows = payload.get("entries")
+        if not isinstance(rows, list):
+            return
+        now = self._clock()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                chat_id = int(row["chat_id"])
+                message_id = int(row["message_id"])
+                expires_at = float(row["expires_at"])
+                reply_ids = tuple(int(item) for item in row["reply_message_ids"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if expires_at <= now or not reply_ids:
+                continue
+            self._entries[(chat_id, message_id)] = (expires_at, reply_ids)
+
+    def _save_best_effort(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self._save()
+        except OSError:
+            LOGGER.warning("channel reply index save failed")
+
+    def _save(self) -> None:
+        assert self.storage_path is not None
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for (chat_id, message_id), (expires_at, reply_ids) in sorted(
+            self._entries.items()
+        ):
+            rows.append(
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "expires_at": expires_at,
+                    "reply_message_ids": list(reply_ids),
+                }
+            )
+        payload = {"version": 1, "entries": rows}
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{self.storage_path.name}.", dir=self.storage_path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, self.storage_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def is_group_chat(update: Update) -> bool:
@@ -469,9 +564,7 @@ def _telegram_text_chunks(
     text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
 ) -> list[str]:
     """Split plain Telegram replies before Bot API rejects messages >4096 chars."""
-    if len(text) <= limit:
-        return [text]
-    return [text[start : start + limit] for start in range(0, len(text), limit)]
+    return split_telegram_text(text, limit=limit)
 
 
 def create_application(
@@ -499,12 +592,14 @@ def create_application(
     app.bot_data[REJECT_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
     app.bot_data[CHANNEL_REPLY_INDEX_KEY] = ChannelReplyIndex(
-        ttl_seconds=config.channel_max_age_seconds
+        ttl_seconds=config.channel_max_age_seconds,
+        storage_path=_channel_reply_index_path(config, db_path),
     )
     app.bot_data[CHAT_SETTINGS_KEY] = chat_settings
     app.add_handler(CommandHandler(["tr", "term"], term_command, block=False))
     app.add_handler(CommandHandler(["sentence", "sent"], sentence_command, block=False))
     app.add_handler(CommandHandler("about", about_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("public", public_command))
     app.add_handler(CommandHandler("authorize", authorize_command))
     app.add_handler(CommandHandler("revoke", revoke_command))
@@ -528,6 +623,12 @@ def _chat_settings_path_from_env(db_path: str | Path) -> Path:
     if explicit:
         return Path(explicit)
     return Path(db_path).resolve().parent / "chat_settings.json"
+
+
+def _channel_reply_index_path(config: BotConfig, db_path: str | Path) -> Path:
+    if config.channel_reply_index_path:
+        return Path(config.channel_reply_index_path)
+    return Path(db_path).resolve().parent / "channel_replies.json"
 
 
 def run_bot(db_path: str | Path, token: str | None = None) -> None:
@@ -865,6 +966,22 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await reply_to_user(update, _about_text(service, config))
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only runtime status. Counts only; no chat ids or secrets."""
+    message = update.effective_message
+    if not message:
+        return
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    if not _is_owner(update, config):
+        return
+    service: TermService = context.application.bot_data[SERVICE_KEY]
+    settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    reply_index: ChannelReplyIndex = context.application.bot_data[
+        CHANNEL_REPLY_INDEX_KEY
+    ]
+    await reply_to_user(update, _status_text(service, config, settings, reply_index))
+
+
 def _about_text(service: TermService, config: BotConfig) -> str:
     meta = service.metadata()
     profile = meta.get("source_profile") or "unknown"
@@ -879,6 +996,34 @@ def _about_text(service: TermService, config: BotConfig) -> str:
         f"Dictionary terms: {service.term_count()}\n"
         f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
         f"LLM: {llm}"
+    )
+
+
+def _status_text(
+    service: TermService,
+    config: BotConfig,
+    settings: ChatSettings,
+    reply_index: ChannelReplyIndex,
+) -> str:
+    meta = service.metadata()
+    commit = meta.get("wutheringdata_commit") or "unknown"
+    short_commit = commit[:12] if re.fullmatch(r"[0-9a-f]{40}", commit) else commit
+    profile = meta.get("source_profile") or "unknown"
+    llm = "yes" if _llm_configured() else "no"
+    channel_auto = "on" if config.channel_autotranslate else "off"
+    return (
+        "wuwaterm /status\n"
+        f"Dictionary terms: {service.term_count()}\n"
+        f"Data profile: {profile}\n"
+        f"Data commit: {short_commit}\n"
+        f"LLM configured: {llm}\n"
+        f"Channel autotranslate: {channel_auto}\n"
+        f"Tracked channel posts: {reply_index.entry_count()}\n"
+        f"Authorized chats: {settings.allowed_count()}\n"
+        f"Public chats: {settings.public_count()}\n"
+        f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
+        f"LLM input limit: {LLM_INPUT_CHAR_LIMIT}\n"
+        f"Telegram reply limit: {TELEGRAM_TEXT_MESSAGE_LIMIT}"
     )
 
 
