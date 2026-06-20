@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -1519,8 +1520,107 @@ def test_channel_reply_index_ignores_corrupt_persistence_file(tmp_path, caplog):
         index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
 
     assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
     assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
     assert "-2001" not in caplog.text
+    assert "JSONDecodeError" not in caplog.text
+    assert "Expecting" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[]",
+        '{"entries": {}}',
+    ],
+)
+def test_channel_reply_index_counts_malformed_persistence_payload(
+    tmp_path, caplog, payload
+):
+    path = tmp_path / "channel_replies.json"
+    path.write_text(payload, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
+    assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "entries" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "malformed_row",
+    [
+        [],
+        {"chat_id": -2001, "message_id": 4002, "expires_at": 1100.0},
+        {
+            "chat_id": -2001,
+            "message_id": 4002,
+            "expires_at": 1100.0,
+            "reply_message_ids": None,
+        },
+        {
+            "chat_id": -2001,
+            "message_id": 4002,
+            "expires_at": 1100.0,
+            "reply_message_ids": [],
+        },
+    ],
+)
+def test_channel_reply_index_counts_partially_malformed_rows(
+    tmp_path, caplog, malformed_row
+):
+    path = tmp_path / "channel_replies.json"
+    payload = {
+        "version": 1,
+        "entries": [
+            {
+                "chat_id": -2001,
+                "message_id": 4001,
+                "expires_at": 1100.0,
+                "reply_message_ids": [5001, 5002],
+            },
+            malformed_row,
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(
+            ttl_seconds=60.0, storage_path=path, clock=lambda: 1000.0
+        )
+
+    assert index.get_many(-2001, 4001) == (5001, 5002)
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
+    assert "channel reply index contained malformed rows" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "-2001" not in caplog.text
+    assert "4002" not in caplog.text
+    assert "reply_message_ids" not in caplog.text
+
+
+def test_channel_reply_index_counts_unreadable_persistence_path(tmp_path, caplog):
+    path = tmp_path / "channel_replies.json"
+    path.mkdir()
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    assert index.entry_count() == 0
+    assert index.persistence_enabled() is True
+    assert index.load_failure_count() == 1
+    assert index.last_load_succeeded() is False
+    assert "channel reply index unreadable" in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert "IsADirectoryError" not in caplog.text
 
 
 def test_channel_reply_index_save_failure_does_not_block_memory(tmp_path, caplog):

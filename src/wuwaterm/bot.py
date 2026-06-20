@@ -298,6 +298,8 @@ class ChannelReplyIndex:
         self._latest_edit_tokens: dict[tuple[int, int], int] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._next_edit_token = 0
+        self._load_failures = 0
+        self._last_load_ok: bool | None = None
         self._save_failures = 0
         self._last_save_ok: bool | None = None
         self._load()
@@ -441,11 +443,24 @@ class ChannelReplyIndex:
     def persistence_enabled(self) -> bool:
         return self.storage_path is not None
 
+    def load_failure_count(self) -> int:
+        return self._load_failures
+
+    def last_load_succeeded(self) -> bool | None:
+        return self._last_load_ok
+
     def save_failure_count(self) -> int:
         return self._save_failures
 
     def last_save_succeeded(self) -> bool | None:
         return self._last_save_ok
+
+    def _record_load_failure(
+        self, message: str = "channel reply index unreadable, starting empty"
+    ) -> None:
+        self._load_failures += 1
+        self._last_load_ok = False
+        LOGGER.warning(message)
 
     def _load(self) -> None:
         if self.storage_path is None or not self.storage_path.exists():
@@ -454,16 +469,20 @@ class ChannelReplyIndex:
             with self.storage_path.open(encoding="utf-8") as f:
                 payload = json.load(f)
         except (OSError, json.JSONDecodeError):
-            LOGGER.warning("channel reply index unreadable, starting empty")
+            self._record_load_failure()
             return
         if not isinstance(payload, dict):
+            self._record_load_failure()
             return
         rows = payload.get("entries")
         if not isinstance(rows, list):
+            self._record_load_failure()
             return
+        skipped_malformed_rows = False
         now = self._clock()
         for row in rows:
             if not isinstance(row, dict):
+                skipped_malformed_rows = True
                 continue
             try:
                 chat_id = int(row["chat_id"])
@@ -471,10 +490,19 @@ class ChannelReplyIndex:
                 expires_at = float(row["expires_at"])
                 reply_ids = tuple(int(item) for item in row["reply_message_ids"])
             except (KeyError, TypeError, ValueError):
+                skipped_malformed_rows = True
                 continue
             if expires_at <= now or not reply_ids:
+                if not reply_ids:
+                    skipped_malformed_rows = True
                 continue
             self._entries[(chat_id, message_id)] = (expires_at, reply_ids)
+        if skipped_malformed_rows:
+            self._record_load_failure(
+                "channel reply index contained malformed rows"
+            )
+        else:
+            self._last_load_ok = True
 
     def _save_best_effort(self) -> None:
         if self.storage_path is None:
@@ -1039,6 +1067,8 @@ def _status_text(
         f"Channel autotranslate: {channel_auto}\n"
         f"Tracked channel posts: {tracked_channel_posts}\n"
         f"Channel reply persistence: {reply_index_persistence}\n"
+        f"Channel reply load failures: {reply_index.load_failure_count()}\n"
+        f"Channel reply last load: {_reply_index_last_load_status(reply_index)}\n"
         f"Channel reply save failures: {reply_index.save_failure_count()}\n"
         f"Channel reply last save: {_reply_index_last_save_status(reply_index)}\n"
         f"Authorized chats: {settings.allowed_count()}\n"
@@ -1047,6 +1077,15 @@ def _status_text(
         f"LLM input limit: {LLM_INPUT_CHAR_LIMIT}\n"
         f"Telegram reply limit: {TELEGRAM_TEXT_MESSAGE_LIMIT}"
     )
+
+
+def _reply_index_last_load_status(reply_index: ChannelReplyIndex) -> str:
+    if not reply_index.persistence_enabled():
+        return "not configured"
+    last_load = reply_index.last_load_succeeded()
+    if last_load is None:
+        return "not attempted"
+    return "ok" if last_load else "failed"
 
 
 def _reply_index_last_save_status(reply_index: ChannelReplyIndex) -> str:

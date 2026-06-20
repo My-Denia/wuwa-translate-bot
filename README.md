@@ -171,8 +171,9 @@ admin (see that section).
   channel auto-translation on/off, tracked channel-post count, allowlist/public
   counts, channel reply persistence health, and message limits. It does not
   print secrets, storage paths, or chat ids.
-  Channel reply save failures are cumulative since process start; the last-save
-  field shows whether the most recent persistence write succeeded.
+  Channel reply load/save failures are cumulative since process start; the
+  last-load and last-save fields show whether the most recent persistence read
+  or write succeeded.
 
 ### Group Authorization / auto-leave (`/authorize`, `/revoke`)
 
