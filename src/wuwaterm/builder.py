@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -266,3 +268,28 @@ def build_database(
     records = iter_records(data_dir, profile.name)
     create_database(db_path, records, source_profile=profile)
     return len(records)
+
+
+def build_database_atomic(
+    data_dir: str | Path,
+    db_path: str | Path,
+    profile_name: str | None = None,
+) -> int:
+    """Build a database in the target directory, then atomically replace it."""
+    target = Path(db_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        count = build_database(data_dir, tmp_path, profile_name=profile_name)
+        os.replace(tmp_path, target)
+        return count
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
