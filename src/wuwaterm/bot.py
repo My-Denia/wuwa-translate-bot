@@ -455,6 +455,11 @@ class ChannelReplyIndex:
     def last_save_succeeded(self) -> bool | None:
         return self._last_save_ok
 
+    def _record_load_failure(self) -> None:
+        self._load_failures += 1
+        self._last_load_ok = False
+        LOGGER.warning("channel reply index unreadable, starting empty")
+
     def _load(self) -> None:
         if self.storage_path is None or not self.storage_path.exists():
             return
@@ -462,20 +467,14 @@ class ChannelReplyIndex:
             with self.storage_path.open(encoding="utf-8") as f:
                 payload = json.load(f)
         except (OSError, json.JSONDecodeError):
-            self._load_failures += 1
-            self._last_load_ok = False
-            LOGGER.warning("channel reply index unreadable, starting empty")
+            self._record_load_failure()
             return
         if not isinstance(payload, dict):
-            self._load_failures += 1
-            self._last_load_ok = False
-            LOGGER.warning("channel reply index unreadable, starting empty")
+            self._record_load_failure()
             return
         rows = payload.get("entries")
         if not isinstance(rows, list):
-            self._load_failures += 1
-            self._last_load_ok = False
-            LOGGER.warning("channel reply index unreadable, starting empty")
+            self._record_load_failure()
             return
         self._last_load_ok = True
         now = self._clock()
