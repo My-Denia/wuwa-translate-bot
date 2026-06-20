@@ -1561,6 +1561,9 @@ def test_status_owner_gets_sanitized_counts(monkeypatch, sample_db):
     assert "wuwaterm /status" in reply
     assert "LLM configured: yes" in reply
     assert "Tracked channel posts: 1" in reply
+    assert "Channel reply persistence: off" in reply
+    assert "Channel reply save failures: 0" in reply
+    assert "Channel reply last save: not configured" in reply
     assert "Authorized chats: 3" in reply
     assert "Public chats: 1" in reply
     assert "LLM input limit: 2000" in reply
@@ -1568,6 +1571,54 @@ def test_status_owner_gets_sanitized_counts(monkeypatch, sample_db):
     assert "5001" not in reply
     assert "test-key" not in reply
     assert re.search(r"[0-9a-f]{40}", reply) is None
+
+
+def test_status_reports_channel_reply_persistence_health_without_paths(
+    sample_db, tmp_path
+):
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(sample_db, [])
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("x", encoding="utf-8")
+    storage_path = blocked_parent / "channel_replies.json"
+    reply_index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=storage_path)
+    context.application.bot_data[CHANNEL_REPLY_INDEX_KEY] = reply_index
+
+    reply_index.remember_many(-2001, 4001, (5001,))
+    asyncio.run(status_command(update, context))
+
+    assert len(message.replies) == 1
+    reply = message.replies[0][0]
+    assert "Channel reply persistence: on" in reply
+    assert "Channel reply save failures: 1" in reply
+    assert "Channel reply last save: failed" in reply
+    assert str(tmp_path) not in reply
+    assert "-2001" not in reply
+    assert "4001" not in reply
+    assert "5001" not in reply
+
+
+def test_status_reports_healthy_channel_reply_persistence_without_paths(
+    sample_db, tmp_path
+):
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(sample_db, [])
+    storage_path = tmp_path / "channel_replies.json"
+    reply_index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=storage_path)
+    context.application.bot_data[CHANNEL_REPLY_INDEX_KEY] = reply_index
+
+    reply_index.remember_many(-2001, 4001, (5001,))
+    asyncio.run(status_command(update, context))
+
+    assert len(message.replies) == 1
+    reply = message.replies[0][0]
+    assert "Channel reply persistence: on" in reply
+    assert "Channel reply save failures: 0" in reply
+    assert "Channel reply last save: ok" in reply
+    assert str(tmp_path) not in reply
+    assert "-2001" not in reply
+    assert "4001" not in reply
+    assert "5001" not in reply
 
 
 def test_status_non_owner_is_silent(sample_db):

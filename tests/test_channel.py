@@ -1533,5 +1533,8 @@ def test_channel_reply_index_save_failure_does_not_block_memory(tmp_path, caplog
         index.remember_many(-2001, 4001, (5001,))
 
     assert index.get_many(-2001, 4001) == (5001,)
+    assert index.persistence_enabled() is True
+    assert index.save_failure_count() == 1
+    assert index.last_save_succeeded() is False
     assert "channel reply index save failed" in caplog.text
     assert "-2001" not in caplog.text

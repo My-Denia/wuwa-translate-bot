@@ -169,7 +169,10 @@ admin (see that section).
 - `/status` is owner-only and reports operational counts and flags only:
   dictionary term count, data profile/short commit, LLM configured yes/no,
   channel auto-translation on/off, tracked channel-post count, allowlist/public
-  counts, and message limits. It does not print secrets or chat ids.
+  counts, channel reply persistence health, and message limits. It does not
+  print secrets, storage paths, or chat ids.
+  Channel reply save failures are cumulative since process start; the last-save
+  field shows whether the most recent persistence write succeeded.
 
 ### Group Authorization / auto-leave (`/authorize`, `/revoke`)
 
