@@ -455,10 +455,12 @@ class ChannelReplyIndex:
     def last_save_succeeded(self) -> bool | None:
         return self._last_save_ok
 
-    def _record_load_failure(self) -> None:
+    def _record_load_failure(
+        self, message: str = "channel reply index unreadable, starting empty"
+    ) -> None:
         self._load_failures += 1
         self._last_load_ok = False
-        LOGGER.warning("channel reply index unreadable, starting empty")
+        LOGGER.warning(message)
 
     def _load(self) -> None:
         if self.storage_path is None or not self.storage_path.exists():
@@ -476,10 +478,11 @@ class ChannelReplyIndex:
         if not isinstance(rows, list):
             self._record_load_failure()
             return
-        self._last_load_ok = True
+        skipped_malformed_rows = False
         now = self._clock()
         for row in rows:
             if not isinstance(row, dict):
+                skipped_malformed_rows = True
                 continue
             try:
                 chat_id = int(row["chat_id"])
@@ -487,10 +490,19 @@ class ChannelReplyIndex:
                 expires_at = float(row["expires_at"])
                 reply_ids = tuple(int(item) for item in row["reply_message_ids"])
             except (KeyError, TypeError, ValueError):
+                skipped_malformed_rows = True
                 continue
             if expires_at <= now or not reply_ids:
+                if not reply_ids:
+                    skipped_malformed_rows = True
                 continue
             self._entries[(chat_id, message_id)] = (expires_at, reply_ids)
+        if skipped_malformed_rows:
+            self._record_load_failure(
+                "channel reply index contained malformed rows"
+            )
+        else:
+            self._last_load_ok = True
 
     def _save_best_effort(self) -> None:
         if self.storage_path is None:
