@@ -1473,3 +1473,65 @@ def test_channel_reply_index_remembers_gets_and_expires():
     assert index.get(-2001, 4001, now=299.9) == 5001
     assert index.get(-2001, 4001, now=300.0) is None  # expired at TTL
     assert index.get(-2001, 9999, now=0.0) is None  # unknown key
+
+
+def test_channel_reply_index_persists_and_loads_with_wall_clock_ttl(tmp_path):
+    now = 1000.0
+
+    def clock():
+        return now
+
+    path = tmp_path / "channel_replies.json"
+    index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path, clock=clock)
+    index.remember_many(-2001, 4001, (5001, 5002))
+
+    reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path, clock=clock)
+    assert reloaded.get_many(-2001, 4001) == (5001, 5002)
+
+    now = 1060.0
+    assert reloaded.get_many(-2001, 4001) == ()
+
+    expired = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path, clock=clock)
+    assert expired.get_many(-2001, 4001) == ()
+
+
+def test_channel_reply_index_expired_read_does_not_rewrite_storage(tmp_path):
+    now = 1000.0
+
+    def clock():
+        return now
+
+    path = tmp_path / "channel_replies.json"
+    index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path, clock=clock)
+    index.remember_many(-2001, 4001, (5001,))
+    persisted = path.read_text(encoding="utf-8")
+
+    now = 1060.0
+    assert index.get_many(-2001, 4001) == ()
+    assert path.read_text(encoding="utf-8") == persisted
+
+
+def test_channel_reply_index_ignores_corrupt_persistence_file(tmp_path, caplog):
+    path = tmp_path / "channel_replies.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    assert index.entry_count() == 0
+    assert "channel reply index unreadable" in caplog.text
+    assert "-2001" not in caplog.text
+
+
+def test_channel_reply_index_save_failure_does_not_block_memory(tmp_path, caplog):
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("x", encoding="utf-8")
+    path = blocked_parent / "channel_replies.json"
+    index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+
+    with caplog.at_level(logging.WARNING):
+        index.remember_many(-2001, 4001, (5001,))
+
+    assert index.get_many(-2001, 4001) == (5001,)
+    assert "channel reply index save failed" in caplog.text
+    assert "-2001" not in caplog.text

@@ -10,6 +10,6 @@ if [ "$env_mode" != "600" ]; then
 fi
 
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm refresh-data
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm build-db
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm build-db --atomic
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm verify-db
 sha256sum data/terms.db

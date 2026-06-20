@@ -149,3 +149,11 @@ class ChatSettings:
     def allowed_chats(self) -> list[int]:
         with self._lock:
             return sorted(self._allowed)
+
+    def allowed_count(self) -> int:
+        with self._lock:
+            return len(self._allowed)
+
+    def public_count(self) -> int:
+        with self._lock:
+            return sum(1 for value in self._public.values() if value)
