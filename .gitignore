@@ -14,6 +14,8 @@ goal-runs/
 *.db
 *.sqlite
 *.sqlite3
+channel_replies.json
+.channel_replies.json.*
 
 # Local environment, rules, and secrets.
 .env
