@@ -95,7 +95,7 @@ Optional LLM environment variables:
 - `WUWATERM_OPENAI_BASE_URL`, set explicitly to your LiteLLM gateway URL
 - `WUWATERM_OPENAI_API_KEY`
 - `WUWATERM_OPENAI_MODEL`
-- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `30`
+- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`
 - `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`; max in-flight LLM calls
 - `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
 - `WUWATERM_GROUP_TR_REJECT_TEXT`, default is the bilingual two-line reply
@@ -157,6 +157,10 @@ admin (see that section).
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <sentence>` translates with DB terms locked. Direction is auto-detected:
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
+- Replying to a formatted text or caption with a bare `/tr` or `/sentence`
+  preserves Telegram HTML formatting through the LLM path. Dictionary exact
+  and fuzzy hits remain official plain text, and invalid translated markup
+  falls back to plain text instead of failing the reply.
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
   user id; everyone else gets a short bilingual reply, default

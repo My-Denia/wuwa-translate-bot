@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Deque
 
 from telegram import ChatMember, Update
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -31,13 +31,16 @@ from .normalize import has_cjk
 from .sentence import (
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
+    LLMTranslationError,
     SentenceTranslator,
     _llm_configured,
 )
 from .settings import ChatSettings
+from .telegram_html import strip_telegram_html, validate_telegram_html
 from .telegram_text import (
     TELEGRAM_TEXT_MESSAGE_LIMIT,
     split_telegram_text,
+    telegram_text_units,
 )
 
 
@@ -557,8 +560,26 @@ def chat_id_for(update: Update) -> int | None:
     return int(chat.id) if chat else None
 
 
-def _replied_translatable_text(update: Update) -> str:
-    """Content of the message a command replies to: text, or caption for media.
+@dataclass(frozen=True)
+class TranslationRequest:
+    text: str
+    html: str | None = None
+
+
+@dataclass(frozen=True)
+class TranslationReply:
+    text: str
+    parse_mode: str | None = None
+
+
+def _translation_request(update: Update, inline_text: str) -> TranslationRequest:
+    if inline_text:
+        return TranslationRequest(text=inline_text)
+    return _replied_translation_request(update)
+
+
+def _replied_translation_request(update: Update) -> TranslationRequest:
+    """Content of the message a command replies to: text/caption plus HTML.
 
     Lets an authorized caller translate a message by replying to it with a bare
     command. Returns "" when there is no reply, or it carries nothing to
@@ -566,29 +587,87 @@ def _replied_translatable_text(update: Update) -> str:
     """
     message = update.effective_message
     if message is None:
-        return ""
+        return TranslationRequest(text="")
     replied = getattr(message, "reply_to_message", None)
     if replied is None:
-        return ""
+        return TranslationRequest(text="")
     content = getattr(replied, "text", None) or getattr(replied, "caption", None)
-    return content.strip() if content else ""
+    if not content:
+        return TranslationRequest(text="")
+    entities = ()
+    html = getattr(replied, "text_html", None) if getattr(replied, "text", None) else None
+    if html is not None:
+        entities = getattr(replied, "entities", None) or ()
+    if html is None:
+        html = (
+            getattr(replied, "caption_html", None)
+            if getattr(replied, "caption", None)
+            else None
+        )
+        if html is not None:
+            entities = getattr(replied, "caption_entities", None) or ()
+    text = content.strip()
+    html = html.strip() if isinstance(html, str) else None
+    return TranslationRequest(
+        text=text,
+        html=html if html and entities and _telegram_html_has_tags(html) else None,
+    )
 
 
-async def reply_to_user(update: Update, text: str) -> None:
+def _telegram_html_has_tags(html: str) -> bool:
+    return re.search(r"</?[A-Za-z][^>]*>", html) is not None
+
+
+async def reply_to_user(
+    update: Update, text: str, *, parse_mode: str | None = None
+) -> None:
     message = update.effective_message
     if not message:
         return
     chat = update.effective_chat
     chat_type = chat.type if chat else "unknown"
-    chunks = _telegram_text_chunks(text)
+    chunks, delivery_parse_mode = _reply_chunks(text, parse_mode)
     first_reply_to_message_id = message.message_id if is_group_chat(update) else None
     for index, chunk in enumerate(chunks):
         reply_to_message_id = first_reply_to_message_id if index == 0 else None
-        if reply_to_message_id is None:
-            sent_message = await message.reply_text(chunk)
-        else:
-            sent_message = await message.reply_text(
-                chunk, reply_to_message_id=reply_to_message_id
+        try:
+            sent_message, sent_text = await _send_reply_chunk_with_html_fallback(
+                message,
+                chunk,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode=delivery_parse_mode,
+            )
+        except BadRequest as exc:
+            if delivery_parse_mode is not None and _bad_request_is_html_parse_error(exc):
+                # Final guard for future send paths; the chunk helper normally
+                # strips invalid Telegram HTML before BadRequest escapes.
+                LOGGER.warning(
+                    "bot_reply fallback: HTML parse failed chat_type=%s "
+                    "incoming_message_id=%s error=%r",
+                    chat_type,
+                    message.message_id,
+                    exc,
+                )
+                await reply_to_user(update, _strip_telegram_html(text))
+                return
+            if (
+                reply_to_message_id is None
+                or not _bad_request_is_missing_reply_target(exc)
+            ):
+                raise
+            LOGGER.warning(
+                "bot_reply fallback: reply target missing chat_type=%s "
+                "incoming_message_id=%s error=%r",
+                chat_type,
+                message.message_id,
+                exc,
+            )
+            reply_to_message_id = None
+            sent_message, sent_text = await _send_reply_chunk_with_html_fallback(
+                message,
+                chunk,
+                reply_to_message_id=None,
+                parse_mode=delivery_parse_mode,
             )
         LOGGER.info(
             "bot_reply chat_type=%s incoming_message_id=%s reply_message_id=%s "
@@ -599,15 +678,81 @@ async def reply_to_user(update: Update, text: str) -> None:
             reply_to_message_id,
             index + 1,
             len(chunks),
-            chunk,
+            sent_text,
         )
 
 
-def _telegram_text_chunks(
-    text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
-) -> list[str]:
+async def _send_reply_chunk_with_html_fallback(
+    message, text: str, *, reply_to_message_id: int | None, parse_mode: str | None
+):
+    try:
+        sent_message = await _send_reply_chunk(
+            message, text, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode
+        )
+        return sent_message, text
+    except BadRequest as exc:
+        if parse_mode is None or not _bad_request_is_html_parse_error(exc):
+            raise
+        plain = _strip_telegram_html(text)
+        sent_message = await _send_reply_chunk(
+            message, plain, reply_to_message_id=reply_to_message_id, parse_mode=None
+        )
+        return sent_message, plain
+
+
+async def _send_reply_chunk(
+    message, text: str, *, reply_to_message_id: int | None, parse_mode: str | None
+):
+    kwargs = {}
+    if parse_mode is not None:
+        kwargs["parse_mode"] = parse_mode
+    if reply_to_message_id is None:
+        return await message.reply_text(text, do_quote=False, **kwargs)
+    return await message.reply_text(
+        text, reply_to_message_id=reply_to_message_id, **kwargs
+    )
+
+
+def _bad_request_is_missing_reply_target(exc: BadRequest) -> bool:
+    message = str(exc).casefold()
+    return "not found" in message and (
+        "replied" in message
+        or "reply" in message
+        or "reply_to_message" in message
+    )
+
+
+def _bad_request_is_html_parse_error(exc: BadRequest) -> bool:
+    message = str(exc).casefold()
+    return "parse" in message and (
+        "entity" in message or "entities" in message or "html" in message
+    )
+
+
+def _reply_chunks(
+    text: str, parse_mode: str | None, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT
+) -> tuple[list[str], str | None]:
+    if parse_mode == "HTML":
+        if not _validate_telegram_html(text):
+            return _telegram_text_chunks(_strip_telegram_html(text), limit), None
+        visible = _strip_telegram_html(text)
+        if telegram_text_units(visible) > limit:
+            return _telegram_text_chunks(visible, limit), None
+        return [text], parse_mode
+    return _telegram_text_chunks(text, limit), parse_mode
+
+
+def _telegram_text_chunks(text: str, limit: int = TELEGRAM_TEXT_MESSAGE_LIMIT) -> list[str]:
     """Split plain Telegram replies before Bot API rejects messages >4096 chars."""
     return split_telegram_text(text, limit=limit)
+
+
+def _validate_telegram_html(text: str) -> bool:
+    return validate_telegram_html(text)
+
+
+def _strip_telegram_html(text: str) -> str:
+    return strip_telegram_html(text)
 
 
 def create_application(
@@ -693,22 +838,22 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not message:
         return
     # Inline text wins; otherwise fall back to the replied-to message's content.
-    query = " ".join(context.args).strip() or _replied_translatable_text(update)
+    request = _translation_request(update, " ".join(context.args).strip())
     if not await _passes_authorization(update, context):
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
-    if not query:
+    if not request.text:
         await reply_to_user(update, TERM_USAGE_NOTICE)
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    translated = await translate_query_async(service, translator, query)
+    translated = await translate_request_async(service, translator, request)
     if not await _passes_delivery_gate(update, context):
         LOGGER.info("translation reply skipped: authorization changed before delivery")
         return
-    await reply_to_user(update, translated)
+    await reply_to_user(update, translated.text, parse_mode=translated.parse_mode)
 
 
 async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -716,22 +861,22 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not message:
         return
     # Inline text wins; otherwise fall back to the replied-to message's content.
-    text = " ".join(context.args).strip() or _replied_translatable_text(update)
+    request = _translation_request(update, " ".join(context.args).strip())
     if not await _passes_authorization(update, context):
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
-    if not text:
+    if not request.text:
         await reply_to_user(update, SENTENCE_USAGE_NOTICE)
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    translated = await translate_query_async(service, translator, text)
+    translated = await translate_request_async(service, translator, request)
     if not await _passes_delivery_gate(update, context):
         LOGGER.info("translation reply skipped: authorization changed before delivery")
         return
-    await reply_to_user(update, translated)
+    await reply_to_user(update, translated.text, parse_mode=translated.parse_mode)
 
 
 async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1146,6 +1291,50 @@ async def translate_query_async(
     if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
         translated = f"{translated}\n\n{DICT_MISS_FLAG}"
     return translated
+
+
+async def translate_request_async(
+    service: TermService,
+    translator: SentenceTranslator,
+    request: TranslationRequest,
+) -> TranslationReply:
+    prepared = translator.prepare_text(request.text)
+    if not prepared:
+        return TranslationReply("Nothing to translate after removing metadata.")
+    # Direction is auto-detected from the visible text. Dictionary and LLM use
+    # the same direction even when the LLM receives Telegram HTML.
+    to_chinese = not has_cjk(prepared)
+    result = service.lookup(prepared, limit=5)
+    if result.exact and result.best:
+        official = result.best.entry.zh if to_chinese else result.best.entry.en
+        if official:
+            return TranslationReply(official)
+    if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
+        return TranslationReply(
+            result.best.entry.zh if to_chinese else result.best.entry.en
+        )
+    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
+        return TranslationReply(
+            f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
+        )
+    if request.html:
+        if not _llm_configured():
+            translated = translator.translate(prepared, to_chinese=to_chinese)
+            if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+                translated = f"{translated}\n\n{DICT_MISS_FLAG}"
+            return TranslationReply(translated)
+        try:
+            translated = await translator.translate_html_async(
+                request.html, to_chinese=to_chinese
+            )
+        except LLMTranslationError as exc:
+            return TranslationReply(exc.user_message)
+        if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+            translated = f"{translated}\n\n{DICT_MISS_FLAG}"
+        if _validate_telegram_html(translated):
+            return TranslationReply(translated, parse_mode="HTML")
+        return TranslationReply(_strip_telegram_html(translated))
+    return TranslationReply(await translate_query_async(service, translator, prepared))
 
 
 def _is_ascii_fuzzy_query(text: str) -> bool:

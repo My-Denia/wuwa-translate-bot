@@ -27,7 +27,7 @@ TRANSLATION_UNAVAILABLE_NOTICE = (
     "翻译服务暂时不可用，请稍后再试。\n"
     "Translation service is temporarily unavailable. Please try again later."
 )
-DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
+DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
 
 
