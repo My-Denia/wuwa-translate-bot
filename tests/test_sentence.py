@@ -7,6 +7,7 @@ import pytest
 
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
+    DEFAULT_LLM_TIMEOUT_SECONDS,
     TRANSLATION_UNAVAILABLE_NOTICE,
     LLMTranslationError,
     SentenceTranslator,
@@ -169,6 +170,34 @@ def test_sync_translator_passes_configured_timeout(monkeypatch, sample_db):
 
     assert translator.translate("这是一个需要翻译的句子。") == "translated"
     assert seen == [7.5]
+
+
+def test_async_translator_uses_default_timeout(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    seen: list[float] = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        seen.append(timeout_seconds)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return await translator.translate_async("这是一个需要翻译的句子。")
+
+    assert asyncio.run(run()) == "translated"
+    assert seen == [DEFAULT_LLM_TIMEOUT_SECONDS]
+    assert DEFAULT_LLM_TIMEOUT_SECONDS == 45.0
 
 
 def test_cancelled_async_translation_releases_concurrency_slot(

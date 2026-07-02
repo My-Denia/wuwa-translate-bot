@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from telegram import Update, User
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
 from wuwaterm.bot import (
@@ -62,17 +62,30 @@ from wuwaterm.telegram_text import telegram_text_units
 
 
 class FakeMessage:
-    def __init__(self, message_id: int = 101, sender_chat_id: int | None = None):
+    def __init__(
+        self,
+        message_id: int = 101,
+        sender_chat_id: int | None = None,
+        reply_raises=None,
+    ):
         self.message_id = message_id
         self.sender_chat = (
             SimpleNamespace(id=sender_chat_id) if sender_chat_id is not None else None
         )
         self.replies: list[tuple[str, int | None]] = []
+        self.reply_kwargs: list[dict] = []
+        self._reply_raises = reply_raises
 
     async def reply_text(self, text: str, **kwargs) -> None:
         if telegram_text_units(text) > TELEGRAM_TEXT_MESSAGE_LIMIT:
             raise TelegramError("Message is too long")
+        self.reply_kwargs.append(dict(kwargs))
+        if self._reply_raises is not None:
+            exc = self._reply_raises(text, kwargs, len(self.reply_kwargs))
+            if exc is not None:
+                raise exc
         self.replies.append((text, kwargs.get("reply_to_message_id")))
+        return SimpleNamespace(message_id=self.message_id + len(self.replies))
 
 
 class FakeBot:
@@ -106,8 +119,13 @@ def fake_update(
     user_id: int | None = 11,
     sender_chat_id: int | None = None,
     reply_to=None,
+    reply_raises=None,
 ):
-    message = FakeMessage(message_id=message_id, sender_chat_id=sender_chat_id)
+    message = FakeMessage(
+        message_id=message_id,
+        sender_chat_id=sender_chat_id,
+        reply_raises=reply_raises,
+    )
     if reply_to is not None:
         message.reply_to_message = reply_to
     chat = SimpleNamespace(id=chat_id, type=chat_type)
@@ -277,6 +295,108 @@ def test_group_term_replies_to_asking_message(sample_db):
     assert message.replies == [("Echo", 555)]
 
 
+def test_group_reply_falls_back_when_reply_target_is_missing(sample_db, caplog):
+    def fail_initial_reply(_text, kwargs, call_number):
+        if call_number == 1:
+            assert kwargs == {"reply_to_message_id": 561}
+            return BadRequest("Message to be replied not found")
+        return None
+
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=561,
+        reply_raises=fail_initial_reply,
+    )
+    context = fake_context(sample_db, ["声骸"])
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", None)]
+    assert message.reply_kwargs == [
+        {"reply_to_message_id": 561},
+        {"do_quote": False},
+    ]
+    assert any("reply target missing" in record.getMessage() for record in caplog.records)
+
+
+def test_group_reply_non_missing_bad_request_still_fails(sample_db):
+    def fail_initial_reply(_text, _kwargs, call_number):
+        if call_number == 1:
+            return BadRequest("Message is too long")
+        return None
+
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=562,
+        reply_raises=fail_initial_reply,
+    )
+    context = fake_context(sample_db, ["声骸"])
+
+    with pytest.raises(BadRequest, match="Message is too long"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == []
+    assert message.reply_kwargs == [{"reply_to_message_id": 562}]
+
+
+def test_group_html_reply_missing_target_then_parse_error_falls_back_plain(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        assert html_mode is True
+        return f"<b>{placeholder_for(locks, 'Jinhsi')}</b> says hi"
+
+    def fail_then_parse_error(_text, kwargs, call_number):
+        if call_number == 1:
+            assert kwargs == {"reply_to_message_id": 563, "parse_mode": "HTML"}
+            return BadRequest("Message to be replied not found")
+        if call_number == 2:
+            assert kwargs == {"do_quote": False, "parse_mode": "HTML"}
+            return BadRequest("Can't parse entities: bad")
+        assert kwargs == {"do_quote": False}
+        return None
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text="今汐说你好",
+        caption=None,
+        text_html="<b>今汐</b>说你好",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        message_id=563,
+        reply_to=replied,
+        reply_raises=fail_then_parse_error,
+    )
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Jinhsi says hi", None)]
+    assert message.reply_kwargs == [
+        {"reply_to_message_id": 563, "parse_mode": "HTML"},
+        {"do_quote": False, "parse_mode": "HTML"},
+        {"do_quote": False},
+    ]
+
+
 def test_group_tr_admin_sentence_uses_llm(monkeypatch, sample_db):
     calls = []
 
@@ -339,6 +459,10 @@ def test_llm_output_over_telegram_limit_is_split(monkeypatch, sample_db):
     assert message.replies == [
         (translated[:TELEGRAM_TEXT_MESSAGE_LIMIT], 559),
         (translated[TELEGRAM_TEXT_MESSAGE_LIMIT:], None),
+    ]
+    assert message.reply_kwargs == [
+        {"reply_to_message_id": 559},
+        {"do_quote": False},
     ]
     assert all(len(reply) <= TELEGRAM_TEXT_MESSAGE_LIMIT for reply, _ in message.replies)
     assert "".join(reply for reply, _ in message.replies) == translated
@@ -753,6 +877,16 @@ def test_commandhandler_accepts_bot_username(sample_db):
     )
 
     assert handler.check_update(update)
+
+
+def test_create_application_wires_llm_timeout(sample_db):
+    app = create_application(
+        "123:ABC", sample_db, config=BotConfig(llm_timeout_seconds=12.5)
+    )
+
+    translator = app.bot_data[TRANSLATOR_KEY]
+
+    assert translator.llm_timeout_seconds == 12.5
 
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
@@ -1247,6 +1381,16 @@ def test_from_env_owner_valid_int_no_warning(monkeypatch, caplog):
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
+def test_default_llm_timeout_has_gateway_margin(monkeypatch):
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.delenv("WUWATERM_LLM_TIMEOUT_SECONDS", raising=False)
+
+    config = BotConfig.from_env()
+
+    assert BotConfig().llm_timeout_seconds == 45.0
+    assert config.llm_timeout_seconds == 45.0
+
+
 def test_from_env_parses_llm_timeout_and_concurrency(monkeypatch):
     monkeypatch.setenv("OWNER_USER_ID", "11")
     monkeypatch.setenv("WUWATERM_LLM_TIMEOUT_SECONDS", "7.5")
@@ -1385,15 +1529,184 @@ def test_tr_reply_to_chinese_message_translates_replied_content(sample_db):
     assert message.replies == [("Echo", None)]
 
 
+def test_tr_reply_to_formatted_message_preserves_html(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append((html_mode, to_chinese))
+        jinhsi = placeholder_for(locks, "Jinhsi")
+        echo = placeholder_for(locks, "Echo")
+        return (
+            f'<b>{jinhsi}</b> says '
+            f'<a href="https://example.com">{echo}</a> is strong'
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text="今汐说声骸很强",
+        caption=None,
+        text_html='<b>今汐</b>说<a href="https://example.com">声骸</a>很强',
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [(True, False)]
+    assert message.replies == [
+        (
+            '<b>Jinhsi</b> says '
+            '<a href="https://example.com">Echo</a> is strong',
+            None,
+        )
+    ]
+    assert message.reply_kwargs == [{"do_quote": False, "parse_mode": "HTML"}]
+
+
+def test_sentence_reply_to_formatted_caption_preserves_html(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        assert html_mode is True
+        assert to_chinese is False
+        jinhsi = placeholder_for(locks, "Jinhsi")
+        return f"<tg-spoiler>{jinhsi}</tg-spoiler> arrives"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text=None,
+        caption="今汐登场",
+        text_html=None,
+        caption_html="<tg-spoiler>今汐</tg-spoiler>登场",
+        caption_entities=[SimpleNamespace(type="spoiler")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(sentence_command(update, context))
+
+    assert message.replies == [("<tg-spoiler>Jinhsi</tg-spoiler> arrives", None)]
+    assert message.reply_kwargs == [{"do_quote": False, "parse_mode": "HTML"}]
+
+
+def test_formatted_reply_exact_dictionary_hit_stays_plain(sample_db):
+    replied = SimpleNamespace(
+        text="声骸",
+        caption=None,
+        text_html="<b>声骸</b>",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("Echo", None)]
+    assert message.reply_kwargs == [{"do_quote": False}]
+
+
+def test_formatted_reply_without_llm_uses_plain_fallback(monkeypatch, sample_db):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    replied = SimpleNamespace(
+        text="不存在词条",
+        caption=None,
+        text_html="<b>不存在词条</b>",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [
+        (
+            "不存在词条\n\n"
+            "(词典外,机器直译)\n"
+            "(Not in official dictionary; machine-translated)",
+            None,
+        )
+    ]
+    assert message.reply_kwargs == [{"do_quote": False}]
+
+
+def test_formatted_reply_invalid_llm_html_falls_back_to_plain(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        assert html_mode is True
+        return "<script>translated</script>"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text="这是一个需要翻译的句子。",
+        caption=None,
+        text_html="<b>这是一个需要翻译的句子。</b>",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("translated", None)]
+    assert message.reply_kwargs == [{"do_quote": False}]
+
+
 def test_tr_inline_text_wins_over_replied_content(sample_db):
     # Inline args take precedence; the replied-to content is ignored.
-    update, message = fake_update(reply_to=SimpleNamespace(text="守岸人", caption=None))
+    update, message = fake_update(
+        reply_to=SimpleNamespace(
+            text="守岸人",
+            caption=None,
+            text_html="<b>守岸人</b>",
+            caption_html=None,
+            entities=[SimpleNamespace(type="bold")],
+        )
+    )
     context = fake_context(sample_db, ["声骸"])
 
     asyncio.run(term_command(update, context))
 
     # 声骸 -> Echo (inline), NOT 守岸人 -> Shorekeeper (replied).
     assert message.replies == [("Echo", None)]
+    assert message.reply_kwargs == [{"do_quote": False}]
 
 
 def test_tr_reply_to_image_only_message_falls_through_to_usage(sample_db):

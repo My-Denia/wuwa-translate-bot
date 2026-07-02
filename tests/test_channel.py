@@ -35,7 +35,11 @@ from wuwaterm.channel import (
     validate_telegram_html,
 )
 from wuwaterm.lookup import TermService
-from wuwaterm.sentence import SentenceTranslator, _llm_error_from_response
+from wuwaterm.sentence import (
+    DEFAULT_LLM_TIMEOUT_SECONDS,
+    SentenceTranslator,
+    _llm_error_from_response,
+)
 from wuwaterm.settings import ChatSettings
 
 
@@ -259,6 +263,34 @@ def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, samp
             4001,
         )
     ]
+
+
+def test_channel_autotranslate_uses_default_llm_timeout(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    seen: list[float] = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        seen.append(timeout_seconds)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert seen == [DEFAULT_LLM_TIMEOUT_SECONDS]
+    assert DEFAULT_LLM_TIMEOUT_SECONDS == 45.0
+    assert message.replies == [("translated", "HTML", 4001)]
 
 
 def test_non_translatable_post_is_silent_and_consumes_no_throttle(monkeypatch, sample_db):
