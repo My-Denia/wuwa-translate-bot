@@ -372,6 +372,19 @@ def test_english_exact_term_post_emits_official_chinese(monkeypatch, sample_db):
     assert llm_calls == []
 
 
+def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "   ")
+    update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4018)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == []
+    assert context.bot.edits == []
+    assert len(calls) == 1
+
+
 def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):
     calls = []
 
