@@ -29,10 +29,12 @@ from telegram.ext import (
 from .lookup import TermService
 from .normalize import has_cjk
 from .sentence import (
+    BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMTranslationError,
     SentenceTranslator,
+    TRANSLATION_UNAVAILABLE_NOTICE,
     _llm_configured,
 )
 from .settings import ChatSettings
@@ -82,6 +84,9 @@ SENTENCE_USAGE_NOTICE = (
 DICT_MISS_FLAG = (
     "(词典外,机器直译)\n"
     "(Not in official dictionary; machine-translated)"
+)
+LLM_FAILURE_NOTICES = frozenset(
+    (BUDGET_EXHAUSTED_NOTICE, TRANSLATION_UNAVAILABLE_NOTICE)
 )
 # /public toggles whether non-admin members of a group can use the translate
 # commands. Default is admin-only. The /public command itself is always
@@ -1264,7 +1269,7 @@ def translate_query(service: TermService, translator: SentenceTranslator, query:
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = translator.translate(prepared, to_chinese=to_chinese)
-    if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+    if _should_append_dict_miss(prepared, translator, translated):
         translated = f"{translated}\n\n{DICT_MISS_FLAG}"
     return translated
 
@@ -1288,7 +1293,7 @@ async def translate_query_async(
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = await translator.translate_async(prepared, to_chinese=to_chinese)
-    if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+    if _should_append_dict_miss(prepared, translator, translated):
         translated = f"{translated}\n\n{DICT_MISS_FLAG}"
     return translated
 
@@ -1320,7 +1325,7 @@ async def translate_request_async(
     if request.html:
         if not _llm_configured():
             translated = translator.translate(prepared, to_chinese=to_chinese)
-            if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+            if _should_append_dict_miss(prepared, translator, translated):
                 translated = f"{translated}\n\n{DICT_MISS_FLAG}"
             return TranslationReply(translated)
         try:
@@ -1329,7 +1334,7 @@ async def translate_request_async(
             )
         except LLMTranslationError as exc:
             return TranslationReply(exc.user_message)
-        if _is_short_query(prepared) and not _has_locked_terms(translator, prepared):
+        if _should_append_dict_miss(prepared, translator, translated):
             translated = f"{translated}\n\n{DICT_MISS_FLAG}"
         if _validate_telegram_html(translated):
             return TranslationReply(translated, parse_mode="HTML")
@@ -1347,6 +1352,16 @@ def _is_short_query(text: str) -> bool:
 
 def _has_locked_terms(translator: SentenceTranslator, text: str) -> bool:
     return bool(translator.lock_terms(text).locks)
+
+
+def _should_append_dict_miss(
+    prepared: str, translator: SentenceTranslator, translated: str
+) -> bool:
+    return (
+        translated not in LLM_FAILURE_NOTICES
+        and _is_short_query(prepared)
+        and not _has_locked_terms(translator, prepared)
+    )
 
 
 async def _passes_authorization(

@@ -521,6 +521,22 @@ def test_term_command_blank_llm_output_returns_unavailable_notice(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("llm_output", ["   ", "\n\n"])
+def test_translate_query_blank_short_miss_does_not_append_dict_miss(
+    monkeypatch, sample_db, llm_output
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: llm_output)
+    service = TermService(sample_db)
+    translator = SentenceTranslator(sample_db)
+
+    result = asyncio.run(translate_query_async(service, translator, "foobar"))
+
+    assert result == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "Not in official dictionary" not in result
+    assert len(calls) == 1
+
+
 def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
