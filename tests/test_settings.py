@@ -14,6 +14,32 @@ def test_default_is_closed_when_file_missing(tmp_path: Path):
     assert not (tmp_path / "missing.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("false", False),
+        ("true", False),
+        (1, False),
+        (0, False),
+        (None, False),
+        ({}, False),
+        ([], False),
+    ],
+)
+def test_public_loader_requires_json_boolean_true(tmp_path: Path, value, expected):
+    path = tmp_path / "chat_settings.json"
+    path.write_text(
+        json.dumps({"public": {"-2001": value}, "allowed": []}),
+        encoding="utf-8",
+    )
+
+    settings = ChatSettings(path)
+
+    assert settings.is_public(-2001) is expected
+    assert settings.public_count() == (1 if expected else 0)
+
 def test_set_public_writes_file_and_reload_round_trips(tmp_path: Path):
     path = tmp_path / "chat_settings.json"
     settings = ChatSettings(path)

@@ -47,8 +47,10 @@ class ChatSettings:
         public = data.get("public")
         if isinstance(public, dict):
             for key, value in public.items():
+                if not isinstance(value, bool):
+                    continue
                 try:
-                    self._public[int(key)] = bool(value)
+                    self._public[int(key)] = value
                 except (TypeError, ValueError):
                     continue
         allowed = data.get("allowed")
