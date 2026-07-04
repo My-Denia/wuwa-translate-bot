@@ -24,6 +24,12 @@ def add_synthetic_terms(sample_db, records):
         conn.commit()
 
 
+def enable_llm_env(monkeypatch):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+
 def test_sentence_locks_known_terms_without_llm(monkeypatch, sample_db):
     monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -34,6 +40,79 @@ def test_sentence_locks_known_terms_without_llm(monkeypatch, sample_db):
     translator = SentenceTranslator(sample_db)
 
     assert translator.translate("今汐装备了声骸") == "Jinhsi装备了Echo"
+
+
+def test_sync_translate_llm_runs_outside_event_loop(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    assert translator.translate("这是一句普通文本") == "translated"
+
+
+def test_sync_translate_without_llm_still_works_inside_event_loop(monkeypatch, sample_db):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return translator.translate("今汐装备了声骸")
+
+    assert asyncio.run(run()) == "Jinhsi装备了Echo"
+
+
+def test_sync_translate_with_llm_inside_event_loop_raises_clear_error(
+    monkeypatch, sample_db
+):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(*args, **kwargs):
+        raise AssertionError("sync wrapper should fail before calling the LLM")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        with pytest.raises(RuntimeError, match="translate_async"):
+            translator.translate("这是一句普通文本")
+
+    asyncio.run(run())
+
+
+def test_async_translate_with_llm_inside_event_loop_still_works(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return await translator.translate_async("这是一句普通文本")
+
+    assert asyncio.run(run()) == "translated"
 
 
 def test_lock_placeholders_restore_official_terms(sample_db):
