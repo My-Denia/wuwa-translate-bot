@@ -94,6 +94,7 @@ details.
 
 ## Guides
 
+- [Changelog](CHANGELOG.md): notable source changes by release.
 - [Deployment](docs/deployment.md): Docker Compose service on the VPS, `.env`
   handling, data refresh commands, and smoke checks.
 - [Data Refresh](docs/data-refresh.md): source profiles, local setup, DB build,
@@ -105,6 +106,8 @@ details.
   settings, and secret handling.
 - [Validation](docs/validation.md): offline validation commands, live smoke
   caveats, and Windows reference commands.
+- [Release Checklist](docs/release-checklist.md): release metadata, validation,
+  privacy notes, distribution boundaries, and release note template.
 
 ## Deployment Entry
 
