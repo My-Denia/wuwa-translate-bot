@@ -94,6 +94,7 @@ details.
 
 ## Guides
 
+- [Changelog](CHANGELOG.md): notable source changes by release.
 - [Deployment](docs/deployment.md): Docker Compose service on the VPS, `.env`
   handling, data refresh commands, and smoke checks.
 - [Data Refresh](docs/data-refresh.md): source profiles, local setup, DB build,
