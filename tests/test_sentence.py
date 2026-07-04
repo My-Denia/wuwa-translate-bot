@@ -118,6 +118,16 @@ def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, s
         httpx.MockTransport(
             lambda _request: httpx.Response(200, json={"choices": [{"message": {}}]})
         ),
+        httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"choices": [{"message": {"content": "   "}}]}
+            )
+        ),
+        httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"choices": [{"message": {"content": "\n\n"}}]}
+            )
+        ),
     ],
 )
 def test_async_llm_failures_have_one_unavailable_error(monkeypatch, transport):
@@ -128,6 +138,36 @@ def test_async_llm_failures_have_one_unavailable_error(monkeypatch, transport):
     async def run():
         with pytest.raises(LLMTranslationError) as exc_info:
             await _call_llm_async("hello", (), transport=transport)
+        assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("llm_output", ["", "   ", "\n\n"])
+def test_html_translation_blank_llm_output_is_unavailable(
+    monkeypatch, sample_db, llm_output
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        assert html_mode is True
+        return llm_output
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        with pytest.raises(LLMTranslationError) as exc_info:
+            await translator.translate_html_async("<b>今汐</b>说声骸很强")
         assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
     asyncio.run(run())

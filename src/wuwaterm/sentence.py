@@ -49,6 +49,15 @@ class LockedSentence:
         return result
 
 
+def _require_nonblank_llm_output(content: str) -> str:
+    if not isinstance(content, str):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
+    normalized = content.strip()
+    if not normalized:
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
+    return normalized
+
+
 class SentenceTranslator:
     def __init__(
         self,
@@ -107,6 +116,7 @@ class SentenceTranslator:
                 )
             else:
                 translated = self._call_llm_sync(locked.locked_text, locked.locks)
+            translated = _require_nonblank_llm_output(translated)
         except LLMTranslationError as exc:
             return exc.user_message
         return locked.restore(translated, to_en=not to_chinese)
@@ -132,6 +142,7 @@ class SentenceTranslator:
                 translated = await self._call_llm_async_limited(
                     locked.locked_text, locked.locks
                 )
+            translated = _require_nonblank_llm_output(translated)
         except LLMTranslationError as exc:
             return exc.user_message
         return locked.restore(translated, to_en=not to_chinese)
@@ -152,6 +163,7 @@ class SentenceTranslator:
             translated = self._call_llm_sync(
                 locked.locked_text, locked.locks, html_mode=True
             )
+        translated = _require_nonblank_llm_output(translated)
         return locked.restore(translated, to_en=not to_chinese)
 
     async def translate_html_async(
@@ -170,6 +182,7 @@ class SentenceTranslator:
             translated = await self._call_llm_async_limited(
                 locked.locked_text, locked.locks, html_mode=True
             )
+        translated = _require_nonblank_llm_output(translated)
         return locked.restore(translated, to_en=not to_chinese)
 
     async def _call_llm_async_limited(
@@ -372,7 +385,7 @@ def _extract_llm_content(data: Any) -> str:
     content = message["content"]
     if not isinstance(content, str):
         raise ValueError("LLM content is not text")
-    return content.strip()
+    return _require_nonblank_llm_output(content)
 
 
 def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:

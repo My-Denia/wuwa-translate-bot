@@ -54,6 +54,7 @@ from wuwaterm.bot import (
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
+    TRANSLATION_UNAVAILABLE_NOTICE,
     SentenceTranslator,
     _llm_error_from_response,
 )
@@ -501,6 +502,23 @@ def test_llm_path_rejects_over_2000_chars_before_call(monkeypatch, sample_db):
         (f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).", None)
     ]
     assert calls == []
+
+
+@pytest.mark.parametrize("llm_output", ["   ", "\n\n"])
+def test_term_command_blank_llm_output_returns_unavailable_notice(
+    monkeypatch, sample_db, llm_output
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: llm_output)
+    update, message = fake_update()
+    context = fake_context(
+        sample_db, ["这是一个需要翻译的完整句子，请翻译一下。"]
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [(TRANSLATION_UNAVAILABLE_NOTICE, None)]
+    assert len(calls) == 1
 
 
 def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sample_db):
