@@ -8,7 +8,7 @@ Primary source:
 - pinned commit: `58ec43698d2b4e188cb285467ce1ae887612dd92`
 - pinned version: `GameVer 3.4.0 | ResVer 3.4.13`
 
-Fallback mirrors to try manually if the primary source is unavailable:
+Fallback mirror to try manually if the primary source is unavailable:
 
 - `https://github.com/Dimbreath/WutheringData` is frozen at 3.1.0
   (`e9234ffe094b2d944d16b222d31102e8ab32d954`, 2026-03-13) and is kept only

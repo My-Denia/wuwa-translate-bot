@@ -17,13 +17,10 @@ Commands:
 - `/term 今汐` returns `Jinhsi`
 - `/sentence 今汐装备了声骸` locks known DB terms before translation
 
-Optional LLM environment variables:
+LLM configuration is documented in [Privacy And LLM](privacy-and-llm.md).
 
-- `WUWATERM_OPENAI_BASE_URL`, set explicitly to your LiteLLM gateway URL
-- `WUWATERM_OPENAI_API_KEY`
-- `WUWATERM_OPENAI_MODEL`
-- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`
-- `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`; max in-flight LLM calls
+Optional Telegram/runtime environment variables:
+
 - `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
 - `WUWATERM_GROUP_TR_REJECT_TEXT`, default is the bilingual two-line reply
   `仅群管理员可用 /tr` then `Only group admins can use /tr`
@@ -205,9 +202,11 @@ post to Chinese. No command is involved.
 - Edited posts update the existing tracked reply chunks in place: when the
   linked channel edits a post, the bot re-translates and edits existing chunks,
   adds continuation chunks, or deletes stale extras instead of adding untracked
-  duplicates. The post-to-reply map is persisted to `data/channel_replies.json`
-  by default, so recent posts can still be reconciled after a container rebuild
-  or restart while they remain inside `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no
+  duplicates. The post-to-reply map is persisted to
+  `<db parent>/channel_replies.json` by default; in the standard Docker layout
+  this is `data/channel_replies.json`. Recent posts can still be reconciled
+  after a container rebuild or restart while they remain inside
+  `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no
   tracked reply exists — for a post that was never translated, a corrupt/missing
   persistence file, or an edit made after the freshness window — the edit is
   skipped silently; an edit never produces a duplicate reply.
