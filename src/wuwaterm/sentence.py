@@ -30,6 +30,10 @@ TRANSLATION_UNAVAILABLE_NOTICE = (
 )
 DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_LLM_MAX_CONCURRENCY = 4
+SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
+    "Synchronous sentence translation cannot call the LLM from a running "
+    "event loop; use translate_async() or translate_html_async() instead."
+)
 
 
 class LLMTranslationError(RuntimeError):
@@ -128,6 +132,12 @@ class SentenceTranslator:
         return LockedSentence(locked_text="".join(locked_parts), locks=tuple(locks))
 
     def translate(self, text: str, *, to_chinese: bool = False) -> str:
+        """Translate plain text through the synchronous API.
+
+        Async callers should use ``translate_async`` when LLM translation is
+        configured; the sync API cannot run an LLM request inside an existing
+        event loop.
+        """
         prepared = self.prepare_text(text)
         if not prepared:
             return ""
@@ -183,6 +193,8 @@ class SentenceTranslator:
         Skips ``prepare_text``/``normalize_user_text`` on purpose: normalization
         would mangle tags and strip ``>`` quote bars. ``LLMTranslationError``
         propagates to the caller so the passive channel path can stay silent.
+        Async callers should use ``translate_html_async``; the sync API cannot
+        run an LLM request inside an existing event loop.
         """
         locked = self._lock_terms(html_text)
         if to_chinese:
@@ -318,6 +330,14 @@ _HTML_MODE_INSTRUCTION_ZH = (
 )
 
 
+def _ensure_sync_llm_outside_running_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(SYNC_TRANSLATION_RUNNING_LOOP_ERROR)
+
+
 def _call_llm(
     locked_text: str,
     locks: tuple[tuple[str, str, str], ...],
@@ -325,6 +345,7 @@ def _call_llm(
     to_chinese: bool = False,
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
 ) -> str:
+    _ensure_sync_llm_outside_running_loop()
     return asyncio.run(
         _call_llm_async(
             locked_text,
