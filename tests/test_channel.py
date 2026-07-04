@@ -587,13 +587,22 @@ def test_non_exact_channel_post_skips_without_llm_config(monkeypatch, sample_db)
     disable_llm(monkeypatch)
     llm_calls = forbid_llm_call(monkeypatch)
     update, message = channel_update(text=CN_TEXT, message_id=4095)
-    context = make_context(sample_db)
+    context = make_context(
+        sample_db,
+        config=BotConfig(rate_limit_per_minute=1, owner_user_id=11),
+        args=["声骸"],
+    )
 
     asyncio.run(channel_post_handler(update, context))
 
     assert message.replies == []
     assert context.bot.edits == []
     assert llm_calls == []
+
+    tr_update, tr_message = command_update(message_id=4096)
+    asyncio.run(term_command(tr_update, context))
+
+    assert tr_message.replies == [("Echo", None, 4096)]
 
 
 def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sample_db):

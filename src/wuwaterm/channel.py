@@ -160,45 +160,45 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 message.message_id,
             )
             return
+        service: TermService = context.application.bot_data[SERVICE_KEY]
+        lookup_result = service.lookup(plain)
+        official = None
+        if lookup_result.exact and lookup_result.best:
+            official = (
+                lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
+            )
+        if not official and not _llm_configured():
+            LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
+            return
         if not _consume_rate_limit(update, context):
             LOGGER.info(
                 "channel autotranslate throttled message_id=%s", message.message_id
             )
             return
 
-        service: TermService = context.application.bot_data[SERVICE_KEY]
-        lookup_result = service.lookup(plain)
-        if lookup_result.exact and lookup_result.best:
-            official = (
-                lookup_result.best.entry.zh if to_chinese else lookup_result.best.entry.en
-            )
-            if official:
-                # Dictionary-first invariant: official text byte-for-byte,
-                # plain, trumps formatting. Zero LLM.
-                if not _passes_channel_delivery_gate(context, chat_id):
-                    LOGGER.info(
-                        "channel autotranslate skipped: chat authorization changed "
-                        "before delivery chat_id=%s",
-                        chat_id,
-                    )
-                    return
-                await _emit(
-                    context,
-                    reply_index=reply_index,
-                    message=message,
-                    chat_id=chat_id,
-                    chat_type=chat_type,
-                    is_edit=is_edit,
-                    existing_reply_id=existing_reply_id,
-                    edit_work_token=edit_work_token,
-                    text=official,
-                    parse_mode=None,
-                    mode="dictionary",
+        if official:
+            # Dictionary-first invariant: official text byte-for-byte,
+            # plain, trumps formatting. Zero LLM.
+            if not _passes_channel_delivery_gate(context, chat_id):
+                LOGGER.info(
+                    "channel autotranslate skipped: chat authorization changed "
+                    "before delivery chat_id=%s",
+                    chat_id,
                 )
                 return
-
-        if not _llm_configured():
-            LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
+            await _emit(
+                context,
+                reply_index=reply_index,
+                message=message,
+                chat_id=chat_id,
+                chat_type=chat_type,
+                is_edit=is_edit,
+                existing_reply_id=existing_reply_id,
+                edit_work_token=edit_work_token,
+                text=official,
+                parse_mode=None,
+                mode="dictionary",
+            )
             return
 
         translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
