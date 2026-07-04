@@ -605,6 +605,32 @@ def test_non_exact_channel_post_skips_without_llm_config(monkeypatch, sample_db)
     assert tr_message.replies == [("Echo", None, 4096)]
 
 
+def test_throttled_channel_post_skips_before_fuzzy_lookup(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(
+        sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
+    )
+
+    first_update, first_message = channel_update(text=CN_TEXT, message_id=4097)
+    asyncio.run(channel_post_handler(first_update, context))
+    assert first_message.replies == [("translated", "HTML", 4097)]
+    assert len(calls) == 1
+
+    service = context.application.bot_data[SERVICE_KEY]
+
+    def fail_fuzzy(*_args, **_kwargs):
+        raise AssertionError("throttled channel posts must not run fuzzy lookup")
+
+    monkeypatch.setattr(service, "_fuzzy", fail_fuzzy)
+
+    second_update, second_message = channel_update(text=f"{CN_TEXT}。", message_id=4098)
+    asyncio.run(channel_post_handler(second_update, context))
+
+    assert second_message.replies == []
+    assert len(calls) == 1
+
+
 def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sample_db):
     """Replayed history (restart backlog, admin-promotion replay) must never
     be translated: a post older than channel_max_age_seconds is skipped

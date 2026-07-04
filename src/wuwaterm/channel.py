@@ -161,7 +161,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         service: TermService = context.application.bot_data[SERVICE_KEY]
-        lookup_result = service.lookup(plain)
+        lookup_result = service.lookup_exact(plain)
         official = None
         if lookup_result.exact and lookup_result.best:
             official = (
