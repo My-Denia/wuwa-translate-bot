@@ -11,6 +11,7 @@ import httpx
 import pytest
 from telegram.error import BadRequest, TelegramError
 
+from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
@@ -231,6 +232,7 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
 
 
 def test_channel_emit_log_redacts_text_ids_and_endpoint(monkeypatch, sample_db, caplog):
+    monkeypatch.setenv(REDACTION_SECRET_ENV, "channel-redaction-secret")
     calls = []
     reply_text = "SECRET_CHANNEL_REPLY"
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: reply_text)
@@ -253,6 +255,9 @@ def test_channel_emit_log_redacts_text_ids_and_endpoint(monkeypatch, sample_db, 
     assert "457789" not in log_text
     assert "-3001" not in log_text
     assert "127.0.0.1:4000" not in log_text
+    assert "channel-redaction-secret" not in log_text
+    assert redact_id(456789) in log_text
+    assert redact_id(457789) in log_text
     assert "mode=HTML" in log_text
     assert "text_len=20" in log_text
 

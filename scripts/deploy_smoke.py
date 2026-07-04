@@ -12,8 +12,14 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from wuwaterm.logging_utils import redact_id  # noqa: E402
 
 
 DEFAULT_API_BASE = "https://api.telegram.org"
@@ -64,7 +70,7 @@ def run_smoke(
     if not sent_data.get("ok"):
         return SmokeResult(False, tuple(lines + ["sendMessage: failed"]))
     message_id = sent_data.get("result", {}).get("message_id")
-    lines.append(f"sendMessage: ok message_id={message_id}")
+    lines.append(f"sendMessage: ok message_id={redact_id(message_id)}")
     return SmokeResult(True, tuple(lines), sent_message=True)
 
 

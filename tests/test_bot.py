@@ -11,6 +11,7 @@ from telegram import Update, User
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
+from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
@@ -142,6 +143,7 @@ def fake_update(
 def test_reply_log_redacts_text_ids_and_secrets(monkeypatch, caplog):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:FAKE_TELEGRAM_TOKEN")
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://secret.example/v1")
+    monkeypatch.setenv(REDACTION_SECRET_ENV, "log-redaction-secret")
     update, message = fake_update(
         chat_id=-990011,
         chat_type="supergroup",
@@ -161,6 +163,9 @@ def test_reply_log_redacts_text_ids_and_secrets(monkeypatch, caplog):
     assert "123456" not in log_text
     assert "FAKE_TELEGRAM_TOKEN" not in log_text
     assert "secret.example" not in log_text
+    assert "log-redaction-secret" not in log_text
+    assert redact_id(778899) in log_text
+    assert redact_id(778900) in log_text
     assert "chunk=1/1" in log_text
     assert "text_len=17" in log_text
 
