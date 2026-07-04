@@ -81,8 +81,8 @@ SENTENCE_USAGE_NOTICE = (
     "Usage: /sentence [--to en|zh] <Chinese or English sentence> (auto by default; reply with /sentence [--to en|zh])"
 )
 DIRECTION_USAGE_NOTICE = (
-    "翻译方向只支持 en 或 zh；用法：--to en / --to zh。\n"
-    "Translation direction must be en or zh; usage: --to en / --to zh."
+    "翻译方向参数只支持一次 en 或 zh；用法：--to en / --to zh。\n"
+    "Translation direction can be set once to en or zh; usage: --to en / --to zh."
 )
 # Appended to a short query that misses the dictionary. The data version
 # (pinned commit) lives in /about, never in this user-facing line.
@@ -897,11 +897,11 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     if not await _passes_authorization(update, context):
         return
-    if not _consume_rate_limit(update, context):
-        await reply_to_user(update, THROTTLE_NOTICE)
-        return
     if parsed.direction_error:
         await reply_to_user(update, DIRECTION_USAGE_NOTICE)
+        return
+    if not _consume_rate_limit(update, context):
+        await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not request.text:
         await reply_to_user(update, TERM_USAGE_NOTICE)
@@ -926,11 +926,11 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     if not await _passes_authorization(update, context):
         return
-    if not _consume_rate_limit(update, context):
-        await reply_to_user(update, THROTTLE_NOTICE)
-        return
     if parsed.direction_error:
         await reply_to_user(update, DIRECTION_USAGE_NOTICE)
+        return
+    if not _consume_rate_limit(update, context):
+        await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not request.text:
         await reply_to_user(update, SENTENCE_USAGE_NOTICE)

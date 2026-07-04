@@ -810,7 +810,9 @@ def test_sentence_direction_flag_uses_same_parser(monkeypatch, sample_db):
     assert message.replies == [("Jinhsi equips Echo", None)]
 
 
-def test_invalid_direction_returns_usage_without_llm(monkeypatch, sample_db):
+def test_invalid_direction_returns_usage_without_llm_or_rate_hit(
+    monkeypatch, sample_db
+):
     calls = []
 
     async def fake_call(
@@ -829,7 +831,42 @@ def test_invalid_direction_returns_usage_without_llm(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     update, message = fake_update()
-    context = fake_context(sample_db, ["--to", "jp", "今汐说声骸很强"])
+    context = fake_context(sample_db, ["--to", "jp", "今汐说声骸很强"], limit=1)
+
+    asyncio.run(term_command(update, context))
+    valid_update, valid_message = fake_update()
+    valid_context = fake_context(sample_db, ["声骸"], limit=1)
+    valid_context.application.bot_data[RATE_LIMITER_KEY] = context.application.bot_data[
+        RATE_LIMITER_KEY
+    ]
+
+    asyncio.run(term_command(valid_update, valid_context))
+
+    assert calls == []
+    assert message.replies == [(DIRECTION_USAGE_NOTICE, None)]
+    assert valid_message.replies == [("Echo", None)]
+
+
+def test_duplicate_direction_returns_usage_without_llm(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return "should not be used"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "en", "--to", "zh", "声骸"])
 
     asyncio.run(term_command(update, context))
 
@@ -2036,8 +2073,8 @@ def test_usage_notices_are_bilingual(sample_db):
         "Usage: /sentence [--to en|zh] <Chinese or English sentence> (auto by default; reply with /sentence [--to en|zh])"
     )
     assert DIRECTION_USAGE_NOTICE == (
-        "翻译方向只支持 en 或 zh；用法：--to en / --to zh。\n"
-        "Translation direction must be en or zh; usage: --to en / --to zh."
+        "翻译方向参数只支持一次 en 或 zh；用法：--to en / --to zh。\n"
+        "Translation direction can be set once to en or zh; usage: --to en / --to zh."
     )
     # Bare command, no inline text and no reply -> the bilingual Usage hint.
     update, message = fake_update()
