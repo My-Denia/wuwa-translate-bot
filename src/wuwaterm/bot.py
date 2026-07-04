@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from .lookup import TermService
+from .logging_utils import redact_id, safe_error_type, safe_text_len
 from .normalize import has_cjk
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
@@ -648,10 +649,10 @@ async def reply_to_user(
                 # strips invalid Telegram HTML before BadRequest escapes.
                 LOGGER.warning(
                     "bot_reply fallback: HTML parse failed chat_type=%s "
-                    "incoming_message_id=%s error=%r",
+                    "incoming_message=%s error_type=%s",
                     chat_type,
-                    message.message_id,
-                    exc,
+                    redact_id(message.message_id),
+                    safe_error_type(exc),
                 )
                 await reply_to_user(update, _strip_telegram_html(text))
                 return
@@ -662,10 +663,10 @@ async def reply_to_user(
                 raise
             LOGGER.warning(
                 "bot_reply fallback: reply target missing chat_type=%s "
-                "incoming_message_id=%s error=%r",
+                "incoming_message=%s error_type=%s",
                 chat_type,
-                message.message_id,
-                exc,
+                redact_id(message.message_id),
+                safe_error_type(exc),
             )
             reply_to_message_id = None
             sent_message, sent_text = await _send_reply_chunk_with_html_fallback(
@@ -675,15 +676,16 @@ async def reply_to_user(
                 parse_mode=delivery_parse_mode,
             )
         LOGGER.info(
-            "bot_reply chat_type=%s incoming_message_id=%s reply_message_id=%s "
-            "reply_to_message_id=%s chunk=%s/%s text=%r",
+            "bot_reply chat_type=%s incoming_message=%s reply_message=%s "
+            "reply_to_message=%s chunk=%s/%s parse_mode=%s text_len=%s",
             chat_type,
-            message.message_id,
-            getattr(sent_message, "message_id", None),
-            reply_to_message_id,
+            redact_id(message.message_id),
+            redact_id(getattr(sent_message, "message_id", None)),
+            redact_id(reply_to_message_id),
             index + 1,
             len(chunks),
-            sent_text,
+            delivery_parse_mode,
+            safe_text_len(sent_text),
         )
 
 
@@ -938,7 +940,9 @@ async def _persist_public(
         settings.set_public(chat_id, value)
         return True
     except OSError as exc:
-        LOGGER.warning("settings save failed on /public: %r", exc)
+        LOGGER.warning(
+            "settings save failed on /public error_type=%s", safe_error_type(exc)
+        )
         await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
         return False
 
@@ -995,7 +999,11 @@ async def _leave_chat_quietly(
     try:
         await context.bot.leave_chat(chat_id)
     except TelegramError as exc:
-        LOGGER.warning("leave_chat failed chat_id=%s: %r", chat_id, exc)
+        LOGGER.warning(
+            "leave_chat failed chat=%s error_type=%s",
+            redact_id(chat_id),
+            safe_error_type(exc),
+        )
 
 
 def _try_persist(action, chat_id: int) -> bool:
@@ -1006,7 +1014,11 @@ def _try_persist(action, chat_id: int) -> bool:
         action(chat_id)
         return True
     except OSError as exc:
-        LOGGER.warning("settings write failed chat_id=%s: %r", chat_id, exc)
+        LOGGER.warning(
+            "settings write failed chat=%s error_type=%s",
+            redact_id(chat_id),
+            safe_error_type(exc),
+        )
         return False
 
 
@@ -1035,28 +1047,33 @@ async def my_chat_member_handler(
             # closed: leave rather than stay in a chat we cannot remember
             # authorizing. The owner can re-add once the file is writable.
             LOGGER.warning(
-                "owner-add authorization could not be persisted, leaving chat_id=%s",
-                chat.id,
+                "owner-add authorization could not be persisted, leaving chat=%s",
+                redact_id(chat.id),
             )
             await _leave_chat_quietly(context, chat.id)
             return
         LOGGER.info(
-            "added by owner; chat authorized chat_id=%s type=%s", chat.id, chat.type
+            "added by owner; chat authorized chat=%s type=%s",
+            redact_id(chat.id),
+            chat.type,
         )
         return
     if settings.is_allowed(chat.id):
-        LOGGER.info("added to authorized chat chat_id=%s type=%s", chat.id, chat.type)
+        LOGGER.info(
+            "added to authorized chat chat=%s type=%s", redact_id(chat.id), chat.type
+        )
         return
     LOGGER.info(
-        "added to unauthorized chat, leaving chat_id=%s type=%s title=%r",
-        chat.id,
+        "added to unauthorized chat, leaving chat=%s type=%s",
+        redact_id(chat.id),
         chat.type,
-        getattr(chat, "title", None),
     )
     try:
         await context.bot.send_message(chat.id, UNAUTHORIZED_GROUP_NOTICE)
     except TelegramError as exc:
-        LOGGER.warning("unauthorized-leave notice failed: %r", exc)
+        LOGGER.warning(
+            "unauthorized-leave notice failed error_type=%s", safe_error_type(exc)
+        )
     await _leave_chat_quietly(context, chat.id)
 
 
@@ -1128,7 +1145,11 @@ async def revoke_command(
         try:
             await reply_to_user(update, note)
         except TelegramError as exc:
-            LOGGER.warning("revoke confirmation reply failed chat_id=%s: %r", cid, exc)
+            LOGGER.warning(
+                "revoke confirmation reply failed chat=%s error_type=%s",
+                redact_id(cid),
+                safe_error_type(exc),
+            )
         await _leave_chat_quietly(context, cid)
         return
     try:
@@ -1468,7 +1489,7 @@ async def _is_group_admin(
         member = await context.bot.get_chat_member(chat.id, user.id)
     except TelegramError as exc:
         # Fail closed without caching; ids stay out of logs (quasi-sensitive).
-        LOGGER.warning("get_chat_member failed error=%r", exc)
+        LOGGER.warning("get_chat_member failed error_type=%s", safe_error_type(exc))
         return False
     verdict = getattr(member, "status", None) in ADMIN_ALLOWED_STATUSES
     cache.put(chat.id, user.id, verdict)

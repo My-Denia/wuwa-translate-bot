@@ -22,6 +22,7 @@ from .bot import (
     _consume_rate_limit,
 )
 from .lookup import TermService
+from .logging_utils import redact_id, safe_text_len
 from .normalize import count_cjk, count_latin
 from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
 from .settings import ChatSettings
@@ -58,8 +59,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         age_seconds = (datetime.now(timezone.utc) - message_date).total_seconds()
         if age_seconds > config.channel_max_age_seconds:
             LOGGER.info(
-                "channel autotranslate skipped: stale post message_id=%s",
-                message.message_id,
+                "channel autotranslate skipped: stale post incoming_message=%s",
+                redact_id(message.message_id),
             )
             return
 
@@ -75,8 +76,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     if chat_id is None or not settings.is_allowed(chat_id):
         LOGGER.info(
-            "channel autotranslate skipped: chat not authorized chat_id=%s",
-            chat_id,
+            "channel autotranslate skipped: chat not authorized chat=%s",
+            redact_id(chat_id),
         )
         return
 
@@ -114,8 +115,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if existing_reply_id is None:
             LOGGER.info(
                 "channel autotranslate skipped: edit with no tracked reply "
-                "message_id=%s",
-                message.message_id,
+                "incoming_message=%s",
+                redact_id(message.message_id),
             )
             return
     edit_work_token: int | None = None
@@ -156,8 +157,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         if len(plain) > length_limit:
             LOGGER.debug(
-                "channel autotranslate skipped: over length cap message_id=%s",
-                message.message_id,
+                "channel autotranslate skipped: over length cap incoming_message=%s",
+                redact_id(message.message_id),
             )
             return
         service: TermService = context.application.bot_data[SERVICE_KEY]
@@ -172,7 +173,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         if not _consume_rate_limit(update, context):
             LOGGER.info(
-                "channel autotranslate throttled message_id=%s", message.message_id
+                "channel autotranslate throttled incoming_message=%s",
+                redact_id(message.message_id),
             )
             return
 
@@ -182,8 +184,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if not _passes_channel_delivery_gate(context, chat_id):
                 LOGGER.info(
                     "channel autotranslate skipped: chat authorization changed "
-                    "before delivery chat_id=%s",
-                    chat_id,
+                    "before delivery chat=%s",
+                    redact_id(chat_id),
                 )
                 return
             await _emit(
@@ -218,8 +220,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 if not _passes_channel_delivery_gate(context, chat_id):
                     LOGGER.info(
                         "channel autotranslate skipped: chat authorization changed "
-                        "before delivery chat_id=%s",
-                        chat_id,
+                        "before delivery chat=%s",
+                        redact_id(chat_id),
                     )
                     return
                 await _emit(
@@ -240,8 +242,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 if not _passes_channel_delivery_gate(context, chat_id):
                     LOGGER.info(
                         "channel autotranslate skipped: chat authorization changed "
-                        "before delivery chat_id=%s",
-                        chat_id,
+                        "before delivery chat=%s",
+                        redact_id(chat_id),
                     )
                     return
                 await _emit(
@@ -263,8 +265,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 if not _passes_channel_delivery_gate(context, chat_id):
                     LOGGER.info(
                         "channel autotranslate skipped: chat authorization changed "
-                        "before delivery chat_id=%s",
-                        chat_id,
+                        "before delivery chat=%s",
+                        redact_id(chat_id),
                     )
                     return
                 await _emit(
@@ -284,8 +286,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not _passes_channel_delivery_gate(context, chat_id):
             LOGGER.info(
                 "channel autotranslate skipped: chat authorization changed "
-                "before delivery chat_id=%s",
-                chat_id,
+                "before delivery chat=%s",
+                redact_id(chat_id),
             )
             return
         await _emit(
@@ -350,9 +352,9 @@ async def _emit(
                 ):
                     LOGGER.info(
                         "channel edit skipped: stale translation "
-                        "incoming_message_id=%s reply_message_id=%s",
-                        message.message_id,
-                        existing_reply_id,
+                        "incoming_message=%s reply_message=%s",
+                        redact_id(message.message_id),
+                        redact_id(existing_reply_id),
                     )
                     return
                 existing_reply_ids = reply_index.get_many(chat_id, message.message_id)
@@ -404,7 +406,14 @@ async def _emit(
                 reply_index.remember_many(
                     chat_id, message.message_id, tuple(reply_message_ids)
                 )
-        _log_emit(chat_type, message, reply_message_id, delivery_mode, edited=False)
+        _log_emit(
+            chat_type,
+            message,
+            reply_message_id,
+            delivery_mode,
+            edited=False,
+            text=chunk,
+        )
 
 
 def _channel_delivery_chunks(
@@ -483,7 +492,14 @@ async def _edit_reply_chunks(
                 reply_index.remember_many(
                     chat_id, message.message_id, tuple(remembered_reply_ids)
                 )
-            _log_emit(chat_type, message, reply_message_id, mode, edited=False)
+            _log_emit(
+                chat_type,
+                message,
+                reply_message_id,
+                mode,
+                edited=False,
+                text=chunk,
+            )
     if remaining_reply_ids:
         failed_delete_ids = await _delete_reply_chunks(
             context,
@@ -518,25 +534,25 @@ async def _delete_reply_chunks(
             if _delete_error_means_already_gone(exc):
                 LOGGER.info(
                     "channel edit extra chunk already gone "
-                    "incoming_message_id=%s reply_message_id=%s",
-                    message.message_id,
-                    reply_message_id,
+                    "incoming_message=%s reply_message=%s",
+                    redact_id(message.message_id),
+                    redact_id(reply_message_id),
                 )
                 continue
             failed_reply_message_ids.append(reply_message_id)
             LOGGER.info(
                 "channel edit extra chunk delete skipped "
-                "incoming_message_id=%s reply_message_id=%s",
-                message.message_id,
-                reply_message_id,
+                "incoming_message=%s reply_message=%s",
+                redact_id(message.message_id),
+                redact_id(reply_message_id),
             )
         except TelegramError:
             failed_reply_message_ids.append(reply_message_id)
             LOGGER.info(
                 "channel edit extra chunk delete skipped "
-                "incoming_message_id=%s reply_message_id=%s",
-                message.message_id,
-                reply_message_id,
+                "incoming_message=%s reply_message=%s",
+                redact_id(message.message_id),
+                redact_id(reply_message_id),
             )
     return tuple(failed_reply_message_ids)
 
@@ -568,9 +584,9 @@ async def _edit_existing_reply(
         if "not modified" in str(exc).lower():
             LOGGER.info(
                 "channel edit no-op (unchanged translation) "
-                "incoming_message_id=%s reply_message_id=%s",
-                message.message_id,
-                existing_reply_id,
+                "incoming_message=%s reply_message=%s",
+                redact_id(message.message_id),
+                redact_id(existing_reply_id),
             )
             return True
         if parse_mode is not None:
@@ -578,23 +594,32 @@ async def _edit_existing_reply(
             raise
         LOGGER.info(
             "channel edit skipped: reply not updatable "
-            "incoming_message_id=%s reply_message_id=%s",
-            message.message_id,
-            existing_reply_id,
+            "incoming_message=%s reply_message=%s",
+            redact_id(message.message_id),
+            redact_id(existing_reply_id),
         )
         return False
-    _log_emit(chat_type, message, existing_reply_id, mode, edited=True)
+    _log_emit(chat_type, message, existing_reply_id, mode, edited=True, text=text)
     return True
 
 
-def _log_emit(chat_type: str, message, reply_message_id, mode: str, *, edited: bool) -> None:
+def _log_emit(
+    chat_type: str,
+    message,
+    reply_message_id,
+    mode: str,
+    *,
+    edited: bool,
+    text: str,
+) -> None:
     LOGGER.info(
-        "bot_reply chat_type=%s incoming_message_id=%s reply_message_id=%s "
-        "reply_to_message_id=%s mode=%s edited=%s",
+        "bot_reply chat_type=%s incoming_message=%s reply_message=%s "
+        "reply_to_message=%s mode=%s edited=%s text_len=%s",
         chat_type,
-        message.message_id,
-        reply_message_id,
-        message.message_id,
+        redact_id(message.message_id),
+        redact_id(reply_message_id),
+        redact_id(message.message_id),
         mode,
         edited,
+        safe_text_len(text),
     )
