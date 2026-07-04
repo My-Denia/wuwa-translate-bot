@@ -874,6 +874,39 @@ def test_duplicate_direction_returns_usage_without_llm(monkeypatch, sample_db):
     assert message.replies == [(DIRECTION_USAGE_NOTICE, None)]
 
 
+def test_public_invalid_direction_uses_reject_limiter_not_translation_budget(
+    sample_db,
+):
+    admin_update, _admin_msg = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=671
+    )
+    context = fake_context(sample_db, ["on"], limit=1, member_status="administrator")
+    asyncio.run(public_command(admin_update, context))
+    context.bot.default_status = "member"
+    context.application.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
+
+    context.args = ["--to", "jp", "今汐说声骸很强"]
+    first_update, first_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=672, user_id=42
+    )
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=673, user_id=43
+    )
+
+    asyncio.run(term_command(first_update, context))
+    asyncio.run(term_command(second_update, context))
+
+    context.args = ["声骸"]
+    valid_update, valid_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=674, user_id=44
+    )
+    asyncio.run(term_command(valid_update, context))
+
+    assert first_message.replies == [(DIRECTION_USAGE_NOTICE, 672)]
+    assert second_message.replies == []
+    assert valid_message.replies == [("Echo", 674)]
+
+
 def test_forced_direction_reply_to_message(monkeypatch, sample_db):
     calls = []
 

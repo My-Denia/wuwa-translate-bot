@@ -898,7 +898,7 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await _passes_authorization(update, context):
         return
     if parsed.direction_error:
-        await reply_to_user(update, DIRECTION_USAGE_NOTICE)
+        await _reply_direction_usage(update, context)
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
@@ -927,7 +927,7 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await _passes_authorization(update, context):
         return
     if parsed.direction_error:
-        await reply_to_user(update, DIRECTION_USAGE_NOTICE)
+        await _reply_direction_usage(update, context)
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
@@ -1464,6 +1464,15 @@ def _should_append_dict_miss(
         and _is_short_query(prepared)
         and not _has_locked_terms(translator, prepared)
     )
+
+
+async def _reply_direction_usage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    # Invalid flag replies are user-visible but should not spend translation
+    # budget. Use the reject limiter so public chats cannot flood usage notices.
+    if _consume_reject_limit(update, context):
+        await reply_to_user(update, DIRECTION_USAGE_NOTICE)
 
 
 async def _passes_authorization(
