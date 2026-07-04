@@ -102,8 +102,9 @@ SQLite databases, generated TextMap files, or Wuthering Waves game data.
 Do not run this command until CI and review are green and repository policy
 allows publishing a release. First copy the release note template above into a
 local `RELEASE_NOTES.md` file and review it; that file is a maintainer working
-artifact, not a required committed file.
+artifact, not a required committed file. Replace `<reviewed-main-commit-sha>`
+with the exact `origin/main` commit that passed CI and review.
 
 ```bash
-gh release create v0.1.0 --title "v0.1.0" --notes-file RELEASE_NOTES.md
+gh release create v0.1.0 --target <reviewed-main-commit-sha> --title "v0.1.0" --notes-file RELEASE_NOTES.md
 ```

@@ -17,7 +17,7 @@ Initial release preparation for the self-hosted WuWa Term Bot.
   public-mode controls, linked-channel auto-translation, rate limits, and
   privacy-safe operational logging.
 - Local validation and hygiene scripts that guard against committing generated
-  game data, generated databases, secrets, and private Telegram identifiers.
+  game data, generated databases, and unsupported runtime surfaces.
 
 ### Data Source
 
