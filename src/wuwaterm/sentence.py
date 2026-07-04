@@ -389,9 +389,54 @@ def _extract_llm_content(data: Any) -> str:
 
 
 def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
-    body = response.text.casefold()
-    if response.status_code == 429 or any(
-        marker in body for marker in ("budget", "max_budget", "quota", "exceeded")
-    ):
+    if response.status_code >= 500:
+        return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
+    if response.status_code == 429 or _has_structured_budget_signal(response):
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE)
     return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
+
+
+def _has_structured_budget_signal(response: httpx.Response) -> bool:
+    text = _structured_llm_error_text(response)
+    if not text:
+        return False
+    # Do not match generic "exceeded": context-length errors commonly use that
+    # word but are ordinary translation failures, not quota exhaustion.
+    return any(
+        marker in text
+        for marker in (
+            "budget",
+            "max_budget",
+            "quota",
+            "insufficient_quota",
+            "billing",
+            "rate limit",
+            "rate_limit",
+            "rate-limit",
+        )
+    )
+
+
+def _structured_llm_error_text(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return ""
+    parts: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for key in ("code", "type", "message", "detail", "error", "param"):
+                if key in value:
+                    collect(value[key])
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    if isinstance(data, dict) and "error" in data:
+        collect(data["error"])
+    else:
+        collect(data)
+    return " ".join(parts).casefold()

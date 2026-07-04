@@ -77,6 +77,70 @@ def test_budget_exhaustion_returns_clean_user_notice(monkeypatch, sample_db):
     assert translator.translate("这是一个需要翻译的句子。") == BUDGET_EXHAUSTED_NOTICE
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "context length exceeded",
+                }
+            },
+        ),
+        httpx.Response(
+            400,
+            json={"error": {"message": "maximum context length exceeded"}},
+        ),
+        httpx.Response(400, json={"error": {"message": "input too long"}}),
+        httpx.Response(400, text="context length exceeded"),
+        httpx.Response(400, text="exceeded"),
+        httpx.Response(400, json={"detail": "maximum context length exceeded"}),
+        httpx.Response(
+            500,
+            json={"error": {"code": "insufficient_quota", "message": "quota exceeded"}},
+        ),
+    ],
+)
+def test_llm_context_and_server_errors_do_not_report_budget(response):
+    error = _llm_error_from_response(response)
+
+    assert error.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            429,
+            json={
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "You exceeded your current quota.",
+                }
+            },
+        ),
+        httpx.Response(429, json={"error": {"message": "quota exceeded"}}),
+        httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}}),
+        httpx.Response(400, json={"error": {"code": "billing_hard_limit_reached"}}),
+        httpx.Response(
+            429,
+            json={
+                "detail": "Authentication Error, ExceededTokenBudget: Max Budget reached"
+            },
+        ),
+        httpx.Response(429, text="Too Many Requests"),
+        httpx.Response(429),
+        httpx.Response(429, text='{"error":"max_budget exceeded"}'),
+    ],
+)
+def test_llm_budget_and_quota_errors_keep_budget_notice(response):
+    error = _llm_error_from_response(response)
+
+    assert error.user_message == BUDGET_EXHAUSTED_NOTICE
+
+
 def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
