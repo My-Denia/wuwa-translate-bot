@@ -22,10 +22,6 @@ def configure_redaction_secret(secret: str | bytes | None) -> None:
     _runtime_redaction_secret = _coerce_secret(secret)
 
 
-def configure_redaction_salt(salt: str | bytes | None) -> None:
-    configure_redaction_secret(salt)
-
-
 def _coerce_secret(secret: str | bytes | None) -> bytes | None:
     if secret is None:
         return None

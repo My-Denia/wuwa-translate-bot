@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 
 from scripts.deploy_smoke import run_smoke
-from wuwaterm.logging_utils import REDACTION_SECRET_ENV
+from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 
 
 def test_deploy_smoke_skips_without_token():
@@ -77,8 +77,8 @@ def test_deploy_smoke_can_send_without_printing_chat_id_or_token(monkeypatch):
     joined = "\n".join(result.lines)
     assert result.ok is True
     assert result.sent_message is True
-    assert "sendMessage: ok message_id=id:" in joined
-    assert "123" not in joined
+    assert f"sendMessage: ok message_id={redact_id(123)}" in joined
+    assert "message_id=123" not in joined
     assert "test-token" not in joined
     assert "test-chat-id" not in joined
     assert "smoke-redaction-secret" not in joined
