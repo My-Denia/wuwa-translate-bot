@@ -253,7 +253,7 @@ def test_equal_length_overlapping_terms_use_stable_order(sample_db):
         locked = translator.lock_terms("甲乙丙")
         outputs.append(locked.restore(locked.locked_text))
 
-    assert outputs == ["Left丙"] * 5
+    assert outputs == ["甲Right"] * 5
 
 
 def test_longer_overlapping_term_wins(sample_db):
@@ -270,6 +270,20 @@ def test_longer_overlapping_term_wins(sample_db):
     assert locked.restore(locked.locked_text) == "Long"
 
 
+def test_later_starting_longer_overlapping_term_wins(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Short"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙丁", "Long"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("甲乙丙丁")
+
+    assert locked.restore(locked.locked_text) == "甲Long"
+
+
 def test_equal_length_overlapping_english_terms_use_stable_order(sample_db):
     add_synthetic_terms(
         sample_db,
@@ -284,7 +298,7 @@ def test_equal_length_overlapping_english_terms_use_stable_order(sample_db):
         locked = translator.lock_terms("ABC")
         outputs.append(locked.restore(locked.locked_text, to_en=False))
 
-    assert outputs == ["左项C"] * 5
+    assert outputs == ["A右项"] * 5
 
 
 def test_mixed_chinese_and_english_terms_restore(sample_db):
@@ -294,18 +308,18 @@ def test_mixed_chinese_and_english_terms_restore(sample_db):
     assert locked.restore(locked.locked_text) == "Jinhsi uses Echo"
 
 
-def test_html_path_overlapping_terms_use_stable_order(sample_db):
+def test_html_path_overlapping_terms_selects_longer_later_span(sample_db):
     add_synthetic_terms(
         sample_db,
         [
-            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Left"),
-            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙", "Right"),
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Short"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙丁", "Long"),
         ],
     )
     translator = SentenceTranslator(sample_db)
-    locked = translator.lock_terms("<b>甲乙丙</b>")
+    locked = translator.lock_terms("<b>甲乙丙丁</b>")
 
-    assert locked.restore(locked.locked_text) == "<b>Left丙</b>"
+    assert locked.restore(locked.locked_text) == "<b>甲Long</b>"
 
 
 def test_budget_exhaustion_returns_clean_user_notice(monkeypatch, sample_db):
