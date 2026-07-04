@@ -25,6 +25,14 @@ class TermService:
             return LookupResult(query=query, exact=True, candidates=tuple(exact[:limit]))
         return LookupResult(query=query, exact=False, candidates=tuple(self._fuzzy(query, limit)))
 
+    def lookup_exact(self, query: str, limit: int = 5) -> LookupResult:
+        query = query.strip()
+        if not query:
+            return LookupResult(query=query, exact=False, candidates=())
+
+        exact = self._exact(query)
+        return LookupResult(query=query, exact=bool(exact), candidates=tuple(exact[:limit]))
+
     def term_text(self, query: str) -> str | None:
         result = self.lookup(query, limit=5)
         if not result.candidates:

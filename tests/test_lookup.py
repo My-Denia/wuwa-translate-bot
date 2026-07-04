@@ -63,6 +63,24 @@ def test_reverse_lookup_is_same_table_only(sample_db):
     assert service.term_text("Echo") == "Echo"
 
 
+def test_lookup_exact_does_not_use_fuzzy_path(monkeypatch, sample_db):
+    service = TermService(sample_db)
+
+    def fail_fuzzy(*_args, **_kwargs):
+        raise AssertionError("lookup_exact must not call fuzzy lookup")
+
+    monkeypatch.setattr(service, "_fuzzy", fail_fuzzy)
+
+    hit = service.lookup_exact("声骸")
+    assert hit.exact is True
+    assert hit.best is not None
+    assert hit.best.entry.en == "Echo"
+
+    miss = service.lookup_exact("今汐说声骸很强")
+    assert miss.exact is False
+    assert miss.candidates == ()
+
+
 def test_pinyin_fuzzy_returns_top_candidate(sample_db):
     service = TermService(sample_db)
 
