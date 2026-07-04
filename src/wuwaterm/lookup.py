@@ -78,7 +78,6 @@ class TermService:
                 SELECT * FROM terms
                 WHERE zh_norm = ? OR en_norm = ?
                 ORDER BY priority, length(zh), category, source_file, source_id
-                LIMIT 25
                 """,
                 (zh_norm, en_norm),
             ).fetchall()

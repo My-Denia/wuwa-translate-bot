@@ -57,6 +57,73 @@ def test_exact_hit_prefers_sorted_top_candidate_on_db_conflict(sample_db):
     assert service.term_text("守岸人") == "Shorekeeper"
 
 
+def test_exact_lookup_does_not_truncate_high_priority_zh_candidate(sample_db):
+    records = [
+        TermRecord(
+            category="resonator",
+            source_file=f"A_Generic_{idx:02d}.json",
+            source_id=str(idx),
+            text_key=f"Generic_{idx:02d}_Name",
+            zh="重复测试词",
+            en=f"Generic {idx:02d}",
+        )
+        for idx in range(25)
+    ]
+    records.append(
+        TermRecord(
+            category="resonator",
+            source_file="RoleInfo.json",
+            source_id="9999",
+            text_key="RoleInfo_9999_Name",
+            zh="重复测试词",
+            en="Priority Official",
+        )
+    )
+    with connect(sample_db) as conn:
+        insert_records(conn, records)
+        conn.commit()
+
+    result = TermService(sample_db).lookup("重复测试词", limit=5)
+
+    assert result.exact is True
+    assert result.best is not None
+    assert result.best.entry.en == "Priority Official"
+    assert result.best.entry.source_file == "RoleInfo.json"
+
+
+def test_exact_lookup_does_not_truncate_high_priority_en_candidate(sample_db):
+    records = [
+        TermRecord(
+            category="resonator",
+            source_file=f"A_Generic_{idx:02d}.json",
+            source_id=str(idx),
+            text_key=f"Generic_{idx:02d}_Name",
+            zh=f"普通候选{idx:02d}",
+            en="Shared Exact Term",
+        )
+        for idx in range(25)
+    ]
+    records.append(
+        TermRecord(
+            category="resonator",
+            source_file="RoleInfo.json",
+            source_id="9999",
+            text_key="RoleInfo_9999_Name",
+            zh="高优先候选但是长度更长",
+            en="Shared Exact Term",
+        )
+    )
+    with connect(sample_db) as conn:
+        insert_records(conn, records)
+        conn.commit()
+
+    result = TermService(sample_db).lookup("Shared Exact Term", limit=5)
+
+    assert result.exact is True
+    assert result.best is not None
+    assert result.best.entry.zh == "高优先候选但是长度更长"
+    assert result.best.entry.source_file == "RoleInfo.json"
+
 def test_reverse_lookup_is_same_table_only(sample_db):
     service = TermService(sample_db)
 
