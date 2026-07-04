@@ -45,6 +45,7 @@ from wuwaterm.bot import (
     create_application,
     my_chat_member_handler,
     public_command,
+    reply_to_user,
     revoke_command,
     sentence_command,
     status_command,
@@ -135,6 +136,32 @@ def fake_update(
         SimpleNamespace(effective_message=message, effective_chat=chat, effective_user=user),
         message,
     )
+
+
+def test_reply_log_redacts_text_ids_and_secrets(monkeypatch, caplog):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:FAKE_TELEGRAM_TOKEN")
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://secret.example/v1")
+    update, message = fake_update(
+        chat_id=-990011,
+        chat_type="supergroup",
+        message_id=778899,
+        user_id=123456,
+    )
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.bot"):
+        asyncio.run(reply_to_user(update, "SECRET_REPLY_TEXT"))
+
+    assert message.replies == [("SECRET_REPLY_TEXT", 778899)]
+    log_text = caplog.text
+    assert "SECRET_REPLY_TEXT" not in log_text
+    assert "-990011" not in log_text
+    assert "778899" not in log_text
+    assert "778900" not in log_text
+    assert "123456" not in log_text
+    assert "FAKE_TELEGRAM_TOKEN" not in log_text
+    assert "secret.example" not in log_text
+    assert "chunk=1/1" in log_text
+    assert "text_len=17" in log_text
 
 
 def fake_member_update(

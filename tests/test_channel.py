@@ -230,6 +230,33 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
 
 
+def test_channel_emit_log_redacts_text_ids_and_endpoint(monkeypatch, sample_db, caplog):
+    calls = []
+    reply_text = "SECRET_CHANNEL_REPLY"
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: reply_text)
+    update, message = channel_update(
+        text=CN_TEXT,
+        chat_id=-99112233,
+        message_id=456789,
+    )
+    context = make_context(sample_db, allowlist=(-99112233,))
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == [(reply_text, "HTML", 456789)]
+    assert calls
+    log_text = caplog.text
+    assert reply_text not in log_text
+    assert "-99112233" not in log_text
+    assert "456789" not in log_text
+    assert "457789" not in log_text
+    assert "-3001" not in log_text
+    assert "127.0.0.1:4000" not in log_text
+    assert "mode=HTML" in log_text
+    assert "text_len=20" in log_text
+
+
 def disable_llm(monkeypatch):
     monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
