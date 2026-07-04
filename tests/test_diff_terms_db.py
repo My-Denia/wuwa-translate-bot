@@ -148,6 +148,25 @@ def test_ambiguous_source_keys_are_not_reported_as_changed(tmp_path):
     assert ("声骸甲", "Echo A") in [term.pair for term in report.removed]
 
 
+def test_single_sided_duplicate_source_key_reports_pair_delta_without_ambiguity(tmp_path):
+    old_terms = [
+        _term("echo", "Echo.json", "6001", "Echo_6001_Name", "声骸", "Echo"),
+    ]
+    new_terms = [
+        _term("echo", "Echo.json", "6001", "Echo_6001_Name", "声骸", "Echo"),
+        _term("echo", "Echo.json", "6001", "Echo_6001_Name", "声骸乙", "Echo B"),
+    ]
+    old_db = _write_db(tmp_path / "old.db", old_terms, {"GameVer": "1.0"})
+    new_db = _write_db(tmp_path / "new.db", new_terms, {"GameVer": "1.0"})
+
+    report = diff_databases(old_db, new_db)
+
+    assert report.changed == ()
+    assert report.ambiguous_source_keys == ()
+    assert [term.pair for term in report.added] == [("声骸乙", "Echo B")]
+    assert report.removed == ()
+
+
 def test_identical_databases_report_no_changes(tmp_path, capsys):
     terms = [
         _term("skill", "Skill.json", "1001", "Skill_1001_Name", "风羽为刃", "Feather as Blade")
@@ -164,3 +183,13 @@ def test_identical_databases_report_no_changes(tmp_path, capsys):
     assert "Category count changes\n- none" in out
     assert "Metadata differences\n- none" in out
     assert "Examples by category\n- none" in out
+
+
+def test_missing_database_is_not_created(tmp_path, capsys):
+    missing_db = tmp_path / "missing.db"
+    existing_db = _write_db(tmp_path / "new.db", [], {"GameVer": "1.0"})
+
+    assert main([str(missing_db), str(existing_db)]) == 1
+
+    assert not missing_db.exists()
+    assert "database does not exist" in capsys.readouterr().err

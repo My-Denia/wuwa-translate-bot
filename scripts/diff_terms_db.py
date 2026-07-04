@@ -9,12 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from wuwaterm.db import connect  # noqa: E402
-
-
 SourceKey = tuple[str, str, str, str]
 Pair = tuple[str, str]
 
@@ -108,10 +102,6 @@ def _term_sort_key(term: TermRow) -> tuple[str, str, str, str, str, str]:
     )
 
 
-def _key_sort_key(key: SourceKey) -> tuple[str, str, str, str]:
-    return key
-
-
 def _require_tables(conn: sqlite3.Connection, path: Path) -> None:
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('metadata', 'terms')"
@@ -122,9 +112,18 @@ def _require_tables(conn: sqlite3.Connection, path: Path) -> None:
         raise ValueError(f"{path}: missing table(s): {', '.join(missing)}")
 
 
+def _connect_readonly(path: Path) -> sqlite3.Connection:
+    if not path.exists():
+        raise FileNotFoundError(f"{path}: database does not exist")
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def load_snapshot(db_path: str | Path) -> DbSnapshot:
     path = Path(db_path)
-    with connect(path) as conn:
+    conn = _connect_readonly(path)
+    try:
         _require_tables(conn, path)
         term_rows = conn.execute(
             """
@@ -139,6 +138,8 @@ def load_snapshot(db_path: str | Path) -> DbSnapshot:
         category_rows = conn.execute(
             "SELECT category, COUNT(*) AS count FROM terms GROUP BY category"
         ).fetchall()
+    finally:
+        conn.close()
 
     terms = tuple(
         TermRow(
@@ -167,7 +168,7 @@ def _source_map(terms: tuple[TermRow, ...]) -> dict[SourceKey, tuple[TermRow, ..
         grouped[term.source_key].append(term)
     return {
         key: tuple(sorted(rows, key=_term_sort_key))
-        for key, rows in sorted(grouped.items(), key=lambda item: _key_sort_key(item[0]))
+        for key, rows in sorted(grouped.items(), key=lambda item: item[0])
     }
 
 
@@ -184,7 +185,7 @@ def diff_snapshots(old: DbSnapshot, new: DbSnapshot) -> DiffReport:
     changed: list[ChangedTerm] = []
     ambiguous: list[AmbiguousSourceKey] = []
 
-    for key in sorted(set(old_by_source) | set(new_by_source), key=_key_sort_key):
+    for key in sorted(set(old_by_source) | set(new_by_source)):
         old_rows = old_by_source.get(key, ())
         new_rows = new_by_source.get(key, ())
         if not old_rows:
@@ -204,9 +205,10 @@ def diff_snapshots(old: DbSnapshot, new: DbSnapshot) -> DiffReport:
         if old_pairs == new_pairs:
             continue
 
-        ambiguous.append(
-            AmbiguousSourceKey(key=key, old_pairs=old_pairs, new_pairs=new_pairs)
-        )
+        if len(old_rows) > 1 and len(new_rows) > 1:
+            ambiguous.append(
+                AmbiguousSourceKey(key=key, old_pairs=old_pairs, new_pairs=new_pairs)
+            )
         old_lookup = _pair_lookup(old_rows)
         new_lookup = _pair_lookup(new_rows)
         for pair in sorted(set(new_lookup) - set(old_lookup)):
