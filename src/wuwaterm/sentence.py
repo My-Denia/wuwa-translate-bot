@@ -428,7 +428,7 @@ def _structured_llm_error_text(response: httpx.Response) -> str:
         if isinstance(value, str):
             parts.append(value)
         elif isinstance(value, dict):
-            for key in ("code", "type", "message", "error", "param"):
+            for key in ("code", "type", "message", "detail", "error", "param"):
                 if key in value:
                     collect(value[key])
         elif isinstance(value, list):

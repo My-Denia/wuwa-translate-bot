@@ -96,6 +96,7 @@ def test_budget_exhaustion_returns_clean_user_notice(monkeypatch, sample_db):
         httpx.Response(400, json={"error": {"message": "input too long"}}),
         httpx.Response(400, text="context length exceeded"),
         httpx.Response(400, text="exceeded"),
+        httpx.Response(400, json={"detail": "maximum context length exceeded"}),
         httpx.Response(
             500,
             json={"error": {"code": "insufficient_quota", "message": "quota exceeded"}},
@@ -123,6 +124,12 @@ def test_llm_context_and_server_errors_do_not_report_budget(response):
         httpx.Response(429, json={"error": {"message": "quota exceeded"}}),
         httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}}),
         httpx.Response(400, json={"error": {"code": "billing_hard_limit_reached"}}),
+        httpx.Response(
+            429,
+            json={
+                "detail": "Authentication Error, ExceededTokenBudget: Max Budget reached"
+            },
+        ),
         httpx.Response(429, text='{"error":"max_budget exceeded"}'),
     ],
 )
