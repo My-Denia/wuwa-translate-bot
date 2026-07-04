@@ -18,6 +18,7 @@ from wuwaterm.bot import (
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
     DEFAULT_PRIVATE_TR_REJECT_TEXT,
+    DIRECTION_USAGE_NOTICE,
     LLM_INPUT_CHAR_LIMIT,
     PUBLIC_DISABLED_NOTICE,
     PUBLIC_ENABLED_NOTICE,
@@ -672,6 +673,294 @@ def test_tr_english_sentence_translates_to_chinese(monkeypatch, sample_db):
 
     assert message.replies == [("今汐装备了声骸", None)]
     assert len(calls) == 1
+
+
+def test_tr_auto_chinese_sentence_defaults_to_english(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["今汐装备了声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [False]
+    assert message.replies == [("Jinhsi equips Echo", None)]
+
+
+def test_tr_auto_english_sentence_defaults_to_chinese(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["Jinhsi equips Echo"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [True]
+    assert message.replies == [("今汐装备了声骸", None)]
+
+
+def test_tr_to_en_flag_forces_english(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "en", "Jinhsi equips Echo"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [False]
+    assert message.replies == [("Jinhsi equips Echo", None)]
+
+
+def test_tr_short_to_zh_flag_forces_chinese(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')}装备了{placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["-to", "zh", "今汐装备了声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [True]
+    assert message.replies == [("今汐装备了声骸", None)]
+
+
+def test_sentence_direction_flag_uses_same_parser(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "en", "Jinhsi equips Echo"])
+
+    asyncio.run(sentence_command(update, context))
+
+    assert calls == [False]
+    assert message.replies == [("Jinhsi equips Echo", None)]
+
+
+def test_invalid_direction_returns_usage_without_llm_or_rate_hit(
+    monkeypatch, sample_db
+):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return "should not be used"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "jp", "今汐说声骸很强"], limit=1)
+
+    asyncio.run(term_command(update, context))
+    valid_update, valid_message = fake_update()
+    valid_context = fake_context(sample_db, ["声骸"], limit=1)
+    valid_context.application.bot_data[RATE_LIMITER_KEY] = context.application.bot_data[
+        RATE_LIMITER_KEY
+    ]
+
+    asyncio.run(term_command(valid_update, valid_context))
+
+    assert calls == []
+    assert message.replies == [(DIRECTION_USAGE_NOTICE, None)]
+    assert valid_message.replies == [("Echo", None)]
+
+
+def test_duplicate_direction_returns_usage_without_llm(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return "should not be used"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "en", "--to", "zh", "声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == []
+    assert message.replies == [(DIRECTION_USAGE_NOTICE, None)]
+
+
+def test_public_invalid_direction_uses_reject_limiter_not_translation_budget(
+    sample_db,
+):
+    admin_update, _admin_msg = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=671
+    )
+    context = fake_context(sample_db, ["on"], limit=1, member_status="administrator")
+    asyncio.run(public_command(admin_update, context))
+    context.bot.default_status = "member"
+    context.application.bot_data[ADMIN_CACHE_KEY] = AdminStatusCache()
+
+    context.args = ["--to", "jp", "今汐说声骸很强"]
+    first_update, first_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=672, user_id=42
+    )
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=673, user_id=43
+    )
+
+    asyncio.run(term_command(first_update, context))
+    asyncio.run(term_command(second_update, context))
+
+    context.args = ["声骸"]
+    valid_update, valid_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=674, user_id=44
+    )
+    asyncio.run(term_command(valid_update, context))
+
+    assert first_message.replies == [(DIRECTION_USAGE_NOTICE, 672)]
+    assert second_message.replies == []
+    assert valid_message.replies == [("Echo", 674)]
+
+
+def test_forced_direction_reply_to_message(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return f"{placeholder_for(locks, 'Jinhsi')} equips {placeholder_for(locks, 'Echo')}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update(
+        reply_to=SimpleNamespace(text="Jinhsi equips Echo", caption=None)
+    )
+    context = fake_context(sample_db, ["--to", "en"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == [False]
+    assert message.replies == [("Jinhsi equips Echo", None)]
+
+
+def test_forced_direction_exact_hit_does_not_call_llm(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(to_chinese)
+        return "should not be used"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = fake_update()
+    context = fake_context(sample_db, ["--to", "en", "声骸"])
+
+    asyncio.run(term_command(update, context))
+
+    assert calls == []
+    assert message.replies == [("Echo", None)]
 
 
 def test_slow_llm_does_not_block_control_commands_or_other_chat(
@@ -1809,12 +2098,16 @@ def test_sentence_reply_to_chinese_message_translates_replied_content(monkeypatc
 
 def test_usage_notices_are_bilingual(sample_db):
     assert TERM_USAGE_NOTICE == (
-        "用法：/tr <中文或英文>（自动判向：中→英 / 英→中；或回复一条消息后发 /tr 直接翻译）\n"
-        "Usage: /tr <Chinese or English> (direction auto-detected; or reply to a message, then send /tr)"
+        "用法：/tr [--to en|zh] <中文或英文>（默认自动判向；回复消息后可只发 /tr [--to en|zh]）\n"
+        "Usage: /tr [--to en|zh] <Chinese or English> (auto by default; reply to a message with /tr [--to en|zh])"
     )
     assert SENTENCE_USAGE_NOTICE == (
-        "用法：/sentence <中文或英文句子>（自动判向：中→英 / 英→中；或回复一条消息后发 /sentence 直接翻译）\n"
-        "Usage: /sentence <Chinese or English sentence> (direction auto-detected; or reply to a message, then send /sentence)"
+        "用法：/sentence [--to en|zh] <中文或英文句子>（默认自动判向；回复消息后可只发 /sentence [--to en|zh]）\n"
+        "Usage: /sentence [--to en|zh] <Chinese or English sentence> (auto by default; reply with /sentence [--to en|zh])"
+    )
+    assert DIRECTION_USAGE_NOTICE == (
+        "翻译方向参数只支持一次 en 或 zh；用法：--to en / --to zh。\n"
+        "Translation direction can be set once to en or zh; usage: --to en / --to zh."
     )
     # Bare command, no inline text and no reply -> the bilingual Usage hint.
     update, message = fake_update()

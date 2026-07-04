@@ -73,12 +73,16 @@ DEFAULT_PRIVATE_TR_REJECT_TEXT = (
 )
 # Usage hints (bilingual; also point out the reply-to-translate shortcut).
 TERM_USAGE_NOTICE = (
-    "用法：/tr <中文或英文>（自动判向：中→英 / 英→中；或回复一条消息后发 /tr 直接翻译）\n"
-    "Usage: /tr <Chinese or English> (direction auto-detected; or reply to a message, then send /tr)"
+    "用法：/tr [--to en|zh] <中文或英文>（默认自动判向；回复消息后可只发 /tr [--to en|zh]）\n"
+    "Usage: /tr [--to en|zh] <Chinese or English> (auto by default; reply to a message with /tr [--to en|zh])"
 )
 SENTENCE_USAGE_NOTICE = (
-    "用法：/sentence <中文或英文句子>（自动判向：中→英 / 英→中；或回复一条消息后发 /sentence 直接翻译）\n"
-    "Usage: /sentence <Chinese or English sentence> (direction auto-detected; or reply to a message, then send /sentence)"
+    "用法：/sentence [--to en|zh] <中文或英文句子>（默认自动判向；回复消息后可只发 /sentence [--to en|zh]）\n"
+    "Usage: /sentence [--to en|zh] <Chinese or English sentence> (auto by default; reply with /sentence [--to en|zh])"
+)
+DIRECTION_USAGE_NOTICE = (
+    "翻译方向参数只支持一次 en 或 zh；用法：--to en / --to zh。\n"
+    "Translation direction can be set once to en or zh; usage: --to en / --to zh."
 )
 # Appended to a short query that misses the dictionary. The data version
 # (pinned commit) lives in /about, never in this user-facing line.
@@ -570,6 +574,14 @@ def chat_id_for(update: Update) -> int | None:
 class TranslationRequest:
     text: str
     html: str | None = None
+    forced_to_chinese: bool | None = None
+
+
+@dataclass(frozen=True)
+class ParsedTranslationArgs:
+    text: str
+    forced_to_chinese: bool | None = None
+    direction_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -578,13 +590,46 @@ class TranslationReply:
     parse_mode: str | None = None
 
 
-def _translation_request(update: Update, inline_text: str) -> TranslationRequest:
+def _parse_translation_args(args: list[str]) -> ParsedTranslationArgs:
+    forced_to_chinese: bool | None = None
+    text_parts: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index].strip()
+        if arg in {"--to", "-to"}:
+            if forced_to_chinese is not None or index + 1 >= len(args):
+                return ParsedTranslationArgs(text="", direction_error=True)
+            value = args[index + 1].strip().lower()
+            if value == "en":
+                forced_to_chinese = False
+            elif value == "zh":
+                forced_to_chinese = True
+            else:
+                return ParsedTranslationArgs(text="", direction_error=True)
+            index += 2
+            continue
+        text_parts.append(args[index])
+        index += 1
+    return ParsedTranslationArgs(
+        text=" ".join(text_parts).strip(),
+        forced_to_chinese=forced_to_chinese,
+    )
+
+
+def _translation_request(
+    update: Update, inline_text: str, forced_to_chinese: bool | None = None
+) -> TranslationRequest:
     if inline_text:
-        return TranslationRequest(text=inline_text)
-    return _replied_translation_request(update)
+        return TranslationRequest(
+            text=inline_text,
+            forced_to_chinese=forced_to_chinese,
+        )
+    return _replied_translation_request(update, forced_to_chinese=forced_to_chinese)
 
 
-def _replied_translation_request(update: Update) -> TranslationRequest:
+def _replied_translation_request(
+    update: Update, forced_to_chinese: bool | None = None
+) -> TranslationRequest:
     """Content of the message a command replies to: text/caption plus HTML.
 
     Lets an authorized caller translate a message by replying to it with a bare
@@ -593,13 +638,13 @@ def _replied_translation_request(update: Update) -> TranslationRequest:
     """
     message = update.effective_message
     if message is None:
-        return TranslationRequest(text="")
+        return TranslationRequest(text="", forced_to_chinese=forced_to_chinese)
     replied = getattr(message, "reply_to_message", None)
     if replied is None:
-        return TranslationRequest(text="")
+        return TranslationRequest(text="", forced_to_chinese=forced_to_chinese)
     content = getattr(replied, "text", None) or getattr(replied, "caption", None)
     if not content:
-        return TranslationRequest(text="")
+        return TranslationRequest(text="", forced_to_chinese=forced_to_chinese)
     entities = ()
     html = getattr(replied, "text_html", None) if getattr(replied, "text", None) else None
     if html is not None:
@@ -617,6 +662,7 @@ def _replied_translation_request(update: Update) -> TranslationRequest:
     return TranslationRequest(
         text=text,
         html=html if html and entities and _telegram_html_has_tags(html) else None,
+        forced_to_chinese=forced_to_chinese,
     )
 
 
@@ -845,8 +891,14 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not message:
         return
     # Inline text wins; otherwise fall back to the replied-to message's content.
-    request = _translation_request(update, " ".join(context.args).strip())
+    parsed = _parse_translation_args(context.args)
+    request = _translation_request(
+        update, parsed.text, forced_to_chinese=parsed.forced_to_chinese
+    )
     if not await _passes_authorization(update, context):
+        return
+    if parsed.direction_error:
+        await _reply_direction_usage(update, context)
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
@@ -868,8 +920,14 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not message:
         return
     # Inline text wins; otherwise fall back to the replied-to message's content.
-    request = _translation_request(update, " ".join(context.args).strip())
+    parsed = _parse_translation_args(context.args)
+    request = _translation_request(
+        update, parsed.text, forced_to_chinese=parsed.forced_to_chinese
+    )
     if not await _passes_authorization(update, context):
+        return
+    if parsed.direction_error:
+        await _reply_direction_usage(update, context)
         return
     if not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
@@ -1273,13 +1331,25 @@ def format_term_reply(service: TermService, query: str) -> str:
     return translate_query(service, translator, query)
 
 
-def translate_query(service: TermService, translator: SentenceTranslator, query: str) -> str:
+def _resolve_to_chinese(prepared: str, forced_to_chinese: bool | None) -> bool:
+    if forced_to_chinese is not None:
+        return forced_to_chinese
+    return not has_cjk(prepared)
+
+
+def translate_query(
+    service: TermService,
+    translator: SentenceTranslator,
+    query: str,
+    *,
+    forced_to_chinese: bool | None = None,
+) -> str:
     prepared = translator.prepare_text(query)
     if not prepared:
         return "Nothing to translate after removing metadata."
-    # Direction is auto-detected: a Chinese source -> English (default), an
-    # all-Latin/English source -> Chinese. Both dictionary and LLM honor it.
-    to_chinese = not has_cjk(prepared)
+    # Direction is auto-detected by default; explicit command flags override it.
+    # Dictionary and LLM honor the same target direction.
+    to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
     result = service.lookup(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
@@ -1296,14 +1366,18 @@ def translate_query(service: TermService, translator: SentenceTranslator, query:
 
 
 async def translate_query_async(
-    service: TermService, translator: SentenceTranslator, query: str
+    service: TermService,
+    translator: SentenceTranslator,
+    query: str,
+    *,
+    forced_to_chinese: bool | None = None,
 ) -> str:
     prepared = translator.prepare_text(query)
     if not prepared:
         return "Nothing to translate after removing metadata."
-    # Direction is auto-detected: a Chinese source -> English (default), an
-    # all-Latin/English source -> Chinese. Both dictionary and LLM honor it.
-    to_chinese = not has_cjk(prepared)
+    # Direction is auto-detected by default; explicit command flags override it.
+    # Dictionary and LLM honor the same target direction.
+    to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
     result = service.lookup(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
@@ -1327,9 +1401,9 @@ async def translate_request_async(
     prepared = translator.prepare_text(request.text)
     if not prepared:
         return TranslationReply("Nothing to translate after removing metadata.")
-    # Direction is auto-detected from the visible text. Dictionary and LLM use
-    # the same direction even when the LLM receives Telegram HTML.
-    to_chinese = not has_cjk(prepared)
+    # Direction is auto-detected from the visible text unless the command
+    # supplies an explicit target. Dictionary and LLM use the same direction.
+    to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
     result = service.lookup(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
@@ -1360,7 +1434,14 @@ async def translate_request_async(
         if _validate_telegram_html(translated):
             return TranslationReply(translated, parse_mode="HTML")
         return TranslationReply(_strip_telegram_html(translated))
-    return TranslationReply(await translate_query_async(service, translator, prepared))
+    return TranslationReply(
+        await translate_query_async(
+            service,
+            translator,
+            prepared,
+            forced_to_chinese=request.forced_to_chinese,
+        )
+    )
 
 
 def _is_ascii_fuzzy_query(text: str) -> bool:
@@ -1383,6 +1464,15 @@ def _should_append_dict_miss(
         and _is_short_query(prepared)
         and not _has_locked_terms(translator, prepared)
     )
+
+
+async def _reply_direction_usage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    # Invalid flag replies are user-visible but should not spend translation
+    # budget. Use the reject limiter so public chats cannot flood usage notices.
+    if _consume_reject_limit(update, context):
+        await reply_to_user(update, DIRECTION_USAGE_NOTICE)
 
 
 async def _passes_authorization(
