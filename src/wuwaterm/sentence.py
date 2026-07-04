@@ -391,7 +391,7 @@ def _extract_llm_content(data: Any) -> str:
 def _llm_error_from_response(response: httpx.Response) -> LLMTranslationError:
     if response.status_code >= 500:
         return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
-    if _has_structured_budget_signal(response):
+    if response.status_code == 429 or _has_structured_budget_signal(response):
         return LLMTranslationError(BUDGET_EXHAUSTED_NOTICE)
     return LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
 

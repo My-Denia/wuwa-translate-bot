@@ -130,6 +130,8 @@ def test_llm_context_and_server_errors_do_not_report_budget(response):
                 "detail": "Authentication Error, ExceededTokenBudget: Max Budget reached"
             },
         ),
+        httpx.Response(429, text="Too Many Requests"),
+        httpx.Response(429),
         httpx.Response(429, text='{"error":"max_budget exceeded"}'),
     ],
 )
