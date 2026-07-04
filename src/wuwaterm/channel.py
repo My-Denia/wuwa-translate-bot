@@ -160,9 +160,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 message.message_id,
             )
             return
-        if not _llm_configured():
-            LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
-            return
         if not _consume_rate_limit(update, context):
             LOGGER.info(
                 "channel autotranslate throttled message_id=%s", message.message_id
@@ -199,6 +196,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     mode="dictionary",
                 )
                 return
+
+        if not _llm_configured():
+            LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
+            return
 
         translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
         try:

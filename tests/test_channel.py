@@ -225,6 +225,23 @@ def enable_mock_llm(monkeypatch, calls, response_factory):
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
 
 
+def disable_llm(monkeypatch):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+
+
+def forbid_llm_call(monkeypatch):
+    calls = []
+
+    async def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("LLM client should not be called")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    return calls
+
+
 def placeholder_for(locks, official):
     for placeholder, _source, en in locks:
         if en == official:
@@ -343,8 +360,8 @@ def test_english_post_translates_to_chinese_html(monkeypatch, sample_db):
 
 
 def test_english_exact_term_post_emits_official_chinese(monkeypatch, sample_db):
-    calls = []
-    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
     update, message = channel_update(text="Echo", text_html="Echo", message_id=4013)
     context = make_context(sample_db)
 
@@ -352,7 +369,7 @@ def test_english_exact_term_post_emits_official_chinese(monkeypatch, sample_db):
 
     # Dictionary-first, zero LLM: English term -> official Chinese, plain.
     assert message.replies == [("声骸", None, 4013)]
-    assert calls == []
+    assert llm_calls == []
 
 
 def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):
@@ -555,15 +572,28 @@ def test_min_cjk_threshold_gates_short_posts(monkeypatch, sample_db):
 def test_exact_dictionary_hit_replies_official_plain_with_zero_llm(
     monkeypatch, sample_db
 ):
-    calls = []
-    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
     update, message = channel_update(text="声骸", message_id=4090)
     context = make_context(sample_db)
 
     asyncio.run(channel_post_handler(update, context))
 
     assert message.replies == [("Echo", None, 4090)]
-    assert calls == []
+    assert llm_calls == []
+
+
+def test_non_exact_channel_post_skips_without_llm_config(monkeypatch, sample_db):
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
+    update, message = channel_update(text=CN_TEXT, message_id=4095)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == []
+    assert context.bot.edits == []
+    assert llm_calls == []
 
 
 def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sample_db):
@@ -903,11 +933,9 @@ def test_edit_re_translates_and_consumes_a_throttle_slot(monkeypatch, sample_db)
 
 def test_edit_dictionary_hit_updates_reply_in_place(monkeypatch, sample_db):
     # An exact-dictionary post replies with the official term and is remembered;
-    # editing it updates that same reply in place — still zero LLM. (The
-    # dictionary short-circuit sits after the LLM-configured gate, so the
-    # endpoint must be configured even though it is never called.)
-    calls = []
-    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    # editing it updates that same reply in place, without requiring LLM config.
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
     context = make_context(sample_db)
 
     new_update, new_message = channel_update(text="声骸", message_id=4270)
@@ -921,7 +949,31 @@ def test_edit_dictionary_hit_updates_reply_in_place(monkeypatch, sample_db):
 
     assert edit_message.replies == []
     assert context.bot.edits == [("Echo", None, -2001, 5270)]
-    assert calls == []
+    assert llm_calls == []
+
+
+def test_edit_from_non_exact_to_exact_updates_dictionary_reply_without_llm_config(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "old translation")
+    context = make_context(sample_db)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4275)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("old translation", "HTML", 4275)]
+    assert len(calls) == 1
+
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
+    edit_update, edit_message = channel_update(
+        text="声骸", message_id=4275, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == [("Echo", None, -2001, 5275)]
+    assert llm_calls == []
 
 
 def test_long_channel_html_reply_is_split_to_plain_chunks(monkeypatch, sample_db):
