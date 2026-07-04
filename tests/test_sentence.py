@@ -5,6 +5,8 @@ import asyncio
 import httpx
 import pytest
 
+from wuwaterm.db import connect, insert_records
+from wuwaterm.models import TermRecord
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -14,6 +16,12 @@ from wuwaterm.sentence import (
     _call_llm_async,
     _llm_error_from_response,
 )
+
+
+def add_synthetic_terms(sample_db, records):
+    with connect(sample_db) as conn:
+        insert_records(conn, records)
+        conn.commit()
 
 
 def test_sentence_locks_known_terms_without_llm(monkeypatch, sample_db):
@@ -32,8 +40,8 @@ def test_lock_placeholders_restore_official_terms(sample_db):
     translator = SentenceTranslator(sample_db)
     locked = translator.lock_terms("今汐和共鸣者")
 
-    assert "__TERM_0__" in locked.locked_text
-    restored = locked.restore("Use __TERM_0__ plus __TERM_1__")
+    by_en = {en: placeholder for placeholder, _zh, en in locked.locks}
+    restored = locked.restore(f"Use {by_en['Jinhsi']} plus {by_en['Resonator']}")
     assert set(restored.removeprefix("Use ").split(" plus ")) == {"Jinhsi", "Resonator"}
 
 
@@ -53,9 +61,172 @@ def test_sentence_locks_english_official_terms_after_nfkc(sample_db):
     translator = SentenceTranslator(sample_db)
     locked = translator.lock_terms("Ｃａｒｔｅｔｈｙｉａ和声骸")
 
-    assert "__TERM_" in locked.locked_text
+    assert locked.locks
     restored = locked.restore(locked.locked_text)
     assert restored == "Cartethyia和Echo"
+
+
+
+def test_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert "__TERM_0__" in locked_text
+        assert len(locks) == 1
+        return f"literal __TERM_0__ plus {locks[0][0]}"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    assert translator.translate("__TERM_0__ 声骸") == "literal __TERM_0__ plus Echo"
+
+
+def test_literal_new_placeholder_like_text_is_preserved(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    literal = "__WUWA_TERM_user_0000__"
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        assert literal in locked_text
+        assert len(locks) == 1
+        return f"{literal} plus {locks[0][0]}"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    assert translator.translate(f"{literal} 声骸") == f"{literal} plus Echo"
+
+
+def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        assert html_mode is True
+        assert "__TERM_0__" in locked_text
+        assert len(locks) == 1
+        return f"<b>__TERM_0__</b>{locks[0][0]}"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return await translator.translate_html_async("<b>__TERM_0__</b>声骸")
+
+    assert asyncio.run(run()) == "<b>__TERM_0__</b>Echo"
+
+
+def test_repeated_terms_get_distinct_placeholders(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("声骸 声骸")
+
+    placeholders = [placeholder for placeholder, _zh, en in locked.locks if en == "Echo"]
+    assert len(placeholders) == 2
+    assert len(set(placeholders)) == 2
+    assert locked.restore(locked.locked_text) == "Echo Echo"
+
+
+def test_restore_rejects_missing_duplicate_or_modified_placeholders(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("今汐说声骸")
+    placeholders = [placeholder for placeholder, _zh, _en in locked.locks]
+    assert len(placeholders) == 2
+
+    with pytest.raises(LLMTranslationError) as all_missing:
+        locked.restore("translated without locked terms")
+    assert all_missing.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+    with pytest.raises(LLMTranslationError) as missing:
+        locked.restore(placeholders[0])
+    assert missing.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+    with pytest.raises(LLMTranslationError) as duplicate:
+        locked.restore(f"{placeholders[0]} {placeholders[0]} {placeholders[1]}")
+    assert duplicate.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+    with pytest.raises(LLMTranslationError) as modified:
+        locked.restore(f"{placeholders[0].lower()} {placeholders[1]}")
+    assert modified.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_equal_length_overlapping_terms_use_stable_order(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Left"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙", "Right"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    outputs = []
+    for _ in range(5):
+        locked = translator.lock_terms("甲乙丙")
+        outputs.append(locked.restore(locked.locked_text))
+
+    assert outputs == ["Left丙"] * 5
+
+
+def test_longer_overlapping_term_wins(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Short"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "甲乙丙", "Long"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("甲乙丙")
+
+    assert locked.restore(locked.locked_text) == "Long"
+
+
+def test_equal_length_overlapping_english_terms_use_stable_order(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "左项", "AB"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "右项", "BC"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    outputs = []
+    for _ in range(5):
+        locked = translator.lock_terms("ABC")
+        outputs.append(locked.restore(locked.locked_text, to_en=False))
+
+    assert outputs == ["左项C"] * 5
+
+
+def test_mixed_chinese_and_english_terms_restore(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("今汐 uses Echo")
+
+    assert locked.restore(locked.locked_text) == "Jinhsi uses Echo"
+
+
+def test_html_path_overlapping_terms_use_stable_order(sample_db):
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Left"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙", "Right"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("<b>甲乙丙</b>")
+
+    assert locked.restore(locked.locked_text) == "<b>Left丙</b>"
 
 
 def test_budget_exhaustion_returns_clean_user_notice(monkeypatch, sample_db):
@@ -359,7 +530,8 @@ def test_restore_to_chinese_swaps_in_zh_official(sample_db):
     translator = SentenceTranslator(sample_db)
     locked = translator.lock_terms("Use Jinhsi plus Resonator")
 
-    restored = locked.restore("Use __TERM_0__ plus __TERM_1__", to_en=False)
+    by_en = {en: placeholder for placeholder, _zh, en in locked.locks}
+    restored = locked.restore(f"Use {by_en['Jinhsi']} plus {by_en['Resonator']}", to_en=False)
     assert set(restored.removeprefix("Use ").split(" plus ")) == {"今汐", "共鸣者"}
 
 

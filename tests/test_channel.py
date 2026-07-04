@@ -43,8 +43,13 @@ from wuwaterm.sentence import (
 from wuwaterm.settings import ChatSettings
 
 
-CN_TEXT = "今汐说声骸很强"
+CN_TEXT = "这是一段需要翻译的频道文本"
 CN_TEXT_HTML = (
+    '<b>这是一段</b><a href="https://example.com">需要翻译</a>的频道'
+    "<tg-spoiler>文本</tg-spoiler>"
+)
+CN_LOCK_TEXT = "今汐说声骸很强"
+CN_LOCK_TEXT_HTML = (
     '<b>今汐</b>说<a href="https://example.com">声骸</a>很'
     "<tg-spoiler>强</tg-spoiler>"
 )
@@ -261,7 +266,7 @@ def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, samp
         )
 
     enable_mock_llm(monkeypatch, calls, response)
-    update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4001)
+    update, message = channel_update(text=CN_LOCK_TEXT, text_html=CN_LOCK_TEXT_HTML, message_id=4001)
     context = make_context(sample_db)
 
     asyncio.run(channel_post_handler(update, context))
@@ -394,7 +399,7 @@ def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):
         return f"<div><b>{jinhsi} says {echo} is strong</div>"
 
     enable_mock_llm(monkeypatch, calls, response)
-    update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4020)
+    update, message = channel_update(text=CN_LOCK_TEXT, text_html=CN_LOCK_TEXT_HTML, message_id=4020)
     context = make_context(sample_db)
 
     asyncio.run(channel_post_handler(update, context))
@@ -1538,13 +1543,13 @@ def test_edit_invalid_html_falls_back_to_plain_edit(monkeypatch, sample_db):
     context = make_context(sample_db, bot=bot)
 
     new_update, _ = channel_update(
-        text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4240
+        text=CN_LOCK_TEXT, text_html=CN_LOCK_TEXT_HTML, message_id=4240
     )
     asyncio.run(channel_post_handler(new_update, context))
 
     edit_update, edit_message = channel_update(
-        text=CN_TEXT,
-        text_html=CN_TEXT_HTML,
+        text=CN_LOCK_TEXT,
+        text_html=CN_LOCK_TEXT_HTML,
         message_id=4240,
         edit_date=datetime.now(timezone.utc),
     )

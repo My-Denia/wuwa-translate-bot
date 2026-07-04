@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import re
 import json
 import asyncio
@@ -45,6 +46,8 @@ class LockedSentence:
     def restore(self, translated: str, *, to_en: bool = True) -> str:
         result = translated
         for placeholder, zh, en in self.locks:
+            if result.count(placeholder) != 1:
+                raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
             result = result.replace(placeholder, en if to_en else zh)
         return result
 
@@ -56,6 +59,13 @@ def _require_nonblank_llm_output(content: str) -> str:
     if not normalized:
         raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
     return normalized
+
+
+def _new_placeholder_prefix(source_text: str) -> str:
+    while True:
+        prefix = f"__WUWA_TERM_{secrets.token_hex(8)}_"
+        if prefix not in source_text:
+            return prefix
 
 
 class SentenceTranslator:
@@ -82,20 +92,40 @@ class SentenceTranslator:
         return self._lock_terms(self.prepare_text(text))
 
     def _lock_terms(self, text: str) -> LockedSentence:
-        entries = sorted(self._lockable_sources(), key=lambda item: len(item[0]), reverse=True)
-        locked = text
+        lockable = [
+            (source, official)
+            for source, official in self._lockable_sources()
+            if len(source) >= 2
+            and official[0]
+            and official[1]
+            and "\n" not in official[0]
+            and "\n" not in official[1]
+        ]
+        # Longest source wins. Equal-length overlaps follow deterministic DB
+        # order, with the source text as a final stable tie-breaker.
+        entries = sorted(
+            enumerate(lockable), key=lambda item: (-len(item[1][0]), item[0], item[1][0])
+        )
+        prefix = _new_placeholder_prefix(text)
+        locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
-        used: set[str] = set()
-        for source, (zh, en) in entries:
-            if len(source) < 2 or source in used or source not in locked:
+        index = 0
+        while index < len(text):
+            match: tuple[str, tuple[str, str]] | None = None
+            for _order, (source, official) in entries:
+                if text.startswith(source, index):
+                    match = (source, official)
+                    break
+            if match is None:
+                locked_parts.append(text[index])
+                index += 1
                 continue
-            if not zh or not en or "\n" in zh or "\n" in en:
-                continue
-            placeholder = f"__TERM_{len(locks)}__"
-            locked = locked.replace(source, placeholder)
+            source, (zh, en) = match
+            placeholder = f"{prefix}{len(locks):04d}__"
+            locked_parts.append(placeholder)
             locks.append((placeholder, zh, en))
-            used.add(source)
-        return LockedSentence(locked_text=locked, locks=tuple(locks))
+            index += len(source)
+        return LockedSentence(locked_text="".join(locked_parts), locks=tuple(locks))
 
     def translate(self, text: str, *, to_chinese: bool = False) -> str:
         prepared = self.prepare_text(text)
@@ -117,9 +147,9 @@ class SentenceTranslator:
             else:
                 translated = self._call_llm_sync(locked.locked_text, locked.locks)
             translated = _require_nonblank_llm_output(translated)
+            return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
             return exc.user_message
-        return locked.restore(translated, to_en=not to_chinese)
 
     async def translate_async(self, text: str, *, to_chinese: bool = False) -> str:
         prepared = self.prepare_text(text)
@@ -143,9 +173,9 @@ class SentenceTranslator:
                     locked.locked_text, locked.locks
                 )
             translated = _require_nonblank_llm_output(translated)
+            return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
             return exc.user_message
-        return locked.restore(translated, to_en=not to_chinese)
 
     def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
         """Translate Telegram-HTML text with DB terms locked and tags untouched.
@@ -248,7 +278,7 @@ class SentenceTranslator:
             return None
         return official
 
-    def _lockable_sources(self) -> set[tuple[str, tuple[str, str]]]:
+    def _lockable_sources(self) -> tuple[tuple[str, tuple[str, str]], ...]:
         # Each source text (Chinese OR English form) maps to the official
         # (zh, en) pair, so a locked placeholder can be restored in either
         # direction. Only terms whose both forms are single-line are lockable.
@@ -261,7 +291,7 @@ class SentenceTranslator:
                 sources.setdefault(entry.zh, official)
             if entry.en:
                 sources.setdefault(entry.en, official)
-        return set(sources.items())
+        return tuple(sources.items())
 
 
 def _llm_configured() -> bool:
@@ -325,7 +355,7 @@ async def _call_llm_async(
     if to_chinese:
         system_content = (
             "Translate English Wuthering Waves text into Simplified Chinese. "
-            "Keep placeholders like __TERM_0__ exactly unchanged. "
+            "Keep all placeholders exactly unchanged. "
             "Do not paraphrase locked official terms. Return Chinese only.\n"
         )
         if html_mode:
@@ -333,7 +363,7 @@ async def _call_llm_async(
     else:
         system_content = (
             "Translate Chinese Wuthering Waves text into English. "
-            "Keep placeholders like __TERM_0__ exactly unchanged. "
+            "Keep all placeholders exactly unchanged. "
             "Do not paraphrase locked official terms. Return English only.\n"
         )
         if html_mode:
