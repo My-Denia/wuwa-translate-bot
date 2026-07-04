@@ -129,8 +129,10 @@ class SentenceTranslator:
                 )
                 start = text.find(source, start + 1)
 
-        # Select global longest non-overlapping official term spans, with
-        # deterministic tie-breakers for equal-length overlaps.
+        # Select global longest non-overlapping official term spans. This
+        # intentionally prioritizes the longest single term, not maximum total
+        # coverage. Equal-length overlaps follow dictionary iteration order,
+        # then start position, then source text.
         selected: list[_TermSpan] = []
         occupied: list[tuple[int, int]] = []
         for span in sorted(
