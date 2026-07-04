@@ -56,6 +56,15 @@ class LockedSentence:
         return result
 
 
+@dataclass(frozen=True)
+class _TermSpan:
+    start: int
+    end: int
+    source: str
+    official: tuple[str, str]
+    order: int
+
+
 def _require_nonblank_llm_output(content: str) -> str:
     if not isinstance(content, str):
         raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE)
@@ -105,30 +114,52 @@ class SentenceTranslator:
             and "\n" not in official[0]
             and "\n" not in official[1]
         ]
-        # Longest source wins. Equal-length overlaps follow deterministic DB
-        # order, with the source text as a final stable tie-breaker.
-        entries = sorted(
-            enumerate(lockable), key=lambda item: (-len(item[1][0]), item[0], item[1][0])
-        )
+        spans: list[_TermSpan] = []
+        for order, (source, official) in enumerate(lockable):
+            start = text.find(source)
+            while start != -1:
+                spans.append(
+                    _TermSpan(
+                        start=start,
+                        end=start + len(source),
+                        source=source,
+                        official=official,
+                        order=order,
+                    )
+                )
+                start = text.find(source, start + 1)
+
+        # Select global longest non-overlapping official term spans, with
+        # deterministic tie-breakers for equal-length overlaps.
+        selected: list[_TermSpan] = []
+        occupied: list[tuple[int, int]] = []
+        for span in sorted(
+            spans,
+            key=lambda item: (
+                -(item.end - item.start),
+                item.order,
+                item.start,
+                item.source,
+            ),
+        ):
+            if any(span.start < end and start < span.end for start, end in occupied):
+                continue
+            selected.append(span)
+            occupied.append((span.start, span.end))
+
+        selected.sort(key=lambda item: item.start)
         prefix = _new_placeholder_prefix(text)
         locked_parts: list[str] = []
         locks: list[tuple[str, str, str]] = []
         index = 0
-        while index < len(text):
-            match: tuple[str, tuple[str, str]] | None = None
-            for _order, (source, official) in entries:
-                if text.startswith(source, index):
-                    match = (source, official)
-                    break
-            if match is None:
-                locked_parts.append(text[index])
-                index += 1
-                continue
-            source, (zh, en) = match
+        for span in selected:
+            locked_parts.append(text[index : span.start])
             placeholder = f"{prefix}{len(locks):04d}__"
             locked_parts.append(placeholder)
+            zh, en = span.official
             locks.append((placeholder, zh, en))
-            index += len(source)
+            index = span.end
+        locked_parts.append(text[index:])
         return LockedSentence(locked_text="".join(locked_parts), locks=tuple(locks))
 
     def translate(self, text: str, *, to_chinese: bool = False) -> str:
