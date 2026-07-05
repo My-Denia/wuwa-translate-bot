@@ -85,21 +85,58 @@ merge operation. If the wrong documentation change is merged, do not rewrite
 
 Before creating the GitHub release, verify that the tag and release do not
 already exist. The tag preflight command must fail if any matching ref already
-exists. For the release preflight, a non-zero `gh release view` result with
-"release not found" is the expected pass state:
+exists, and it must also fail if the remote lookup itself errors. A
+`git ls-remote --exit-code` status of 2 means no matching ref was found, which
+is the expected pass state before publication. For the release preflight, a
+non-zero `gh release view` result with "release not found" is the expected pass
+state:
 
 ```bash
-test -z "$(git ls-remote --tags origin refs/tags/v0.1.0)"
+tag_lookup_status=0
+git ls-remote --exit-code --tags origin refs/tags/v0.1.0 >/dev/null || tag_lookup_status=$?
+case "$tag_lookup_status" in
+  0)
+    echo "refs/tags/v0.1.0 already exists; stop"
+    exit 1
+    ;;
+  2)
+    echo "refs/tags/v0.1.0 not found; ok"
+    ;;
+  *)
+    echo "tag lookup failed; stop"
+    exit 1
+    ;;
+esac
+
 gh release view v0.1.0 --json tagName,targetCommitish,url,assets
 ```
 
 Create the release with no asset paths. After creation, verify that the release
-has no assets and that `refs/tags/v0.1.0` points at the reviewed release target:
+has no assets and that `refs/tags/v0.1.0` points at the reviewed release target.
+For an annotated tag, compare the reviewed target against the peeled commit ref
+`refs/tags/v0.1.0^{}`; otherwise compare against the tag ref itself:
 
 ```bash
 reviewed_main_commit=<reviewed-main-commit-sha>
 gh release view v0.1.0 --json tagName,targetCommitish,url,assets
-test "$(git ls-remote --tags origin refs/tags/v0.1.0 | awk '{print $1}')" = "$reviewed_main_commit"
+tag_ref="$(git ls-remote --exit-code --tags origin refs/tags/v0.1.0 'refs/tags/v0.1.0^{}')" || {
+  echo "tag lookup failed or tag missing; stop"
+  exit 1
+}
+tag_sha="$(
+  printf '%s\n' "$tag_ref" | awk '
+    $2 == "refs/tags/v0.1.0^{}" { print $1; found = 1; exit }
+    $2 == "refs/tags/v0.1.0" { fallback = $1 }
+    END {
+      if (!found && fallback != "") print fallback
+      else if (!found) exit 1
+    }
+  '
+)" || {
+  echo "tag ref parse failed; stop"
+  exit 1
+}
+test "$tag_sha" = "$reviewed_main_commit"
 ```
 
 If an incorrect release is published and repository policy allows removal,
