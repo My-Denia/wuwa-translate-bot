@@ -62,8 +62,8 @@ Before publishing, fetch and fast-forward `main`, then record the exact reviewed
 `origin/main` commit that passed CI and review. Use that SHA as the release
 target.
 
-For cleanup of squash-merged source branches, delete a branch only when one of
-the project cleanup gates passes:
+For cleanup of squash-merged source branches, delete only if the branch is an
+ancestor of `main` or `git cherry main <branch>` prints no `+` lines:
 
 ```bash
 git merge-base --is-ancestor <branch> main
@@ -71,15 +71,21 @@ git cherry main <branch>
 ```
 
 If the ancestry check fails and `git cherry` prints `+` lines, leave the branch
-in place and report the branch name, tip SHA, and restore command instead of
-deleting it.
+in place and report the branch name, tip SHA, and restore commands instead of
+deleting it:
+
+```bash
+git branch <branch> <tip-sha>
+git push origin <tip-sha>:refs/heads/<branch>
+```
 
 When merging a release documentation PR, pass the expected PR head SHA to the
 merge operation. If the wrong documentation change is merged, do not rewrite
 `main`; open a revert PR for the squash merge commit.
 
 Before creating the GitHub release, verify that the tag and release do not
-already exist:
+already exist. For the release preflight, a non-zero `gh release view` result
+with "release not found" is the expected pass state:
 
 ```bash
 git ls-remote --tags origin refs/tags/v0.1.0
