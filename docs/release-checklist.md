@@ -85,8 +85,9 @@ merge operation. If the wrong documentation change is merged, do not rewrite
 
 Before creating the GitHub release, verify that the tag and release do not
 already exist. For the tag preflight, empty output from `git ls-remote` means no
-matching tag exists. For the release preflight, a non-zero `gh release view`
-result with "release not found" is the expected pass state:
+matching tag exists; do not continue if it prints any matching ref. For the
+release preflight, a non-zero `gh release view` result with "release not found"
+is the expected pass state:
 
 ```bash
 git ls-remote --tags origin refs/tags/v0.1.0
