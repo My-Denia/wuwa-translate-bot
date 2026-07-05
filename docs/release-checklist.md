@@ -71,8 +71,8 @@ git cherry main <branch>
 ```
 
 If the ancestry check fails and `git cherry` prints `+` lines, leave the branch
-in place and report the branch name, tip SHA, and restore commands instead of
-deleting it:
+in place. Report the branch name and tip SHA, and record the restore commands
+so the branch can be recreated if it is ever dropped:
 
 ```bash
 git branch <branch> <tip-sha>
@@ -84,8 +84,9 @@ merge operation. If the wrong documentation change is merged, do not rewrite
 `main`; open a revert PR for the squash merge commit.
 
 Before creating the GitHub release, verify that the tag and release do not
-already exist. For the release preflight, a non-zero `gh release view` result
-with "release not found" is the expected pass state:
+already exist. For the tag preflight, empty output from `git ls-remote` means no
+matching tag exists. For the release preflight, a non-zero `gh release view`
+result with "release not found" is the expected pass state:
 
 ```bash
 git ls-remote --tags origin refs/tags/v0.1.0
