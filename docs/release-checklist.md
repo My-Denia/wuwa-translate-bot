@@ -56,6 +56,52 @@ exact release-prep commit.
 - State that the MIT license covers this project's source code only, not
   Wuthering Waves game data or in-game terminology.
 
+## Final Publication Gate
+
+Before publishing, fetch and fast-forward `main`, then record the exact reviewed
+`origin/main` commit that passed CI and review. Use that SHA as the release
+target.
+
+For cleanup of squash-merged source branches, delete a branch only when one of
+the project cleanup gates passes:
+
+```bash
+git merge-base --is-ancestor <branch> main
+git cherry main <branch>
+```
+
+If the ancestry check fails and `git cherry` prints `+` lines, leave the branch
+in place and report the branch name, tip SHA, and restore command instead of
+deleting it.
+
+When merging a release documentation PR, pass the expected PR head SHA to the
+merge operation. If the wrong documentation change is merged, do not rewrite
+`main`; open a revert PR for the squash merge commit.
+
+Before creating the GitHub release, verify that the tag and release do not
+already exist:
+
+```bash
+git ls-remote --tags origin refs/tags/v0.1.0
+gh release view v0.1.0 --json tagName,targetCommitish,url,assets
+```
+
+Create the release with no asset paths. After creation, verify that the release
+has no assets and that `refs/tags/v0.1.0` points at the reviewed release target:
+
+```bash
+gh release view v0.1.0 --json tagName,targetCommitish,url,assets
+git ls-remote --tags origin refs/tags/v0.1.0
+```
+
+If an incorrect release is published and repository policy allows removal,
+delete the release and tag together after confirming it should no longer be
+consumed:
+
+```bash
+gh release delete v0.1.0 --cleanup-tag
+```
+
 ## Release Note Template
 
 ```markdown
