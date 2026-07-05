@@ -84,13 +84,12 @@ merge operation. If the wrong documentation change is merged, do not rewrite
 `main`; open a revert PR for the squash merge commit.
 
 Before creating the GitHub release, verify that the tag and release do not
-already exist. For the tag preflight, empty output from `git ls-remote` means no
-matching tag exists; do not continue if it prints any matching ref. For the
-release preflight, a non-zero `gh release view` result with "release not found"
-is the expected pass state:
+already exist. The tag preflight command must fail if any matching ref already
+exists. For the release preflight, a non-zero `gh release view` result with
+"release not found" is the expected pass state:
 
 ```bash
-git ls-remote --tags origin refs/tags/v0.1.0
+test -z "$(git ls-remote --tags origin refs/tags/v0.1.0)"
 gh release view v0.1.0 --json tagName,targetCommitish,url,assets
 ```
 
@@ -98,8 +97,9 @@ Create the release with no asset paths. After creation, verify that the release
 has no assets and that `refs/tags/v0.1.0` points at the reviewed release target:
 
 ```bash
+reviewed_main_commit=<reviewed-main-commit-sha>
 gh release view v0.1.0 --json tagName,targetCommitish,url,assets
-git ls-remote --tags origin refs/tags/v0.1.0
+test "$(git ls-remote --tags origin refs/tags/v0.1.0 | awk '{print $1}')" = "$reviewed_main_commit"
 ```
 
 If an incorrect release is published and repository policy allows removal,
