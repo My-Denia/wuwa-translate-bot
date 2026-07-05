@@ -56,6 +56,60 @@ exact release-prep commit.
 - State that the MIT license covers this project's source code only, not
   Wuthering Waves game data or in-game terminology.
 
+## Final Publication Gate
+
+Before publishing, fetch and fast-forward `main`, then record the exact reviewed
+`origin/main` commit that passed CI and review. Use that SHA as the release
+target.
+
+For cleanup of squash-merged source branches, delete only if the branch is an
+ancestor of `main` or `git cherry main <branch>` prints no `+` lines:
+
+```bash
+git merge-base --is-ancestor <branch> main
+git cherry main <branch>
+```
+
+If the ancestry check fails and `git cherry` prints `+` lines, leave the branch
+in place. Report the branch name and tip SHA, and record the restore commands
+so the branch can be recreated if it is ever dropped:
+
+```bash
+git branch <branch> <tip-sha>
+git push origin <tip-sha>:refs/heads/<branch>
+```
+
+When merging a release documentation PR, pass the expected PR head SHA to the
+merge operation. If the wrong documentation change is merged, do not rewrite
+`main`; open a revert PR for the squash merge commit.
+
+Before creating the GitHub release, verify that the tag and release do not
+already exist. The tag preflight command must fail if any matching ref already
+exists. For the release preflight, a non-zero `gh release view` result with
+"release not found" is the expected pass state:
+
+```bash
+test -z "$(git ls-remote --tags origin refs/tags/v0.1.0)"
+gh release view v0.1.0 --json tagName,targetCommitish,url,assets
+```
+
+Create the release with no asset paths. After creation, verify that the release
+has no assets and that `refs/tags/v0.1.0` points at the reviewed release target:
+
+```bash
+reviewed_main_commit=<reviewed-main-commit-sha>
+gh release view v0.1.0 --json tagName,targetCommitish,url,assets
+test "$(git ls-remote --tags origin refs/tags/v0.1.0 | awk '{print $1}')" = "$reviewed_main_commit"
+```
+
+If an incorrect release is published and repository policy allows removal,
+delete the release and tag together after confirming it should no longer be
+consumed:
+
+```bash
+gh release delete v0.1.0 --cleanup-tag
+```
+
 ## Release Note Template
 
 ```markdown
