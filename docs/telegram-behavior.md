@@ -13,9 +13,24 @@ export WUWATERM_DB_PATH="data/terms.db"
 Commands:
 
 - `/tr 声骸` returns `Echo`
+- `/tr Echo` returns `声骸`
 - `/tr 今汐装备了声骸` translates the sentence after locking `Jinhsi` and `Echo`
+- `/tr --to en 今汐装备了声骸` and `/tr -to en 今汐装备了声骸`
+  force English output
+- `/tr --to zh Jinhsi equipped an Echo` and
+  `/tr -to zh Jinhsi equipped an Echo` force Chinese output
 - `/term 今汐` returns `Jinhsi`
 - `/sentence 今汐装备了声骸` locks known DB terms before translation
+- `/sentence --to en 今汐装备了声骸` and `/sent --to en 今汐装备了声骸`
+  force English sentence translation
+- `/sentence --to zh Jinhsi equipped an Echo` and
+  `/sent --to zh Jinhsi equipped an Echo` force Chinese sentence translation
+
+The default remains auto-detected when no direction flag is supplied. The
+direction flag may be written as `--to en`, `-to en`, `--to zh`, or `-to zh`.
+For validation, invalid --to values return usage and do not call the LLM. An
+invalid direction does not call the LLM. For exact dictionary hits, the bot does
+not call the LLM.
 
 LLM configuration is documented in [Privacy And LLM](privacy-and-llm.md).
 
@@ -81,10 +96,17 @@ admin (see that section).
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <sentence>` translates with DB terms locked. Direction is auto-detected:
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
-- Replying to a formatted text or caption with a bare `/tr` or `/sentence`
-  preserves Telegram HTML formatting through the LLM path. Dictionary exact
-  and fuzzy hits remain official plain text, and invalid translated markup
-  falls back to plain text instead of failing the reply.
+- Explicit direction flags override that default for commands only:
+  `/tr --to en ...`, `/tr -to en ...`, `/tr --to zh ...`, `/tr -to zh ...`,
+  `/sentence --to en ...`, `/sentence --to zh ...`, `/sent --to en ...`, and
+  `/sent --to zh ...` use the requested target direction.
+- When you reply to a message with `/tr --to en`, `/tr -to en`,
+  `/sentence --to zh`, or `/sent --to zh`, the bot uses the replied-to text
+  with the requested direction.
+  Replying to a formatted text or caption preserves Telegram HTML formatting
+  through the LLM path. Dictionary exact and fuzzy hits remain official plain
+  text, and invalid translated markup falls back to plain text instead of
+  failing the reply.
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
   user id; everyone else gets a short bilingual reply, default
@@ -188,6 +210,8 @@ post to Chinese. No command is involved.
 - Dictionary-first still applies: a post that is exactly one official term
   gets the official string byte-for-byte (English for a Chinese term, Chinese
   for an English term), plain, without the LLM.
+- For linked-channel posts, channel auto-translation remains auto-detected;
+  command direction flags such as `--to en` and `--to zh` do not apply.
 - Caption posts (photo/video announcements) are handled the same as text
   posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
   instead of the 2000-char command cap.
