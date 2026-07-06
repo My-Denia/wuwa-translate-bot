@@ -60,6 +60,27 @@ export WUWATERM_DB_PATH="data/terms.db"
 .venv/bin/python -m wuwaterm.cli bot
 ```
 
+Telegram command examples:
+
+- `/tr 声骸` -> `Echo`
+- `/tr Echo` -> `声骸`
+- `/tr --to en 今汐装备了声骸` and `/tr -to en 今汐装备了声骸`
+  force English output
+- `/tr --to zh Jinhsi equipped an Echo` and
+  `/tr -to zh Jinhsi equipped an Echo` force Chinese output
+- `/sentence --to en 今汐装备了声骸` and `/sent --to en 今汐装备了声骸`
+  force English sentence translation
+- `/sentence --to zh Jinhsi equipped an Echo` and
+  `/sent --to zh Jinhsi equipped an Echo` force Chinese sentence translation
+
+The default remains auto-detected when no direction flag is supplied. To reply
+to a message, send `/tr --to en`, `/tr -to en`, `/sentence --to zh`, or
+`/sent --to zh`; the bot uses the replied-to text with the requested direction.
+For validation, invalid --to values return usage and do not call the LLM; exact
+dictionary hits do not call the LLM. For linked-channel posts, channel
+auto-translation remains auto-detected and does not accept command direction
+flags.
+
 Run the standard validation set:
 
 ```bash
