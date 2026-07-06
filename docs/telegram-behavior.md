@@ -28,9 +28,8 @@ Commands:
 
 The default remains auto-detected when no direction flag is supplied. The
 direction flag may be written as `--to en`, `-to en`, `--to zh`, or `-to zh`.
-For validation, invalid --to values return usage and do not call the LLM. An
-invalid direction does not call the LLM. For exact dictionary hits, the bot does
-not call the LLM.
+For validation, invalid --to values return usage and do not call the LLM; exact
+dictionary hits do not call the LLM.
 
 LLM configuration is documented in [Privacy And LLM](privacy-and-llm.md).
 
@@ -210,7 +209,7 @@ post to Chinese. No command is involved.
 - Dictionary-first still applies: a post that is exactly one official term
   gets the official string byte-for-byte (English for a Chinese term, Chinese
   for an English term), plain, without the LLM.
-- For linked-channel posts, channel auto-translation remains auto-detected;
+- Channel auto-translation remains auto-detected for linked-channel posts;
   command direction flags such as `--to en` and `--to zh` do not apply.
 - Caption posts (photo/video announcements) are handled the same as text
   posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
