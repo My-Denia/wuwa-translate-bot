@@ -120,6 +120,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     redact_id(message.message_id),
                 )
                 return
+            # message.date is the original post date, not edit_date, so the
+            # freshness gate above still blocks old replayed posts. This accepts
+            # a narrow duplicate-reply window if the bot restarts after replying
+            # to a still-fresh post and Telegram then delivers an edit.
             LOGGER.info(
                 "channel autotranslate treating fresh edit as new post "
                 "incoming_message=%s",
