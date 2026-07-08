@@ -973,13 +973,13 @@ def test_concurrent_edits_do_not_overwrite_newer_translation(monkeypatch, sample
     asyncio.run(run())
 
 
-def test_edit_with_no_tracked_reply_is_silent(monkeypatch, sample_db):
+def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(sample_db)
 
-    # An edit with nothing remembered (e.g. after a restart dropped the map):
-    # never translate, never reply, never edit.
+    # An edit with nothing remembered and no message date cannot be bounded by
+    # the stale-post gate, so it remains a safe silent skip.
     edit_update, edit_message = channel_update(
         text=CN_TEXT, message_id=4210, edit_date=datetime.now(timezone.utc)
     )
@@ -988,6 +988,73 @@ def test_edit_with_no_tracked_reply_is_silent(monkeypatch, sample_db):
     assert edit_message.replies == []
     assert context.bot.edits == []
     assert calls == []
+
+
+def test_fresh_edit_without_observed_post_is_silent(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+    now = datetime.now(timezone.utc)
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4210, date=now, edit_date=now
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == []
+    assert calls == []
+
+
+def test_fresh_edit_for_observed_untranslated_post_translates_once(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+    now = datetime.now(timezone.utc)
+
+    original_update, original_message = channel_update(message_id=4210, date=now)
+    asyncio.run(channel_post_handler(original_update, context))
+    assert original_message.replies == []
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4210, date=now, edit_date=now
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == [("translated", "HTML", 4210)]
+    assert context.bot.edits == []
+    assert len(calls) == 1
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get(-2001, 4210) == 5211
+
+
+def test_media_caption_added_by_fresh_edit_gets_first_reply(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(
+        monkeypatch, calls, lambda _locked_text, _locks: "New loading screen"
+    )
+    context = make_context(sample_db)
+    now = datetime.now(timezone.utc)
+
+    original_update, original_message = channel_update(message_id=4211, date=now)
+    asyncio.run(channel_post_handler(original_update, context))
+    assert original_message.replies == []
+    assert calls == []
+
+    edit_update, edit_message = channel_update(
+        caption="新加载图",
+        caption_html="新加载图",
+        message_id=4211,
+        date=now,
+        edit_date=now,
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == [("New loading screen", "HTML", 4211)]
+    assert context.bot.edits == []
+    assert len(calls) == 1
 
 
 def test_edit_re_translates_and_consumes_a_throttle_slot(monkeypatch, sample_db):
@@ -1613,26 +1680,32 @@ def test_edit_reply_gone_is_skipped_silently(monkeypatch, sample_db):
     assert len(bot.edit_attempts) >= 1
 
 
-def test_edit_with_no_tracked_reply_consumes_zero_throttle(monkeypatch, sample_db):
-    # The untracked-edit skip happens BEFORE the throttle, so it must not drain
-    # the per-chat budget: a following fresh post still translates at limit=1.
+def test_fresh_edit_with_no_tracked_reply_consumes_throttle(monkeypatch, sample_db):
+    # A fresh edit for a post this process already observed without replying is
+    # treated as the first translatable version of the post, so it consumes the
+    # same budget as a new post.
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
         sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
     )
+    now = datetime.now(timezone.utc)
+
+    original_update, original_message = channel_update(message_id=4260, date=now)
+    asyncio.run(channel_post_handler(original_update, context))
+    assert original_message.replies == []
 
     edit_update, edit_message = channel_update(
-        text=CN_TEXT, message_id=4260, edit_date=datetime.now(timezone.utc)
+        text=CN_TEXT, message_id=4260, date=now, edit_date=now
     )
     asyncio.run(channel_post_handler(edit_update, context))
-    assert edit_message.replies == []
+    assert edit_message.replies == [("translated", "HTML", 4260)]
     assert context.bot.edits == []
-    assert calls == []
+    assert len(calls) == 1
 
     fresh_update, fresh_message = channel_update(text=CN_TEXT, message_id=4261)
     asyncio.run(channel_post_handler(fresh_update, context))
-    assert fresh_message.replies == [("translated", "HTML", 4261)]
+    assert fresh_message.replies == []
     assert len(calls) == 1
 
 
@@ -1643,6 +1716,14 @@ def test_channel_reply_index_remembers_gets_and_expires():
     assert index.get(-2001, 4001, now=299.9) == 5001
     assert index.get(-2001, 4001, now=300.0) is None  # expired at TTL
     assert index.get(-2001, 9999, now=0.0) is None  # unknown key
+
+
+def test_channel_reply_index_observed_without_reply_expires():
+    index = ChannelReplyIndex(ttl_seconds=300.0)
+    index.remember_observed_without_reply(-2001, 4001, now=0.0)
+
+    assert index.was_observed_without_reply(-2001, 4001, now=299.9) is True
+    assert index.was_observed_without_reply(-2001, 4001, now=300.0) is False
 
 
 def test_channel_reply_index_persists_and_loads_with_wall_clock_ttl(tmp_path):
