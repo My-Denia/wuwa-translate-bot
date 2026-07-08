@@ -150,6 +150,7 @@ LLM_INPUT_CHAR_LIMIT = 2000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
+DEFAULT_CHANNEL_MAX_AGE_SECONDS = 24 * 60 * 60
 ADMIN_CACHE_PRUNE_THRESHOLD = 1024
 CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD = 1024
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -168,7 +169,7 @@ class BotConfig:
     channel_min_latin: int = 2
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
-    channel_max_age_seconds: int = 300
+    channel_max_age_seconds: int = DEFAULT_CHANNEL_MAX_AGE_SECONDS
     channel_reply_index_path: str | None = None
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY
@@ -199,7 +200,10 @@ class BotConfig:
                 os.getenv("WUWATERM_CHANNEL_CAPTION_LIMIT", "1024")
             ),
             channel_max_age_seconds=int(
-                os.getenv("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "300")
+                os.getenv(
+                    "WUWATERM_CHANNEL_MAX_AGE_SECONDS",
+                    str(DEFAULT_CHANNEL_MAX_AGE_SECONDS),
+                )
             ),
             channel_reply_index_path=(
                 os.getenv("WUWATERM_CHANNEL_REPLY_INDEX_PATH", "").strip() or None
@@ -611,6 +615,14 @@ class TranslationRequest:
     text: str
     html: str | None = None
     forced_to_chinese: bool | None = None
+    is_caption: bool = False
+
+
+@dataclass(frozen=True)
+class TranslationActor:
+    tier: str
+    trusted: bool
+    rate_limited: bool
 
 
 @dataclass(frozen=True)
@@ -678,6 +690,7 @@ def _replied_translation_request(
     replied = getattr(message, "reply_to_message", None)
     if replied is None:
         return TranslationRequest(text="", forced_to_chinese=forced_to_chinese)
+    has_text = bool(getattr(replied, "text", None))
     content = getattr(replied, "text", None) or getattr(replied, "caption", None)
     if not content:
         return TranslationRequest(text="", forced_to_chinese=forced_to_chinese)
@@ -699,6 +712,7 @@ def _replied_translation_request(
         text=text,
         html=html if html and entities and _telegram_html_has_tags(html) else None,
         forced_to_chinese=forced_to_chinese,
+        is_caption=not has_text,
     )
 
 
@@ -931,12 +945,13 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     request = _translation_request(
         update, parsed.text, forced_to_chinese=parsed.forced_to_chinese
     )
-    if not await _passes_authorization(update, context):
+    actor = await _translation_actor_or_reject(update, context)
+    if actor is None:
         return
     if parsed.direction_error:
         await _reply_direction_usage(update, context)
         return
-    if not _consume_rate_limit(update, context):
+    if actor.rate_limited and not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not request.text:
@@ -944,7 +959,13 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    translated = await translate_request_async(service, translator, request)
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    translated = await translate_request_async(
+        service,
+        translator,
+        request,
+        input_limit=_translation_input_limit(config, request, actor),
+    )
     if not await _passes_delivery_gate(update, context):
         LOGGER.info("translation reply skipped: authorization changed before delivery")
         return
@@ -960,12 +981,13 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     request = _translation_request(
         update, parsed.text, forced_to_chinese=parsed.forced_to_chinese
     )
-    if not await _passes_authorization(update, context):
+    actor = await _translation_actor_or_reject(update, context)
+    if actor is None:
         return
     if parsed.direction_error:
         await _reply_direction_usage(update, context)
         return
-    if not _consume_rate_limit(update, context):
+    if actor.rate_limited and not _consume_rate_limit(update, context):
         await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not request.text:
@@ -973,7 +995,13 @@ async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    translated = await translate_request_async(service, translator, request)
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    translated = await translate_request_async(
+        service,
+        translator,
+        request,
+        input_limit=_translation_input_limit(config, request, actor),
+    )
     if not await _passes_delivery_gate(update, context):
         LOGGER.info("translation reply skipped: authorization changed before delivery")
         return
@@ -1339,7 +1367,9 @@ def _status_text(
         f"Authorized chats: {settings.allowed_count()}\n"
         f"Public chats: {settings.public_count()}\n"
         f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
-        f"LLM input limit: {LLM_INPUT_CHAR_LIMIT}\n"
+        f"Public LLM input limit: {LLM_INPUT_CHAR_LIMIT}\n"
+        f"Trusted/channel text limit: {config.channel_text_limit}\n"
+        f"Trusted/channel caption limit: {config.channel_caption_limit}\n"
         f"Telegram reply limit: {TELEGRAM_TEXT_MESSAGE_LIMIT}"
     )
 
@@ -1433,6 +1463,8 @@ async def translate_request_async(
     service: TermService,
     translator: SentenceTranslator,
     request: TranslationRequest,
+    *,
+    input_limit: int = LLM_INPUT_CHAR_LIMIT,
 ) -> TranslationReply:
     prepared = translator.prepare_text(request.text)
     if not prepared:
@@ -1449,10 +1481,17 @@ async def translate_request_async(
         return TranslationReply(
             result.best.entry.zh if to_chinese else result.best.entry.en
         )
-    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
+    if len(prepared) > input_limit:
         return TranslationReply(
-            f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
+            f"Input is too long for translation ({input_limit} character limit)."
         )
+    # Only trusted callers have an input_limit above LLM_INPUT_CHAR_LIMIT.
+    # Split internally so owner/admin requests keep the public per-call bound.
+    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
+        translated = await _translate_long_plain_text(
+            translator, prepared, to_chinese=to_chinese
+        )
+        return TranslationReply(translated)
     if request.html:
         if not _llm_configured():
             translated = translator.translate(prepared, to_chinese=to_chinese)
@@ -1478,6 +1517,30 @@ async def translate_request_async(
             forced_to_chinese=request.forced_to_chinese,
         )
     )
+
+
+async def _translate_long_plain_text(
+    translator: SentenceTranslator, text: str, *, to_chinese: bool
+) -> str:
+    translated_chunks: list[str] = []
+    for chunk in split_telegram_text(text, limit=LLM_INPUT_CHAR_LIMIT):
+        translated = await translator.translate_async(chunk, to_chinese=to_chinese)
+        if translated in LLM_FAILURE_NOTICES:
+            return translated
+        translated_chunks.append(translated)
+    return "\n".join(translated_chunks)
+
+
+def _translation_input_limit(
+    config: BotConfig, request: TranslationRequest, actor: TranslationActor
+) -> int:
+    if actor.trusted:
+        return (
+            config.channel_caption_limit
+            if request.is_caption
+            else config.channel_text_limit
+        )
+    return LLM_INPUT_CHAR_LIMIT
 
 
 def _is_ascii_fuzzy_query(text: str) -> bool:
@@ -1511,12 +1574,12 @@ async def _reply_direction_usage(
         await reply_to_user(update, DIRECTION_USAGE_NOTICE)
 
 
-async def _passes_authorization(
+async def _translation_actor_or_reject(
     update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> bool:
-    """One shared authorization wrapper for every translate command."""
-    if await _is_authorized_sender(update, context):
-        return True
+) -> TranslationActor | None:
+    actor = await _translation_actor(update, context)
+    if actor is not None:
+        return actor
     config: BotConfig = context.application.bot_data[CONFIG_KEY]
     # Rejection replies ride a SEPARATE per-chat budget: non-admin /tr spam can
     # neither starve the translation budget authorized callers depend on, nor
@@ -1529,7 +1592,40 @@ async def _passes_authorization(
             else config.private_tr_reject_text
         )
         await reply_to_user(update, reject_text)
-    return False
+    return None
+
+
+async def _translation_actor(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> TranslationActor | None:
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    if is_group_chat(update):
+        chat = update.effective_chat
+        if chat is None:
+            return None
+        settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
+        if not settings.is_allowed(chat.id):
+            return None
+        if _is_owner(update, config):
+            return TranslationActor("owner", trusted=True, rate_limited=False)
+        if await _is_group_admin(update, context):
+            return TranslationActor("group_admin", trusted=True, rate_limited=False)
+        message = update.effective_message
+        if (
+            update.effective_user is None
+            or getattr(message, "sender_chat", None) is not None
+        ):
+            return None
+        if settings.is_public(chat.id):
+            return TranslationActor("public_member", trusted=False, rate_limited=True)
+        return None
+    chat = update.effective_chat
+    if chat is None or chat.type != "private":
+        # Channels and any other chat type are outside the command surface.
+        return None
+    if _is_owner(update, config):
+        return TranslationActor("owner", trusted=True, rate_limited=False)
+    return None
 
 
 async def _passes_delivery_gate(
@@ -1548,6 +1644,9 @@ async def _passes_delivery_gate(
         settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
         if not settings.is_allowed(chat.id):
             return False
+        config: BotConfig = context.application.bot_data[CONFIG_KEY]
+        if _is_owner(update, config):
+            return True
         if await _is_group_admin(update, context, use_cache=False):
             return True
         message = update.effective_message
@@ -1639,6 +1738,9 @@ async def _is_authorized_group_sender(
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     if not settings.is_allowed(chat.id):
         return False
+    config: BotConfig = context.application.bot_data[CONFIG_KEY]
+    if _is_owner(update, config):
+        return True
     if await _is_group_admin(update, context):
         return True
     # Public mode opens the door only for ORDINARY member messages — never for
