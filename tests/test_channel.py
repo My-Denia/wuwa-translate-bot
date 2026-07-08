@@ -990,11 +990,33 @@ def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db
     assert calls == []
 
 
-def test_fresh_edit_with_no_tracked_reply_translates_once(monkeypatch, sample_db):
+def test_fresh_edit_without_observed_post_is_silent(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(sample_db)
     now = datetime.now(timezone.utc)
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4210, date=now, edit_date=now
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    assert edit_message.replies == []
+    assert context.bot.edits == []
+    assert calls == []
+
+
+def test_fresh_edit_for_observed_untranslated_post_translates_once(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+    now = datetime.now(timezone.utc)
+
+    original_update, original_message = channel_update(message_id=4210, date=now)
+    asyncio.run(channel_post_handler(original_update, context))
+    assert original_message.replies == []
 
     edit_update, edit_message = channel_update(
         text=CN_TEXT, message_id=4210, date=now, edit_date=now
@@ -1659,14 +1681,19 @@ def test_edit_reply_gone_is_skipped_silently(monkeypatch, sample_db):
 
 
 def test_fresh_edit_with_no_tracked_reply_consumes_throttle(monkeypatch, sample_db):
-    # A fresh edit with no tracked reply is treated as the first translatable
-    # version of the post, so it consumes the same budget as a new post.
+    # A fresh edit for a post this process already observed without replying is
+    # treated as the first translatable version of the post, so it consumes the
+    # same budget as a new post.
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
         sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
     )
     now = datetime.now(timezone.utc)
+
+    original_update, original_message = channel_update(message_id=4260, date=now)
+    asyncio.run(channel_post_handler(original_update, context))
+    assert original_message.replies == []
 
     edit_update, edit_message = channel_update(
         text=CN_TEXT, message_id=4260, date=now, edit_date=now
@@ -1689,6 +1716,14 @@ def test_channel_reply_index_remembers_gets_and_expires():
     assert index.get(-2001, 4001, now=299.9) == 5001
     assert index.get(-2001, 4001, now=300.0) is None  # expired at TTL
     assert index.get(-2001, 9999, now=0.0) is None  # unknown key
+
+
+def test_channel_reply_index_observed_without_reply_expires():
+    index = ChannelReplyIndex(ttl_seconds=300.0)
+    index.remember_observed_without_reply(-2001, 4001, now=0.0)
+
+    assert index.was_observed_without_reply(-2001, 4001, now=299.9) is True
+    assert index.was_observed_without_reply(-2001, 4001, now=300.0) is False
 
 
 def test_channel_reply_index_persists_and_loads_with_wall_clock_ttl(tmp_path):

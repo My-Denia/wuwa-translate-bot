@@ -82,9 +82,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Edit dedup: an edited post (edit_date set) updates the reply already
-    # sent for it. If the edit is fresh but has no tracked reply, process it as
-    # the first translatable version of the post; this covers Telegram media
-    # forwards whose caption/text arrives only on the edited update.
+    # sent for it. If this process already observed the post without replying,
+    # a fresh edit can be the first translatable version; this covers Telegram
+    # media forwards whose caption/text arrives only on the edited update.
     reply_index: ChannelReplyIndex = context.application.bot_data[
         CHANNEL_REPLY_INDEX_KEY
     ]
@@ -120,10 +120,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     redact_id(message.message_id),
                 )
                 return
+            if chat_id is None or not reply_index.was_observed_without_reply(
+                chat_id, message.message_id
+            ):
+                LOGGER.info(
+                    "channel autotranslate skipped: edit with no tracked reply "
+                    "and no observed untranslated post incoming_message=%s",
+                    redact_id(message.message_id),
+                )
+                return
             # message.date is the original post date, not edit_date, so the
             # freshness gate above still blocks old replayed posts. This accepts
-            # a narrow duplicate-reply window if the bot restarts after replying
-            # to a still-fresh post and Telegram then delivers an edit.
+            # a fresh edit only when this process saw the post without replying;
+            # after a restart, the sentinel is gone and the edit stays skipped.
             LOGGER.info(
                 "channel autotranslate treating fresh edit as new post "
                 "incoming_message=%s",
@@ -316,6 +325,10 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     finally:
         if marked_in_flight and chat_id is not None:
+            if reply_index.get(chat_id, message.message_id) is None:
+                reply_index.remember_observed_without_reply(
+                    chat_id, message.message_id
+                )
             reply_index.finish_in_flight(chat_id, message.message_id)
 
 

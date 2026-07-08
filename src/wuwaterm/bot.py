@@ -294,7 +294,10 @@ class ChannelReplyIndex:
     again. This index lets that edit update existing reply chunks instead of
     adding untracked duplicates. Entries are bounded by age (the channel
     freshness window) and can be persisted; if an edit finds no entry, it is
-    skipped, degrading to "no update", never to a duplicate reply.
+    skipped, degrading to "no update", never to a duplicate reply. The index
+    also keeps a process-local sentinel for posts this process observed without
+    replying, so a later fresh edit can be treated as the first translatable
+    version without reopening the restart duplicate-reply window.
     """
 
     def __init__(
@@ -307,6 +310,7 @@ class ChannelReplyIndex:
         self.storage_path = Path(storage_path) if storage_path is not None else None
         self._clock = clock
         self._entries: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
+        self._observed_without_reply: dict[tuple[int, int], float] = {}
         self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
         self._latest_edit_tokens: dict[tuple[int, int], int] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
@@ -345,6 +349,7 @@ class ChannelReplyIndex:
             now + self.ttl_seconds,
             tuple(reply_message_ids),
         )
+        self._observed_without_reply.pop((chat_id, message_id), None)
         self._save_best_effort()
 
     def get(
@@ -378,6 +383,31 @@ class ChannelReplyIndex:
     def forget(self, chat_id: int, message_id: int) -> None:
         self._forget_key((chat_id, message_id), persist=True)
 
+    def remember_observed_without_reply(
+        self,
+        chat_id: int,
+        message_id: int,
+        now: float | None = None,
+    ) -> None:
+        now = self._clock() if now is None else now
+        self._observed_without_reply[(chat_id, message_id)] = now + self.ttl_seconds
+
+    def was_observed_without_reply(
+        self,
+        chat_id: int,
+        message_id: int,
+        now: float | None = None,
+    ) -> bool:
+        now = self._clock() if now is None else now
+        key = (chat_id, message_id)
+        expires_at = self._observed_without_reply.get(key)
+        if expires_at is None:
+            return False
+        if now >= expires_at:
+            self._observed_without_reply.pop(key, None)
+            return False
+        return True
+
     def entry_count(self, now: float | None = None) -> int:
         self.prune(now=now)
         return len(self._entries)
@@ -388,12 +418,18 @@ class ChannelReplyIndex:
         self._entries = {
             key: entry for key, entry in self._entries.items() if entry[0] > now
         }
+        self._observed_without_reply = {
+            key: expires_at
+            for key, expires_at in self._observed_without_reply.items()
+            if expires_at > now
+        }
         self._prune_edit_state()
         if len(self._entries) != before:
             self._save_best_effort()
 
     def _forget_key(self, key: tuple[int, int], *, persist: bool) -> None:
         self._entries.pop(key, None)
+        self._observed_without_reply.pop(key, None)
         self._latest_edit_tokens.pop(key, None)
         lock = self._edit_delivery_locks.get(key)
         if lock is not None and not lock.locked():
