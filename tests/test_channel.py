@@ -20,8 +20,8 @@ from wuwaterm.bot import (
     RATE_LIMITER_KEY,
     REJECT_LIMITER_KEY,
     SERVICE_KEY,
+    LLM_INPUT_CHAR_LIMIT,
     TELEGRAM_TEXT_MESSAGE_LIMIT,
-    THROTTLE_NOTICE,
     TRANSLATOR_KEY,
     AdminStatusCache,
     BotConfig,
@@ -460,12 +460,14 @@ def test_caption_post_uses_same_html_pipeline(monkeypatch, sample_db):
     assert message.replies == [("<b>Jinhsi</b> arrives", "HTML", 4030)]
 
 
-def test_throttle_is_shared_with_commands_and_skips_silently(monkeypatch, sample_db):
+def test_channel_autotranslate_bypasses_public_command_throttle(
+    monkeypatch, sample_db
+):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
         sample_db,
-        config=BotConfig(rate_limit_per_minute=2, owner_user_id=11),
+        config=BotConfig(rate_limit_per_minute=1, owner_user_id=11),
         args=["声骸"],
     )
 
@@ -477,13 +479,14 @@ def test_throttle_is_shared_with_commands_and_skips_silently(monkeypatch, sample
 
     assert len(messages[0].replies) == 1
     assert len(messages[1].replies) == 1
-    assert messages[2].replies == []
-    assert len(calls) == 2
+    assert len(messages[2].replies) == 1
+    assert len(calls) == 3
 
-    tr_update, tr_message = command_update(message_id=4050)
+    tr_update, tr_message = command_update(message_id=4050, user_id=42)
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
     asyncio.run(term_command(tr_update, context))
 
-    assert tr_message.replies == [(THROTTLE_NOTICE, None, 4050)]
+    assert tr_message.replies == [("Echo", None, 4050)]
 
 
 def test_channel_post_skipped_when_chat_not_allowlisted(monkeypatch, sample_db):
@@ -655,7 +658,7 @@ def test_non_exact_channel_post_skips_without_llm_config(monkeypatch, sample_db)
     assert tr_message.replies == [("Echo", None, 4096)]
 
 
-def test_throttled_channel_post_skips_before_fuzzy_lookup(monkeypatch, sample_db):
+def test_channel_posts_ignore_public_command_throttle(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
@@ -667,18 +670,11 @@ def test_throttled_channel_post_skips_before_fuzzy_lookup(monkeypatch, sample_db
     assert first_message.replies == [("translated", "HTML", 4097)]
     assert len(calls) == 1
 
-    service = context.application.bot_data[SERVICE_KEY]
-
-    def fail_fuzzy(*_args, **_kwargs):
-        raise AssertionError("throttled channel posts must not run fuzzy lookup")
-
-    monkeypatch.setattr(service, "_fuzzy", fail_fuzzy)
-
     second_update, second_message = channel_update(text=f"{CN_TEXT}。", message_id=4098)
     asyncio.run(channel_post_handler(second_update, context))
 
-    assert second_message.replies == []
-    assert len(calls) == 1
+    assert second_message.replies == [("translated", "HTML", 4098)]
+    assert len(calls) == 2
 
 
 def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sample_db):
@@ -693,7 +689,7 @@ def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sampl
     stale_update, stale_message = channel_update(
         text=CN_TEXT,
         message_id=4100,
-        date=datetime.now(timezone.utc) - timedelta(hours=1),
+        date=datetime.now(timezone.utc) - timedelta(days=2),
     )
 
     asyncio.run(channel_post_handler(stale_update, context))
@@ -708,6 +704,44 @@ def test_stale_post_is_silent_with_zero_llm_and_zero_throttle(monkeypatch, sampl
 
     assert fresh_message.replies == [("translated", "HTML", 4101)]
     assert len(calls) == 1
+
+
+def test_default_channel_age_allows_delayed_channel_posts(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(
+        sample_db, config=BotConfig(rate_limit_per_minute=10, owner_user_id=11)
+    )
+
+    delayed_update, delayed_message = channel_update(
+        text=CN_TEXT,
+        message_id=4102,
+        date=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+
+    asyncio.run(channel_post_handler(delayed_update, context))
+
+    assert delayed_message.replies == [("translated", "HTML", 4102)]
+    assert len(calls) == 1
+
+
+def test_long_channel_input_is_split_instead_of_rejected(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(
+        monkeypatch,
+        calls,
+        lambda _locked_text, _locks: f"chunk-{len(calls)}",
+    )
+    long_text = "测" * (LLM_INPUT_CHAR_LIMIT + 500)
+    context = make_context(sample_db)
+    update, message = channel_update(text=long_text, message_id=4103)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == [("chunk-1\nchunk-2", None, 4103)]
+    assert len(calls) == 2
+    assert all(len(locked_text) <= LLM_INPUT_CHAR_LIMIT for locked_text, *_ in calls)
+    assert [html_mode for *_rest, html_mode in calls] == [False, False]
 
 
 def test_post_age_boundary_respects_configured_max_age(monkeypatch, sample_db):
@@ -1057,13 +1091,11 @@ def test_media_caption_added_by_fresh_edit_gets_first_reply(monkeypatch, sample_
     assert len(calls) == 1
 
 
-def test_edit_re_translates_and_consumes_a_throttle_slot(monkeypatch, sample_db):
+def test_channel_edit_bypasses_public_command_throttle(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
-    # limit=2: the new post (slot 1) and its edit (slot 2) exhaust the budget,
-    # so a second distinct post is throttled -> the edit DID consume a slot.
     context = make_context(
-        sample_db, config=BotConfig(rate_limit_per_minute=2, owner_user_id=11)
+        sample_db, config=BotConfig(rate_limit_per_minute=1, owner_user_id=11)
     )
 
     new_update, new_message = channel_update(text=CN_TEXT, message_id=4220)
@@ -1079,8 +1111,8 @@ def test_edit_re_translates_and_consumes_a_throttle_slot(monkeypatch, sample_db)
 
     third_update, third_message = channel_update(text=CN_TEXT, message_id=4221)
     asyncio.run(channel_post_handler(third_update, context))
-    assert third_message.replies == []  # budget drained by post + edit
-    assert len(calls) == 2
+    assert third_message.replies == [("translated", "HTML", 4221)]
+    assert len(calls) == 3
 
 
 def test_edit_dictionary_hit_updates_reply_in_place(monkeypatch, sample_db):
@@ -1680,10 +1712,11 @@ def test_edit_reply_gone_is_skipped_silently(monkeypatch, sample_db):
     assert len(bot.edit_attempts) >= 1
 
 
-def test_fresh_edit_with_no_tracked_reply_consumes_throttle(monkeypatch, sample_db):
+def test_fresh_edit_with_no_tracked_reply_bypasses_public_command_throttle(
+    monkeypatch, sample_db
+):
     # A fresh edit for a post this process already observed without replying is
-    # treated as the first translatable version of the post, so it consumes the
-    # same budget as a new post.
+    # treated as the first translatable version of the trusted channel post.
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
     context = make_context(
@@ -1705,8 +1738,8 @@ def test_fresh_edit_with_no_tracked_reply_consumes_throttle(monkeypatch, sample_
 
     fresh_update, fresh_message = channel_update(text=CN_TEXT, message_id=4261)
     asyncio.run(channel_post_handler(fresh_update, context))
-    assert fresh_message.replies == []
-    assert len(calls) == 1
+    assert fresh_message.replies == [("translated", "HTML", 4261)]
+    assert len(calls) == 2
 
 
 def test_channel_reply_index_remembers_gets_and_expires():

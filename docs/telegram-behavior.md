@@ -56,10 +56,11 @@ Optional Telegram/runtime environment variables:
   auto-translation (Telegram's own text limit)
 - `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`; max caption length for
   auto-translation (Telegram's own caption limit)
-- `WUWATERM_CHANNEL_MAX_AGE_SECONDS`, default `300`; channel posts older
-  than this are never auto-translated — guards against Telegram update
-  replays (restart backlog, bot admin promotion) translating channel
-  history
+- `WUWATERM_CHANNEL_MAX_AGE_SECONDS`, default `86400`; channel posts older
+  than this are never auto-translated. The default is intentionally broad
+  because linked-channel content is trusted, while still bounding Telegram
+  update replays (restart backlog, bot admin promotion) from translating
+  old history.
 - `WUWATERM_CHANNEL_REPLY_INDEX_PATH`, optional; defaults to
   `<db parent>/channel_replies.json` so recent channel post reply ids survive
   container rebuilds when `data/` is bind-mounted. This file contains Telegram
@@ -87,11 +88,13 @@ admin (see that section).
   group admins (posting as the group itself) are allowed. Membership verdicts
   are cached about 5 minutes per (chat, user). An admin may open an authorized
   chat to all members with `/public on` (see below).
-- Unauthorized callers get a short bilingual reply (Chinese line then
-  English), default `仅群管理员可用 /tr` then `Only group admins can use /tr`;
-  the wording is configurable, and a config flag switches to silent ignore
-  (default replies). Rejected calls never invoke the LLM but still consume
-  the per-chat throttle budget.
+- Authorization has explicit tiers. Owner and group admins are trusted
+  callers in allowlisted groups; ordinary members are authorized only when
+  `/public on` is enabled. Unauthorized callers get a short bilingual reply
+  (Chinese line then English), default `仅群管理员可用 /tr` then
+  `Only group admins can use /tr`; the wording is configurable, and a config
+  flag switches to silent ignore (default replies). Rejected calls never invoke
+  the LLM and use a separate rejection-reply budget.
 - Authorized `/tr 声骸` and `/tr@<botusername> 声骸` return dictionary hits;
   `/tr <sentence>` translates with DB terms locked. Direction is auto-detected:
   Chinese input -> English, English input -> Chinese (`/tr Echo` returns `声骸`).
@@ -112,9 +115,12 @@ admin (see that section).
   `此 bot 仅限群内由管理员使用` then `This bot can only be used by admins inside a group.`
   With the owner id unset, private chat rejects everyone (fail-closed).
   Channel-type chats are rejected entirely.
-- Per-chat throttling defaults to 10 lookups per minute.
-- LLM-path input is capped at 2000 characters. Replies longer than Telegram's
-  4096-character text message limit are split before sending.
+- Ordinary public members are rate-limited per chat, default 10 lookups per
+  minute, and keep the 2000-character LLM input limit. Trusted callers (owner
+  and group admins) do not use the ordinary public-member throttle and may use
+  the channel text/caption limits (4096 text / 1024 caption); long trusted
+  inputs are split internally into 2000-character LLM chunks. Replies longer
+  than Telegram's 4096-character text message limit are split before sending.
 - `/status` is owner-only and reports operational counts and flags only:
   dictionary term count, data profile/short commit, LLM configured yes/no,
   channel auto-translation on/off, tracked channel-post count, allowlist/public
@@ -214,14 +220,17 @@ post to Chinese. No command is involved.
 - Caption posts (photo/video announcements) are handled the same as text
   posts. Length caps are Telegram's own limits (4096 text / 1024 caption)
   instead of the 2000-char command cap.
-- The per-chat throttle is shared with the slash commands. Throttle denials
-  and budget exhaustion on this path skip silently with one log line — no
-  notice comment under the post (command paths keep their visible notices).
+- Channel auto-translation is a trusted publisher path. It does not share the
+  ordinary public-member command throttle; it is bounded by allowlist,
+  text/caption limits, direction checks, the LLM configuration/budget, and the
+  freshness gate below. Budget exhaustion still skips silently with one log
+  line — no notice comment under the post.
 - Kill switch: `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on.
 - Freshness gate: posts older than `WUWATERM_CHANNEL_MAX_AGE_SECONDS`
-  (default 300) are skipped silently. Telegram replays updates — restart
-  backlog, or a burst of recent group history when the bot is promoted to
-  admin — and without this gate the bot would translate channel history.
+  (default 86400) are skipped silently. Linked-channel content is trusted, so
+  this default allows delayed posts and late edits while still bounding
+  Telegram replays — restart backlog, or a burst of recent group history when
+  the bot is promoted to admin — from translating old history.
 - Edited posts update the existing tracked reply chunks in place: when the
   linked channel edits a post, the bot re-translates and edits existing chunks,
   adds continuation chunks, or deletes stale extras instead of adding untracked
@@ -229,10 +238,10 @@ post to Chinese. No command is involved.
   `<db parent>/channel_replies.json` by default; in the standard Docker layout
   this is `data/channel_replies.json`. Recent posts can still be reconciled
   after a container rebuild or restart while they remain inside
-  `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no
-  tracked reply exists — for a post that was never translated, a corrupt/missing
-  persistence file, or an edit made after the freshness window — the edit is
-  skipped silently; an edit never produces a duplicate reply.
+  `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no tracked reply exists — for a post
+  that was never translated, a corrupt/missing persistence file, or an edit made
+  after the freshness window — the edit is skipped silently; an edit never
+  produces a duplicate reply.
 - Delivery precondition: Telegram privacy mode withholds channel
   auto-forwards from non-admin bots (slash commands still arrive). Make
   the bot an admin of the discussion group (any single right suffices);

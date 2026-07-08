@@ -14,12 +14,13 @@ from .bot import (
     CHANNEL_REPLY_INDEX_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
+    LLM_FAILURE_NOTICES,
+    LLM_INPUT_CHAR_LIMIT,
     SERVICE_KEY,
     TELEGRAM_TEXT_MESSAGE_LIMIT,
     TRANSLATOR_KEY,
     BotConfig,
     ChannelReplyIndex,
-    _consume_rate_limit,
 )
 from .lookup import TermService
 from .logging_utils import redact_id, safe_text_len
@@ -52,8 +53,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if message is None:
         return
     # Freshness gate: Telegram replays updates (restart backlog, admin
-    # promotion, 24h queue) — historical channel posts must never be
-    # translated, regardless of how their update arrives.
+    # promotion, queue delivery). Linked-channel content is trusted, so the
+    # default window is deliberately broad; the gate only blocks posts outside
+    # the configured channel replay horizon.
     message_date = getattr(message, "date", None)
     if message_date is not None:
         age_seconds = (datetime.now(timezone.utc) - message_date).total_seconds()
@@ -191,13 +193,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not official and not _llm_configured():
             LOGGER.warning("channel autotranslate skipped: LLM endpoint not configured")
             return
-        if not _consume_rate_limit(update, context):
-            LOGGER.info(
-                "channel autotranslate throttled incoming_message=%s",
-                redact_id(message.message_id),
-            )
-            return
-
         if official:
             # Dictionary-first invariant: official text byte-for-byte,
             # plain, trumps formatting. Zero LLM.
@@ -225,8 +220,12 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
         try:
-            translated = await translator.translate_html_async(
-                html_text, to_chinese=to_chinese
+            (
+                translated,
+                translated_parse_mode,
+                translated_mode,
+            ) = await _translate_channel_input(
+                translator, plain, html_text, to_chinese=to_chinese
             )
         except LLMTranslationError:
             # Budget exhaustion and generic LLM failure both skip silently;
@@ -234,7 +233,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             LOGGER.warning("channel autotranslate skipped: translation unavailable")
             return
 
-        if validate_telegram_html(translated):
+        if translated_parse_mode == "HTML" and validate_telegram_html(translated):
             plain_translated = strip_telegram_html(translated)
             if telegram_text_units(plain_translated) > TELEGRAM_TEXT_MESSAGE_LIMIT:
                 if not _passes_channel_delivery_gate(context, chat_id):
@@ -255,7 +254,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     edit_work_token=edit_work_token,
                     text=plain_translated,
                     parse_mode=None,
-                    mode="HTML",
+                    mode=translated_mode,
                 )
                 return
             try:
@@ -277,7 +276,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     edit_work_token=edit_work_token,
                     text=translated,
                     parse_mode="HTML",
-                    mode="HTML",
+                    mode=translated_mode,
                 )
                 return
             except BadRequest:
@@ -319,9 +318,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             is_edit=is_edit,
             existing_reply_id=existing_reply_id,
             edit_work_token=edit_work_token,
-            text=strip_telegram_html(translated),
+            text=strip_telegram_html(translated)
+            if translated_parse_mode == "HTML"
+            else translated,
             parse_mode=None,
-            mode="plain",
+            mode="plain" if translated_parse_mode == "HTML" else translated_mode,
         )
     finally:
         if marked_in_flight and chat_id is not None:
@@ -339,6 +340,28 @@ def _passes_channel_delivery_gate(
         return False
     settings: ChatSettings = context.application.bot_data[CHAT_SETTINGS_KEY]
     return settings.is_allowed(chat_id)
+
+
+async def _translate_channel_input(
+    translator: SentenceTranslator,
+    plain: str,
+    html_text: str,
+    *,
+    to_chinese: bool,
+) -> tuple[str, str | None, str]:
+    if len(plain) <= LLM_INPUT_CHAR_LIMIT:
+        return (
+            await translator.translate_html_async(html_text, to_chinese=to_chinese),
+            "HTML",
+            "HTML",
+        )
+    translated_chunks: list[str] = []
+    for chunk in split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT):
+        translated = await translator.translate_async(chunk, to_chinese=to_chinese)
+        if translated in LLM_FAILURE_NOTICES:
+            raise LLMTranslationError(translated)
+        translated_chunks.append(translated)
+    return "\n".join(translated_chunks), None, "plain-input-split"
 
 
 async def _emit(

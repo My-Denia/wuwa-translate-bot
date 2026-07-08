@@ -525,14 +525,22 @@ def test_llm_output_split_counts_emoji_as_utf16_units(monkeypatch, sample_db):
 def test_llm_path_rejects_over_2000_chars_before_call(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
-    update, message = fake_update()
-    context = fake_context(sample_db, ["测" * (LLM_INPUT_CHAR_LIMIT + 1)])
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=529, user_id=42
+    )
+    context = fake_context(
+        sample_db, ["测" * (LLM_INPUT_CHAR_LIMIT + 1)], member_status="member"
+    )
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
 
     asyncio.run(term_command(update, context))
 
     assert LLM_INPUT_CHAR_LIMIT == 2000
     assert message.replies == [
-        (f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).", None)
+        (
+            f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).",
+            529,
+        )
     ]
     assert calls == []
 
@@ -1187,17 +1195,27 @@ def test_llm_concurrency_limit_bounds_inflight_calls(monkeypatch, sample_db):
 
 
 def test_rate_limit_is_per_chat(sample_db):
-    context = fake_context(sample_db, ["声骸"], limit=10)
+    context = fake_context(sample_db, ["声骸"], limit=10, member_status="member")
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    settings.set_public(-2001, True)
+    settings.set_public(-2002, True)
     for idx in range(10):
-        update, _message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=600 + idx)
+        update, _message = fake_update(
+            chat_id=-2001,
+            chat_type="supergroup",
+            message_id=600 + idx,
+            user_id=42,
+        )
         asyncio.run(term_command(update, context))
 
     throttled_update, throttled_message = fake_update(
-        chat_id=-2001, chat_type="supergroup", message_id=700
+        chat_id=-2001, chat_type="supergroup", message_id=700, user_id=42
     )
     asyncio.run(term_command(throttled_update, context))
 
-    other_update, other_message = fake_update(chat_id=-2002, chat_type="supergroup", message_id=800)
+    other_update, other_message = fake_update(
+        chat_id=-2002, chat_type="supergroup", message_id=800, user_id=43
+    )
     asyncio.run(term_command(other_update, context))
 
     assert throttled_message.replies == [(THROTTLE_NOTICE, 700)]
@@ -1206,6 +1224,101 @@ def test_rate_limit_is_per_chat(sample_db):
         "Rate limit reached for this chat. Try again in a minute."
     )
     assert other_message.replies == [("Echo", 800)]
+
+
+def test_group_owner_bypasses_member_status_rate_limit_and_2000_input(
+    monkeypatch, sample_db
+):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(_locked_text)
+        return f"owner-chunk-{len(calls)}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    context = fake_context(sample_db, ["测" * 2500], limit=1, member_status="member")
+
+    long_update, long_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=601, user_id=11
+    )
+    asyncio.run(term_command(long_update, context))
+
+    context.args = ["声骸"]
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=602, user_id=11
+    )
+    asyncio.run(term_command(second_update, context))
+
+    assert long_message.replies == [("owner-chunk-1\nowner-chunk-2", 601)]
+    assert second_message.replies == [("Echo", 602)]
+    assert len(calls) == 2
+    assert context.bot.member_calls == []
+
+
+def test_group_admin_bypasses_rate_limit_and_2000_input(monkeypatch, sample_db):
+    calls = []
+
+    async def fake_call(
+        _locked_text,
+        _locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=45.0,
+        transport=None,
+    ):
+        calls.append(_locked_text)
+        return f"admin-chunk-{len(calls)}"
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    context = fake_context(sample_db, ["测" * 2500], limit=1, member_status="administrator")
+
+    long_update, long_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=603, user_id=42
+    )
+    asyncio.run(term_command(long_update, context))
+
+    context.args = ["声骸"]
+    second_update, second_message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=604, user_id=42
+    )
+    asyncio.run(term_command(second_update, context))
+
+    assert long_message.replies == [("admin-chunk-1\nadmin-chunk-2", 603)]
+    assert second_message.replies == [("Echo", 604)]
+    assert len(calls) == 2
+
+
+def test_public_member_keeps_2000_input_limit(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
+    context = fake_context(sample_db, ["测" * (LLM_INPUT_CHAR_LIMIT + 1)], member_status="member")
+    context.application.bot_data[CHAT_SETTINGS_KEY].set_public(-2001, True)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=605, user_id=42
+    )
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [
+        (
+            f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit).",
+            605,
+        )
+    ]
+    assert calls == []
 
 
 def test_commandhandler_accepts_bot_username(sample_db):
@@ -1352,7 +1465,9 @@ def test_automatic_channel_forward_matches_only_the_message_handler(sample_db):
 def test_group_tr_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=900)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=900, user_id=42
+    )
     context = fake_context(sample_db, ["今汐说声骸很强"], member_status="member")
 
     asyncio.run(term_command(update, context))
@@ -1360,12 +1475,14 @@ def test_group_tr_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sampl
     assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 900)]
     assert message.replies[0][0] == "仅群管理员可用 /tr\nOnly group admins can use /tr"
     assert calls == []
-    assert context.bot.member_calls == [(-2001, 11)]
+    assert context.bot.member_calls == [(-2001, 42)]
 
 
 @pytest.mark.parametrize("status", ["restricted", "left", "kicked"])
 def test_group_tr_non_admin_statuses_are_rejected(status, sample_db):
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=901)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=901, user_id=42
+    )
     context = fake_context(sample_db, ["声骸"], member_status=status)
 
     asyncio.run(term_command(update, context))
@@ -1428,10 +1545,10 @@ def test_group_tr_linked_channel_sender_is_rejected(sample_db):
 def test_group_tr_member_verdict_is_cached_across_calls(sample_db):
     context = fake_context(sample_db, ["声骸"], member_status="member")
     first_update, first_message = fake_update(
-        chat_id=-2001, chat_type="supergroup", message_id=905
+        chat_id=-2001, chat_type="supergroup", message_id=905, user_id=42
     )
     second_update, second_message = fake_update(
-        chat_id=-2001, chat_type="supergroup", message_id=906
+        chat_id=-2001, chat_type="supergroup", message_id=906, user_id=42
     )
 
     asyncio.run(term_command(first_update, context))
@@ -1439,7 +1556,7 @@ def test_group_tr_member_verdict_is_cached_across_calls(sample_db):
 
     assert first_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 905)]
     assert second_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 906)]
-    assert context.bot.member_calls == [(-2001, 11)]
+    assert context.bot.member_calls == [(-2001, 42)]
 
 
 def test_admin_status_cache_expires_after_ttl():
@@ -1456,7 +1573,9 @@ def test_admin_status_cache_expires_after_ttl():
 def test_group_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=907)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=907, user_id=42
+    )
     context = fake_context(
         sample_db,
         ["今汐说声骸很强"],
@@ -1471,7 +1590,9 @@ def test_group_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db)
 
 
 def test_group_tr_rejection_text_is_configurable(sample_db):
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=908)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=908, user_id=42
+    )
     context = fake_context(
         sample_db,
         ["声骸"],
@@ -1491,7 +1612,7 @@ def test_group_tr_reject_replies_are_capped_then_silent(sample_db):
     replies = []
     for idx in range(3):
         update, message = fake_update(
-            chat_id=-2001, chat_type="supergroup", message_id=909 + idx
+            chat_id=-2001, chat_type="supergroup", message_id=909 + idx, user_id=42
         )
         asyncio.run(term_command(update, context))
         replies.append(message.replies)
@@ -1499,7 +1620,7 @@ def test_group_tr_reject_replies_are_capped_then_silent(sample_db):
     assert replies[0] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 909)]
     assert replies[1] == [(DEFAULT_GROUP_TR_REJECT_TEXT, 910)]
     assert replies[2] == []
-    assert context.bot.member_calls == [(-2001, 11)]
+    assert context.bot.member_calls == [(-2001, 42)]
 
 
 def test_group_nonadmin_spam_does_not_starve_admin(sample_db):
@@ -1535,13 +1656,13 @@ def test_group_tr_member_lookup_failure_fails_closed_and_uncached(sample_db):
     context = fake_context(
         sample_db,
         ["声骸"],
-        member_overrides={(-2001, 11): TelegramError("temporarily unavailable")},
+        member_overrides={(-2001, 42): TelegramError("temporarily unavailable")},
     )
     first_update, first_message = fake_update(
-        chat_id=-2001, chat_type="supergroup", message_id=912
+        chat_id=-2001, chat_type="supergroup", message_id=912, user_id=42
     )
     second_update, second_message = fake_update(
-        chat_id=-2001, chat_type="supergroup", message_id=913
+        chat_id=-2001, chat_type="supergroup", message_id=913, user_id=42
     )
 
     asyncio.run(term_command(first_update, context))
@@ -1549,20 +1670,22 @@ def test_group_tr_member_lookup_failure_fails_closed_and_uncached(sample_db):
 
     assert first_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 912)]
     assert second_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 913)]
-    assert context.bot.member_calls == [(-2001, 11), (-2001, 11)]
+    assert context.bot.member_calls == [(-2001, 42), (-2001, 42)]
 
 
 def test_group_sentence_member_gets_one_line_rejection_and_zero_llm(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
-    update, message = fake_update(chat_id=-2001, chat_type="supergroup", message_id=914)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=914, user_id=42
+    )
     context = fake_context(sample_db, ["今汐说声骸很强"], member_status="member")
 
     asyncio.run(sentence_command(update, context))
 
     assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 914)]
     assert calls == []
-    assert context.bot.member_calls == [(-2001, 11)]
+    assert context.bot.member_calls == [(-2001, 42)]
 
 
 @pytest.mark.parametrize("status", ["creator", "administrator"])
@@ -2240,7 +2363,9 @@ def test_status_owner_gets_sanitized_counts(monkeypatch, sample_db):
     assert "Channel reply last save: not configured" in reply
     assert "Authorized chats: 3" in reply
     assert "Public chats: 1" in reply
-    assert "LLM input limit: 2000" in reply
+    assert "Public LLM input limit: 2000" in reply
+    assert "Trusted/channel text limit: 4096" in reply
+    assert "Trusted/channel caption limit: 1024" in reply
     assert "-2001" not in reply
     assert "5001" not in reply
     assert "test-key" not in reply
