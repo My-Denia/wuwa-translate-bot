@@ -119,8 +119,10 @@ admin (see that section).
   minute, and keep the 2000-character LLM input limit. Trusted callers (owner
   and group admins) do not use the ordinary public-member throttle and may use
   the channel text/caption limits (4096 text / 1024 caption); long trusted
-  inputs are split internally into 2000-character LLM chunks. Replies longer
-  than Telegram's 4096-character text message limit are split before sending.
+  inputs are split internally into independent 2000-character LLM chunks and
+  joined with newlines, so long-input translation favors delivery over perfect
+  cross-chunk context or HTML preservation. Replies longer than Telegram's
+  4096-character text message limit are split before sending.
 - `/status` is owner-only and reports operational counts and flags only:
   dictionary term count, data profile/short commit, LLM configured yes/no,
   channel auto-translation on/off, tracked channel-post count, allowlist/public
@@ -230,7 +232,10 @@ post to Chinese. No command is involved.
   (default 86400) are skipped silently. Linked-channel content is trusted, so
   this default allows delayed posts and late edits while still bounding
   Telegram replays — restart backlog, or a burst of recent group history when
-  the bot is promoted to admin — from translating old history.
+  the bot is promoted to admin — from translating old history. Operationally,
+  restarting after downtime or promoting the bot to admin can translate
+  queued/replayed trusted channel posts that are still inside this 24-hour
+  window; lower `WUWATERM_CHANNEL_MAX_AGE_SECONDS` if that burst is not wanted.
 - Edited posts update the existing tracked reply chunks in place: when the
   linked channel edits a post, the bot re-translates and edits existing chunks,
   adds continuation chunks, or deletes stale extras instead of adding untracked

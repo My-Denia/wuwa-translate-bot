@@ -1485,6 +1485,8 @@ async def translate_request_async(
         return TranslationReply(
             f"Input is too long for translation ({input_limit} character limit)."
         )
+    # Only trusted callers have an input_limit above LLM_INPUT_CHAR_LIMIT.
+    # Split internally so owner/admin requests keep the public per-call bound.
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         translated = await _translate_long_plain_text(
             translator, prepared, to_chinese=to_chinese

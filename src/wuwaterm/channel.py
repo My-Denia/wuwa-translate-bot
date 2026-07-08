@@ -54,8 +54,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     # Freshness gate: Telegram replays updates (restart backlog, admin
     # promotion, queue delivery). Linked-channel content is trusted, so the
-    # default window is deliberately broad; the gate only blocks posts outside
-    # the configured channel replay horizon.
+    # default window is deliberately broad and can accept a bounded restart or
+    # admin-promotion backlog; the gate only blocks posts outside the configured
+    # channel replay horizon.
     message_date = getattr(message, "date", None)
     if message_date is not None:
         age_seconds = (datetime.now(timezone.utc) - message_date).total_seconds()
