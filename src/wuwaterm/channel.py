@@ -41,9 +41,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     channel posts (a notice comment under every post would be spam).
 
     An edited post updates the bot's existing reply for that post in place
-    (tracked per (chat, post) in memory); an edit with no tracked reply —
-    after a restart, or a post that was never translated — is skipped, so an
-    edit can never add a second reply.
+    (tracked per (chat, post) in memory). If a fresh edit has no tracked reply,
+    handle it as the first translatable version of that post; Telegram can
+    deliver media posts before their caption/text is available.
     """
     config: BotConfig = context.application.bot_data[CONFIG_KEY]
     if not config.channel_autotranslate:
@@ -82,9 +82,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Edit dedup: an edited post (edit_date set) updates the reply already
-    # sent for it. With no tracked reply there is nothing to update, so skip
-    # before any CJK / throttle / LLM work — an edit must never add a second
-    # reply (a restart drops the in-memory map; those edits skip here too).
+    # sent for it. If the edit is fresh but has no tracked reply, process it as
+    # the first translatable version of the post; this covers Telegram media
+    # forwards whose caption/text arrives only on the edited update.
     reply_index: ChannelReplyIndex = context.application.bot_data[
         CHANNEL_REPLY_INDEX_KEY
     ]
@@ -113,12 +113,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if waited_for_original:
                 existing_reply_id = reply_index.get(chat_id, message.message_id)
         if existing_reply_id is None:
+            if message_date is None:
+                LOGGER.info(
+                    "channel autotranslate skipped: edit with no tracked reply "
+                    "and no date incoming_message=%s",
+                    redact_id(message.message_id),
+                )
+                return
             LOGGER.info(
-                "channel autotranslate skipped: edit with no tracked reply "
+                "channel autotranslate treating fresh edit as new post "
                 "incoming_message=%s",
                 redact_id(message.message_id),
             )
-            return
+            is_edit = False
     edit_work_token: int | None = None
     if is_edit and chat_id is not None:
         update_id = getattr(update, "update_id", None)
