@@ -38,6 +38,7 @@ from wuwaterm.channel import (
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
+    LLMTranslationError,
     SentenceTranslator,
     _llm_error_from_response,
 )
@@ -886,6 +887,159 @@ def test_edit_updates_existing_reply_in_place(monkeypatch, sample_db):
     assert edit_message.replies == []
     assert context.bot.edits == [("translated", "HTML", -2001, 5200)]
     assert len(calls) == 2  # the edit re-translated
+
+
+def test_concurrent_duplicate_original_has_one_producer(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def fake_call(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return "translated once"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        first_update, first_message = channel_update(text=CN_TEXT, message_id=4190)
+        second_update, second_message = channel_update(text=CN_TEXT, message_id=4190)
+
+        producer = asyncio.create_task(channel_post_handler(first_update, context))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        waiter = asyncio.create_task(channel_post_handler(second_update, context))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        release.set()
+        await asyncio.wait_for(producer, timeout=1)
+        await asyncio.wait_for(waiter, timeout=1)
+
+        assert calls == 1
+        assert first_message.replies == [("translated once", "HTML", 4190)]
+        assert second_message.replies == []
+
+    asyncio.run(run())
+
+
+def test_sequential_duplicate_original_is_done_without_translation(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+
+    first_update, first_message = channel_update(text=CN_TEXT, message_id=4191)
+    second_update, second_message = channel_update(text=CN_TEXT, message_id=4191)
+    asyncio.run(channel_post_handler(first_update, context))
+    asyncio.run(channel_post_handler(second_update, context))
+
+    assert len(calls) == 1
+    assert first_message.replies == [("translated", "HTML", 4191)]
+    assert second_message.replies == []
+
+
+def test_duplicate_waiter_released_when_producer_translation_fails(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def fake_call(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            raise LLMTranslationError("unavailable")
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        first_update, first_message = channel_update(text=CN_TEXT, message_id=4192)
+        second_update, second_message = channel_update(text=CN_TEXT, message_id=4192)
+
+        producer = asyncio.create_task(channel_post_handler(first_update, context))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        waiter = asyncio.create_task(channel_post_handler(second_update, context))
+        await asyncio.sleep(0)
+        release.set()
+
+        await asyncio.wait_for(producer, timeout=1)
+        await asyncio.wait_for(waiter, timeout=1)
+        reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+
+        assert calls == 1
+        assert first_message.replies == []
+        assert second_message.replies == []
+        assert reply_index.was_observed_without_reply(-2001, 4192) is True
+
+    asyncio.run(run())
+
+
+def test_cancelled_producer_releases_waiter_and_fresh_edit_can_resume(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def run():
+        started = asyncio.Event()
+        never_release = asyncio.Event()
+        calls = 0
+
+        async def fake_call(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await never_release.wait()
+            return "resumed translation"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(sample_db)
+        first_update, first_message = channel_update(text=CN_TEXT, message_id=4193)
+        second_update, second_message = channel_update(text=CN_TEXT, message_id=4193)
+
+        producer = asyncio.create_task(channel_post_handler(first_update, context))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        waiter = asyncio.create_task(channel_post_handler(second_update, context))
+        await asyncio.sleep(0)
+
+        producer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await producer
+        await asyncio.wait_for(waiter, timeout=1)
+
+        reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+        assert first_message.replies == []
+        assert second_message.replies == []
+        assert reply_index.was_observed_without_reply(-2001, 4193) is True
+
+        now = datetime.now(timezone.utc)
+        edit_update, edit_message = channel_update(
+            text=CN_TEXT,
+            message_id=4193,
+            date=now,
+            edit_date=now,
+        )
+        await asyncio.wait_for(channel_post_handler(edit_update, context), timeout=1)
+
+        assert calls == 2
+        assert edit_message.replies == [("resumed translation", "HTML", 4193)]
+
+    asyncio.run(run())
 
 
 def test_edit_waits_for_original_inflight_reply(monkeypatch, sample_db):
@@ -1757,6 +1911,76 @@ def test_channel_reply_index_observed_without_reply_expires():
 
     assert index.was_observed_without_reply(-2001, 4001, now=299.9) is True
     assert index.was_observed_without_reply(-2001, 4001, now=300.0) is False
+
+
+def test_channel_reply_index_enforces_stable_capacity_for_entries_and_sentinels():
+    index = ChannelReplyIndex(ttl_seconds=10.0, max_entries=2)
+    index.remember(2, 1, 201, now=0.0)
+    index.remember(1, 2, 102, now=0.0)
+    index.remember(3, 1, 301, now=0.0)
+
+    assert index.entry_count(now=0.0) == 2
+    assert index.get(1, 2, now=0.0) is None
+    assert index.get(2, 1, now=0.0) == 201
+    assert index.get(3, 1, now=0.0) == 301
+
+    index.remember_observed_without_reply(2, 1, now=0.0)
+    index.remember_observed_without_reply(1, 2, now=0.0)
+    index.remember_observed_without_reply(3, 1, now=0.0)
+
+    assert index.observed_count(now=0.0) == 2
+    assert index.was_observed_without_reply(1, 2, now=0.0) is False
+    assert index.was_observed_without_reply(2, 1, now=0.0) is True
+    assert index.was_observed_without_reply(3, 1, now=0.0) is True
+
+
+def test_channel_reply_index_trims_loaded_state_and_persists_survivors(tmp_path):
+    path = tmp_path / "channel_replies.json"
+    payload = {
+        "version": 1,
+        "entries": [
+            {
+                "chat_id": chat_id,
+                "message_id": 1,
+                "expires_at": 1100.0,
+                "reply_message_ids": [chat_id + 100],
+            }
+            for chat_id in (1, 2, 3)
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    index = ChannelReplyIndex(
+        ttl_seconds=60.0,
+        storage_path=path,
+        clock=lambda: 1000.0,
+        max_entries=2,
+    )
+
+    assert index.entry_count() == 2
+    assert index.get_many(1, 1) == ()
+    assert index.get_many(2, 1) == (102,)
+    assert index.get_many(3, 1) == (103,)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert {row["chat_id"] for row in persisted["entries"]} == {2, 3}
+
+
+def test_channel_reply_index_active_edit_eviction_fails_closed_and_cleans_lock():
+    async def exercise():
+        index = ChannelReplyIndex(ttl_seconds=10.0, max_entries=1)
+        index.remember(1, 1, 101, now=0.0)
+        token = index.begin_edit(1, 1, update_id=10)
+        lock = index.edit_delivery_lock(1, 1)
+
+        async with lock:
+            index.remember(2, 1, 201, now=1.0)
+            assert index.is_latest_edit(1, 1, token) is False
+            assert (1, 1) in index._edit_delivery_locks
+
+        index.prune(now=1.0)
+        assert (1, 1) not in index._edit_delivery_locks
+
+    asyncio.run(exercise())
 
 
 def test_channel_reply_index_persists_and_loads_with_wall_clock_ttl(tmp_path):

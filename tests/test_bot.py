@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import traceback
 from types import SimpleNamespace
 
 import httpx
@@ -25,6 +26,8 @@ from wuwaterm.bot import (
     PUBLIC_ENABLED_NOTICE,
     PUBLIC_ONLY_GROUPS_NOTICE,
     PUBLIC_REJECT_NOTICE,
+    SETTINGS_DENY_NOT_PERSISTED_NOTICE,
+    SETTINGS_DURABILITY_UNCERTAIN_NOTICE,
     SETTINGS_SAVE_FAILED_NOTICE,
     PUBLIC_STATUS_OFF,
     PUBLIC_STATUS_ON,
@@ -40,6 +43,7 @@ from wuwaterm.bot import (
     UNAUTHORIZED_GROUP_NOTICE,
     AdminStatusCache,
     BotConfig,
+    BotConfigError,
     ChannelReplyIndex,
     PerChatRateLimiter,
     about_command,
@@ -61,8 +65,31 @@ from wuwaterm.sentence import (
     SentenceTranslator,
     _llm_error_from_response,
 )
-from wuwaterm.settings import ChatSettings
+from wuwaterm.settings import ChatSettings, ChatSettingsDurabilityError
 from wuwaterm.telegram_text import telegram_text_units
+
+
+_BOT_CONFIG_ENV_NAMES = (
+    "OWNER_USER_ID",
+    "WUWATERM_RATE_LIMIT_PER_MINUTE",
+    "WUWATERM_GROUP_TR_REJECT_TEXT",
+    "WUWATERM_PRIVATE_TR_REJECT_TEXT",
+    "WUWATERM_TR_REJECT_SILENT",
+    "WUWATERM_CHANNEL_AUTOTRANSLATE",
+    "WUWATERM_CHANNEL_MIN_CJK",
+    "WUWATERM_CHANNEL_MIN_LATIN",
+    "WUWATERM_CHANNEL_TEXT_LIMIT",
+    "WUWATERM_CHANNEL_CAPTION_LIMIT",
+    "WUWATERM_CHANNEL_MAX_AGE_SECONDS",
+    "WUWATERM_CHANNEL_REPLY_INDEX_PATH",
+    "WUWATERM_LLM_TIMEOUT_SECONDS",
+    "WUWATERM_LLM_MAX_CONCURRENCY",
+)
+
+
+def clear_bot_config_env(monkeypatch):
+    for name in _BOT_CONFIG_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 class FakeMessage:
@@ -249,6 +276,10 @@ def fake_context(
             }
         ),
     )
+def raise_durability_uncertain(*_args):
+    raise ChatSettingsDurabilityError("directory durability uncertain")
+
+
 
 
 def enable_mock_llm(monkeypatch, calls, response_factory):
@@ -1570,6 +1601,22 @@ def test_admin_status_cache_expires_after_ttl():
     assert cache.get(-2001, 99, now=0.0) is None
 
 
+def test_admin_status_cache_enforces_stable_capacity_and_prunes_expired():
+    cache = AdminStatusCache(ttl_seconds=10.0, max_entries=2)
+    cache.put(2, 1, False, now=0.0)
+    cache.put(1, 2, True, now=0.0)
+    cache.put(3, 1, True, now=0.0)
+
+    assert cache.entry_count(now=0.0) == 2
+    assert cache.get(1, 2, now=0.0) is None
+    assert cache.get(2, 1, now=0.0) is False
+    assert cache.get(3, 1, now=0.0) is True
+
+    cache.put(4, 1, True, now=10.0)
+    assert cache.entry_count(now=10.0) == 1
+    assert cache.get(4, 1, now=10.0) is True
+
+
 def test_group_tr_silent_flag_suppresses_rejection_reply(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "should not run")
@@ -1878,6 +1925,114 @@ def test_from_env_parses_llm_timeout_and_concurrency(monkeypatch):
 
     assert config.llm_timeout_seconds == 7.5
     assert config.llm_max_concurrency == 2
+
+
+def test_from_env_defaults_match_programmatic_defaults(monkeypatch):
+    clear_bot_config_env(monkeypatch)
+
+    assert BotConfig.from_env() == BotConfig()
+
+
+@pytest.mark.parametrize(
+    ("name", "attribute", "lower", "upper"),
+    [
+        ("WUWATERM_RATE_LIMIT_PER_MINUTE", "rate_limit_per_minute", "1", "10000"),
+        ("WUWATERM_CHANNEL_MIN_CJK", "channel_min_cjk", "1", "4096"),
+        ("WUWATERM_CHANNEL_MIN_LATIN", "channel_min_latin", "1", "4096"),
+        ("WUWATERM_CHANNEL_TEXT_LIMIT", "channel_text_limit", "1", "4096"),
+        ("WUWATERM_CHANNEL_CAPTION_LIMIT", "channel_caption_limit", "1", "1024"),
+        ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "channel_max_age_seconds", "1", "2592000"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "llm_timeout_seconds", "0.1", "300"),
+        ("WUWATERM_LLM_MAX_CONCURRENCY", "llm_max_concurrency", "1", "64"),
+    ],
+)
+def test_from_env_accepts_numeric_boundaries(
+    monkeypatch, name, attribute, lower, upper
+):
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+
+    for raw in (lower, upper):
+        monkeypatch.setenv(name, f" {raw} ")
+        assert getattr(BotConfig.from_env(), attribute) == float(raw)
+
+
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        ("WUWATERM_RATE_LIMIT_PER_MINUTE", "0"),
+        ("WUWATERM_RATE_LIMIT_PER_MINUTE", "10001"),
+        ("WUWATERM_RATE_LIMIT_PER_MINUTE", "1.5"),
+        ("WUWATERM_CHANNEL_MIN_CJK", "0"),
+        ("WUWATERM_CHANNEL_MIN_LATIN", "4097"),
+        ("WUWATERM_CHANNEL_TEXT_LIMIT", "4097"),
+        ("WUWATERM_CHANNEL_CAPTION_LIMIT", "1025"),
+        ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "2592001"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "nan"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "inf"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "-inf"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "300.1"),
+        ("WUWATERM_LLM_MAX_CONCURRENCY", "0"),
+        ("WUWATERM_LLM_MAX_CONCURRENCY", "65"),
+    ],
+)
+def test_from_env_rejects_invalid_numeric_values(monkeypatch, name, raw):
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv(name, raw)
+
+    with pytest.raises(BotConfigError) as caught:
+        BotConfig.from_env()
+
+    assert name in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        (" on ", True),
+        ("0", False),
+        ("false", False),
+        ("NO", False),
+        (" off ", False),
+    ],
+)
+def test_from_env_accepts_explicit_boolean_tokens(monkeypatch, raw, expected):
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv("WUWATERM_TR_REJECT_SILENT", raw)
+    monkeypatch.setenv("WUWATERM_CHANNEL_AUTOTRANSLATE", raw)
+
+    config = BotConfig.from_env()
+
+    assert config.tr_reject_silent is expected
+    assert config.channel_autotranslate is expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "WUWATERM_TR_REJECT_SILENT",
+        "WUWATERM_CHANNEL_AUTOTRANSLATE",
+    ],
+)
+def test_from_env_invalid_value_does_not_leak_raw_marker(monkeypatch, name):
+    marker = "enabled-sensitive-marker"
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv(name, marker)
+
+    with pytest.raises(BotConfigError) as caught:
+        BotConfig.from_env()
+
+    formatted = "".join(
+        traceback.format_exception(caught.type, caught.value, caught.tb)
+    )
+    assert name in formatted
+    assert marker not in formatted
 
 
 def test_from_env_reject_overrides_win_verbatim_and_are_not_auto_bilingual(monkeypatch):
@@ -2242,6 +2397,24 @@ def test_usage_notices_are_bilingual(sample_db):
     context = fake_context(sample_db, [])
     asyncio.run(sentence_command(update, context))
     assert message.replies == [(SENTENCE_USAGE_NOTICE, None)]
+
+
+@pytest.mark.parametrize(
+    ("handler", "usage_notice"),
+    [
+        (term_command, TERM_USAGE_NOTICE),
+        (sentence_command, SENTENCE_USAGE_NOTICE),
+    ],
+)
+def test_translation_command_wrappers_keep_distinct_usage_notice(
+    handler, usage_notice, sample_db
+):
+    update, message = fake_update()
+    context = fake_context(sample_db, [])
+
+    asyncio.run(handler(update, context))
+
+    assert message.replies == [(usage_notice, None)]
 
 
 # --- /about diagnostics command ---
@@ -2735,6 +2908,58 @@ def test_public_on_replies_notice_when_save_fails(monkeypatch, sample_db):
     assert message.replies == [(SETTINGS_SAVE_FAILED_NOTICE, 830)]
 
 
+def test_public_off_write_failure_reports_memory_only_disable(
+    monkeypatch, sample_db
+):
+    context = fake_context(sample_db, ["off"], member_status="administrator")
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    settings.set_public(-2001, True)
+
+    def boom(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings, "_save_state", boom)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=833
+    )
+
+    asyncio.run(public_command(update, context))
+
+    assert settings.is_public(-2001) is False
+    assert ChatSettings(settings.path).is_public(-2001) is True
+    assert message.replies == [(SETTINGS_DENY_NOT_PERSISTED_NOTICE, 833)]
+    assert "state unchanged" not in message.replies[0][0]
+
+
+def test_public_on_reports_durability_uncertainty(monkeypatch, sample_db):
+    context = fake_context(sample_db, ["on"], member_status="administrator")
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=831
+    )
+
+    asyncio.run(public_command(update, context))
+
+    assert settings.is_public(-2001) is True
+    assert message.replies == [(SETTINGS_DURABILITY_UNCERTAIN_NOTICE, 831)]
+
+
+def test_public_off_reports_durability_uncertainty(monkeypatch, sample_db):
+    context = fake_context(sample_db, ["off"], member_status="administrator")
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    settings.set_public(-2001, True)
+    monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=832
+    )
+
+    asyncio.run(public_command(update, context))
+
+    assert settings.is_public(-2001) is False
+    assert message.replies == [(SETTINGS_DURABILITY_UNCERTAIN_NOTICE, 832)]
+
+
 # --- group authorization gate: my_chat_member ---
 
 
@@ -2884,6 +3109,23 @@ def test_owner_add_that_cannot_persist_leaves_fail_closed(monkeypatch, sample_db
     assert context.bot.left_chats == [-2001]
 
 
+def test_owner_add_durability_uncertain_stays_and_notifies(
+    monkeypatch, sample_db
+):
+    context = fake_context(sample_db, [], allowlist=())
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
+    update = fake_member_update(chat_id=-7001, from_id=11)
+
+    asyncio.run(my_chat_member_handler(update, context))
+
+    assert settings.is_allowed(-7001) is True
+    assert context.bot.left_chats == []
+    assert context.bot.sent_messages == [
+        (-7001, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
+    ]
+
+
 # --- /authorize, /revoke (owner-only) ---
 
 
@@ -3007,6 +3249,22 @@ def test_tr_rejected_in_non_allowlisted_group(sample_db):
     assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 950)]
 
 
+def test_authorize_durability_uncertain_reports_applied_state(
+    monkeypatch, sample_db
+):
+    update, message = fake_update(
+        chat_id=-7001, chat_type="supergroup", message_id=949, user_id=11
+    )
+    context = fake_context(sample_db, [], allowlist=())
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
+
+    asyncio.run(authorize_command(update, context))
+
+    assert settings.is_allowed(-7001) is True
+    assert message.replies == [(SETTINGS_DURABILITY_UNCERTAIN_NOTICE, 949)]
+
+
 def test_authorize_save_failure_notifies_and_does_not_claim_success(monkeypatch, sample_db):
     update, message = fake_update(
         chat_id=-7001, chat_type="supergroup", message_id=951, user_id=11
@@ -3022,6 +3280,24 @@ def test_authorize_save_failure_notifies_and_does_not_claim_success(monkeypatch,
 
     assert message.replies == [(SETTINGS_SAVE_FAILED_NOTICE, 951)]
     assert settings.is_allowed(-7001) is False  # not claimed authorized
+
+
+def test_revoke_durability_uncertain_reports_visible_revoke(
+    monkeypatch, sample_db
+):
+    update, message = fake_update(
+        chat_id=-2001, chat_type="supergroup", message_id=950, user_id=11
+    )
+    context = fake_context(sample_db, [])
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+    monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
+
+    asyncio.run(revoke_command(update, context))
+
+    assert settings.is_allowed(-2001) is False
+    assert context.bot.left_chats == [-2001]
+    assert "durability is uncertain" in message.replies[0][0]
+    assert "Couldn't persist" not in message.replies[0][0]
 
 
 def test_revoke_save_failure_notifies_but_still_leaves(monkeypatch, sample_db):
@@ -3053,10 +3329,12 @@ def test_revoke_save_failure_keeps_chat_denied_and_unserved(monkeypatch, sample_
     context = fake_context(sample_db, [])  # -2001 allowlisted by default
     settings = context.application.bot_data[CHAT_SETTINGS_KEY]
 
-    def boom():
+    def boom(*_args):
         raise OSError("disk full")
 
-    monkeypatch.setattr(settings, "_save", boom)  # the WRITE fails; real disallow runs
+    monkeypatch.setattr(
+        settings, "_save_state", boom
+    )  # the WRITE fails; real disallow runs
     asyncio.run(revoke_command(update, context))
 
     assert settings.is_allowed(-2001) is False  # deny kept despite the write failure

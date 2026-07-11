@@ -23,8 +23,19 @@ Optional LLM environment variables:
   LiteLLM gateway URL.
 - `WUWATERM_OPENAI_API_KEY`.
 - `WUWATERM_OPENAI_MODEL`.
-- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`.
-- `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`; max in-flight LLM calls.
+- `WUWATERM_LLM_TIMEOUT_SECONDS`, default `45`, finite range `0.1..300`.
+- `WUWATERM_LLM_MAX_CONCURRENCY`, default `4`, range `1..64`; max
+  in-flight LLM calls.
+
+## Configuration Validation
+
+Non-empty invalid numeric or boolean settings fail startup instead of being
+silently coerced. Numeric settings must be inside their documented ranges;
+LLM timeouts must also be finite, so `nan` and `inf` are rejected. Runtime
+booleans accept only `1/true/yes/on` and `0/false/no/off`
+(case-insensitive); unset or empty values use their defaults. Validation errors
+name the variable and expected type/range but never echo its raw value, which
+may contain operational or sensitive material.
 
 `OPENAI_BASE_URL` and `OPENAI_API_KEY` are accepted fallbacks for the endpoint
 and key; `WUWATERM_OPENAI_MODEL` is still required for LLM use.
