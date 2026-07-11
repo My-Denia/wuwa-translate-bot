@@ -1,0 +1,10 @@
+"""Keys for services stored in Application.bot_data."""
+
+SERVICE_KEY = "wuwaterm_service"
+TRANSLATOR_KEY = "wuwaterm_translator"
+CONFIG_KEY = "wuwaterm_config"
+RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
+REJECT_LIMITER_KEY = "wuwaterm_reject_limiter"
+ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
+CHANNEL_REPLY_INDEX_KEY = "wuwaterm_channel_reply_index"
+CHAT_SETTINGS_KEY = "wuwaterm_chat_settings"

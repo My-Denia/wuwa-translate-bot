@@ -2,25 +2,22 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from telegram import Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
-from .bot import (
+from .channel_reply_index import ChannelReplyIndex, OriginalPostClaim
+from .runtime_keys import (
     CHANNEL_REPLY_INDEX_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
-    LLM_FAILURE_NOTICES,
-    LLM_INPUT_CHAR_LIMIT,
     SERVICE_KEY,
-    TELEGRAM_TEXT_MESSAGE_LIMIT,
     TRANSLATOR_KEY,
-    BotConfig,
-    ChannelReplyIndex,
 )
 from .lookup import TermService
 from .logging_utils import redact_id, safe_text_len
@@ -28,7 +25,15 @@ from .normalize import count_cjk, count_latin
 from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
 from .settings import ChatSettings
 from .telegram_html import strip_telegram_html, validate_telegram_html
-from .telegram_text import split_telegram_text, telegram_text_units
+from .telegram_text import (
+    TELEGRAM_TEXT_MESSAGE_LIMIT,
+    split_telegram_text,
+    telegram_text_units,
+)
+from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
+
+if TYPE_CHECKING:
+    from .bot import BotConfig
 
 
 LOGGER = logging.getLogger(__name__)
@@ -92,6 +97,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         CHANNEL_REPLY_INDEX_KEY
     ]
     is_edit = getattr(message, "edit_date", None) is not None
+    resume_observed = False
     existing_reply_id: int | None = None
     if is_edit:
         existing_reply_id = (
@@ -142,6 +148,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 redact_id(message.message_id),
             )
             is_edit = False
+            resume_observed = True
     edit_work_token: int | None = None
     if is_edit and chat_id is not None:
         update_id = getattr(update, "update_id", None)
@@ -150,10 +157,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             message.message_id,
             update_id if isinstance(update_id, int) else None,
         )
-    marked_in_flight = False
+    original_claim: OriginalPostClaim | None = None
     if not is_edit and chat_id is not None:
-        reply_index.mark_in_flight(chat_id, message.message_id)
-        marked_in_flight = True
+        claim = reply_index.claim_original(
+            chat_id,
+            message.message_id,
+            resume_observed=resume_observed,
+        )
+        if claim.role == "done":
+            return
+        if claim.role == "waiter":
+            await reply_index.wait_for_original(claim)
+            return
+        original_claim = claim
     try:
         if message.text:
             plain = message.text
@@ -326,12 +342,14 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             mode="plain" if translated_parse_mode == "HTML" else translated_mode,
         )
     finally:
-        if marked_in_flight and chat_id is not None:
-            if reply_index.get(chat_id, message.message_id) is None:
-                reply_index.remember_observed_without_reply(
-                    chat_id, message.message_id
-                )
-            reply_index.finish_in_flight(chat_id, message.message_id)
+        if original_claim is not None and chat_id is not None:
+            try:
+                if reply_index.get(chat_id, message.message_id) is None:
+                    reply_index.remember_observed_without_reply(
+                        chat_id, message.message_id
+                    )
+            finally:
+                reply_index.finish_original(original_claim)
 
 
 def _passes_channel_delivery_gate(

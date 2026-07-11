@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import os
-import asyncio
-import json
 import logging
+import math
+import os
 import re
-import tempfile
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Callable, Deque
+from typing import Deque
 
 from telegram import ChatMember, Update
 from telegram.error import BadRequest, TelegramError
@@ -26,35 +25,38 @@ from telegram.ext import (
     filters,
 )
 
+from .channel import channel_post_handler
+from .channel_reply_index import ChannelReplyIndex
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
 from .normalize import has_cjk
 from .sentence import (
-    BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMTranslationError,
     SentenceTranslator,
-    TRANSLATION_UNAVAILABLE_NOTICE,
     _llm_configured,
 )
-from .settings import ChatSettings
+from .runtime_keys import (
+    ADMIN_CACHE_KEY,
+    CHANNEL_REPLY_INDEX_KEY,
+    CHAT_SETTINGS_KEY,
+    CONFIG_KEY,
+    RATE_LIMITER_KEY,
+    REJECT_LIMITER_KEY,
+    SERVICE_KEY,
+    TRANSLATOR_KEY,
+)
+from .settings import ChatSettings, ChatSettingsDurabilityError
 from .telegram_html import strip_telegram_html, validate_telegram_html
 from .telegram_text import (
     TELEGRAM_TEXT_MESSAGE_LIMIT,
     split_telegram_text,
     telegram_text_units,
 )
+from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
 
 
-SERVICE_KEY = "wuwaterm_service"
-TRANSLATOR_KEY = "wuwaterm_translator"
-CONFIG_KEY = "wuwaterm_config"
-RATE_LIMITER_KEY = "wuwaterm_rate_limiter"
-REJECT_LIMITER_KEY = "wuwaterm_reject_limiter"
-ADMIN_CACHE_KEY = "wuwaterm_admin_cache"
-CHANNEL_REPLY_INDEX_KEY = "wuwaterm_channel_reply_index"
-CHAT_SETTINGS_KEY = "wuwaterm_chat_settings"
 LOGGER = logging.getLogger(__name__)
 
 # User-facing operational notices are bilingual: Chinese line first, then an
@@ -89,9 +91,6 @@ DIRECTION_USAGE_NOTICE = (
 DICT_MISS_FLAG = (
     "(词典外,机器直译)\n"
     "(Not in official dictionary; machine-translated)"
-)
-LLM_FAILURE_NOTICES = frozenset(
-    (BUDGET_EXHAUSTED_NOTICE, TRANSLATION_UNAVAILABLE_NOTICE)
 )
 # /public toggles whether non-admin members of a group can use the translate
 # commands. Default is admin-only. The /public command itself is always
@@ -129,6 +128,14 @@ SETTINGS_SAVE_FAILED_NOTICE = (
     "设置保存失败，请稍后再试（状态未更改）。\n"
     "Could not save the setting, please try again later (state unchanged)."
 )
+SETTINGS_DENY_NOT_PERSISTED_NOTICE = (
+    "设置已在当前进程中关闭，但未能持久化；重启后可能恢复，请稍后重试。\n"
+    "The setting is disabled in this process but was not persisted; it may return after restart, so retry."
+)
+SETTINGS_DURABILITY_UNCERTAIN_NOTICE = (
+    "设置已应用，但无法确认存储持久性；请检查当前状态并重试确认。\n"
+    "The setting was applied, but storage durability is uncertain; check the current state and retry."
+)
 # Group authorization gate: shown once before the bot leaves a chat it was
 # added to that is not authorized.
 UNAUTHORIZED_GROUP_NOTICE = (
@@ -146,15 +153,77 @@ REVOKE_USAGE = (
     "Usage (owner only): /revoke in a group to remove it; /revoke <chat_id> in "
     "private to remove by id."
 )
-LLM_INPUT_CHAR_LIMIT = 2000
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
 DEFAULT_CHANNEL_MAX_AGE_SECONDS = 24 * 60 * 60
-ADMIN_CACHE_PRUNE_THRESHOLD = 1024
-CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD = 1024
+ADMIN_CACHE_MAX_ENTRIES = 1024
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+class BotConfigError(ValueError):
+    """An environment setting cannot be parsed safely."""
+
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise BotConfigError(
+            f"{name} must be an integer between {minimum} and {maximum}"
+        ) from None
+    if not minimum <= value <= maximum:
+        raise BotConfigError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise BotConfigError(
+            f"{name} must be a number between {minimum} and {maximum}"
+        ) from None
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise BotConfigError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY_ENV_VALUES:
+        return True
+    if normalized in _FALSY_ENV_VALUES:
+        return False
+    raise BotConfigError(
+        f"{name} must be a boolean token such as true or false"
+    )
 
 
 @dataclass(frozen=True)
@@ -177,51 +246,71 @@ class BotConfig:
     @classmethod
     def from_env(cls) -> "BotConfig":
         return cls(
-            rate_limit_per_minute=int(os.getenv("WUWATERM_RATE_LIMIT_PER_MINUTE", "10")),
+            rate_limit_per_minute=_env_int(
+                "WUWATERM_RATE_LIMIT_PER_MINUTE",
+                10,
+                minimum=1,
+                maximum=10000,
+            ),
             group_tr_reject_text=os.getenv(
                 "WUWATERM_GROUP_TR_REJECT_TEXT", DEFAULT_GROUP_TR_REJECT_TEXT
             ),
             private_tr_reject_text=os.getenv(
                 "WUWATERM_PRIVATE_TR_REJECT_TEXT", DEFAULT_PRIVATE_TR_REJECT_TEXT
             ),
-            tr_reject_silent=(
-                os.getenv("WUWATERM_TR_REJECT_SILENT", "").strip().lower()
-                in _TRUTHY_ENV_VALUES
+            tr_reject_silent=_env_bool(
+                "WUWATERM_TR_REJECT_SILENT",
+                False,
             ),
             owner_user_id=_owner_user_id_from_env(),
-            channel_autotranslate=(
-                os.getenv("WUWATERM_CHANNEL_AUTOTRANSLATE", "").strip().lower()
-                not in _FALSY_ENV_VALUES
+            channel_autotranslate=_env_bool(
+                "WUWATERM_CHANNEL_AUTOTRANSLATE",
+                True,
             ),
-            channel_min_cjk=int(os.getenv("WUWATERM_CHANNEL_MIN_CJK", "1")),
-            channel_min_latin=int(os.getenv("WUWATERM_CHANNEL_MIN_LATIN", "2")),
-            channel_text_limit=int(os.getenv("WUWATERM_CHANNEL_TEXT_LIMIT", "4096")),
-            channel_caption_limit=int(
-                os.getenv("WUWATERM_CHANNEL_CAPTION_LIMIT", "1024")
+            channel_min_cjk=_env_int(
+                "WUWATERM_CHANNEL_MIN_CJK",
+                1,
+                minimum=1,
+                maximum=4096,
             ),
-            channel_max_age_seconds=int(
-                os.getenv(
-                    "WUWATERM_CHANNEL_MAX_AGE_SECONDS",
-                    str(DEFAULT_CHANNEL_MAX_AGE_SECONDS),
-                )
+            channel_min_latin=_env_int(
+                "WUWATERM_CHANNEL_MIN_LATIN",
+                2,
+                minimum=1,
+                maximum=4096,
+            ),
+            channel_text_limit=_env_int(
+                "WUWATERM_CHANNEL_TEXT_LIMIT",
+                4096,
+                minimum=1,
+                maximum=4096,
+            ),
+            channel_caption_limit=_env_int(
+                "WUWATERM_CHANNEL_CAPTION_LIMIT",
+                1024,
+                minimum=1,
+                maximum=1024,
+            ),
+            channel_max_age_seconds=_env_int(
+                "WUWATERM_CHANNEL_MAX_AGE_SECONDS",
+                DEFAULT_CHANNEL_MAX_AGE_SECONDS,
+                minimum=1,
+                maximum=2592000,
             ),
             channel_reply_index_path=(
                 os.getenv("WUWATERM_CHANNEL_REPLY_INDEX_PATH", "").strip() or None
             ),
-            llm_timeout_seconds=float(
-                os.getenv(
-                    "WUWATERM_LLM_TIMEOUT_SECONDS",
-                    str(DEFAULT_LLM_TIMEOUT_SECONDS),
-                )
+            llm_timeout_seconds=_env_float(
+                "WUWATERM_LLM_TIMEOUT_SECONDS",
+                DEFAULT_LLM_TIMEOUT_SECONDS,
+                minimum=0.1,
+                maximum=300.0,
             ),
-            llm_max_concurrency=max(
-                1,
-                int(
-                    os.getenv(
-                        "WUWATERM_LLM_MAX_CONCURRENCY",
-                        str(DEFAULT_LLM_MAX_CONCURRENCY),
-                    )
-                ),
+            llm_max_concurrency=_env_int(
+                "WUWATERM_LLM_MAX_CONCURRENCY",
+                DEFAULT_LLM_MAX_CONCURRENCY,
+                minimum=1,
+                maximum=64,
             ),
         )
 
@@ -265,8 +354,16 @@ class PerChatRateLimiter:
 class AdminStatusCache:
     """Short-TTL cache of getChatMember admin verdicts per (chat, user)."""
 
-    def __init__(self, ttl_seconds: float = ADMIN_STATUS_CACHE_TTL_SECONDS):
+    def __init__(
+        self,
+        ttl_seconds: float = ADMIN_STATUS_CACHE_TTL_SECONDS,
+        *,
+        max_entries: int = ADMIN_CACHE_MAX_ENTRIES,
+    ):
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
         self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
         self._entries: dict[tuple[int, int], tuple[float, bool]] = {}
 
     def get(self, chat_id: int, user_id: int, now: float | None = None) -> bool | None:
@@ -283,321 +380,25 @@ class AdminStatusCache:
 
     def put(self, chat_id: int, user_id: int, verdict: bool, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
-        if len(self._entries) >= ADMIN_CACHE_PRUNE_THRESHOLD:
-            self._entries = {
-                key: entry for key, entry in self._entries.items() if entry[0] > now
-            }
-        self._entries[(chat_id, user_id)] = (now + self.ttl_seconds, verdict)
-
-
-class ChannelReplyIndex:
-    """Maps a forwarded channel post to the bot's translation reply IDs.
-
-    When the linked channel edits a post, Telegram edits the auto-forwarded
-    copy in the group in place (same message_id) and the listener fires
-    again. This index lets that edit update existing reply chunks instead of
-    adding untracked duplicates. Entries are bounded by age (the channel
-    freshness window) and can be persisted; if an edit finds no entry, it is
-    skipped, degrading to "no update", never to a duplicate reply. The index
-    also keeps a process-local sentinel for posts this process observed without
-    replying, so a later fresh edit can be treated as the first translatable
-    version without reopening the restart duplicate-reply window.
-    """
-
-    def __init__(
-        self,
-        ttl_seconds: float = 300.0,
-        storage_path: str | Path | None = None,
-        clock: Callable[[], float] = time.time,
-    ):
-        self.ttl_seconds = ttl_seconds
-        self.storage_path = Path(storage_path) if storage_path is not None else None
-        self._clock = clock
-        self._entries: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
-        self._observed_without_reply: dict[tuple[int, int], float] = {}
-        self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
-        self._latest_edit_tokens: dict[tuple[int, int], int] = {}
-        self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
-        self._next_edit_token = 0
-        self._load_failures = 0
-        self._last_load_ok: bool | None = None
-        self._save_failures = 0
-        self._last_save_ok: bool | None = None
-        self._load()
-
-    def remember(
-        self,
-        chat_id: int,
-        message_id: int,
-        reply_message_id: int,
-        now: float | None = None,
-    ) -> None:
-        self.remember_many(chat_id, message_id, (reply_message_id,), now=now)
-
-    def remember_many(
-        self,
-        chat_id: int,
-        message_id: int,
-        reply_message_ids: tuple[int, ...],
-        now: float | None = None,
-    ) -> None:
-        if not reply_message_ids:
-            return
-        now = self._clock() if now is None else now
-        if len(self._entries) >= CHANNEL_REPLY_INDEX_PRUNE_THRESHOLD:
-            self._entries = {
-                key: entry for key, entry in self._entries.items() if entry[0] > now
-            }
-            self._prune_edit_state()
-        self._entries[(chat_id, message_id)] = (
-            now + self.ttl_seconds,
-            tuple(reply_message_ids),
-        )
-        self._observed_without_reply.pop((chat_id, message_id), None)
-        self._save_best_effort()
-
-    def get(
-        self, chat_id: int, message_id: int, now: float | None = None
-    ) -> int | None:
-        now = self._clock() if now is None else now
-        key = (chat_id, message_id)
-        entry = self._entries.get(key)
-        if entry is None:
-            return None
-        expires_at, reply_message_ids = entry
-        if now >= expires_at:
-            self._forget_key(key, persist=False)
-            return None
-        return reply_message_ids[0] if reply_message_ids else None
-
-    def get_many(
-        self, chat_id: int, message_id: int, now: float | None = None
-    ) -> tuple[int, ...]:
-        now = self._clock() if now is None else now
-        key = (chat_id, message_id)
-        entry = self._entries.get(key)
-        if entry is None:
-            return ()
-        expires_at, reply_message_ids = entry
-        if now >= expires_at:
-            self._forget_key(key, persist=False)
-            return ()
-        return reply_message_ids
-
-    def forget(self, chat_id: int, message_id: int) -> None:
-        self._forget_key((chat_id, message_id), persist=True)
-
-    def remember_observed_without_reply(
-        self,
-        chat_id: int,
-        message_id: int,
-        now: float | None = None,
-    ) -> None:
-        now = self._clock() if now is None else now
-        self._observed_without_reply[(chat_id, message_id)] = now + self.ttl_seconds
-
-    def was_observed_without_reply(
-        self,
-        chat_id: int,
-        message_id: int,
-        now: float | None = None,
-    ) -> bool:
-        now = self._clock() if now is None else now
-        key = (chat_id, message_id)
-        expires_at = self._observed_without_reply.get(key)
-        if expires_at is None:
-            return False
-        if now >= expires_at:
-            self._observed_without_reply.pop(key, None)
-            return False
-        return True
-
-    def entry_count(self, now: float | None = None) -> int:
-        self.prune(now=now)
-        return len(self._entries)
-
-    def prune(self, now: float | None = None) -> None:
-        now = self._clock() if now is None else now
-        before = len(self._entries)
         self._entries = {
             key: entry for key, entry in self._entries.items() if entry[0] > now
         }
-        self._observed_without_reply = {
-            key: expires_at
-            for key, expires_at in self._observed_without_reply.items()
-            if expires_at > now
-        }
-        self._prune_edit_state()
-        if len(self._entries) != before:
-            self._save_best_effort()
-
-    def _forget_key(self, key: tuple[int, int], *, persist: bool) -> None:
-        self._entries.pop(key, None)
-        self._observed_without_reply.pop(key, None)
-        self._latest_edit_tokens.pop(key, None)
-        lock = self._edit_delivery_locks.get(key)
-        if lock is not None and not lock.locked():
-            self._edit_delivery_locks.pop(key, None)
-        if persist:
-            self._save_best_effort()
-
-    def begin_edit(
-        self, chat_id: int, message_id: int, update_id: int | None = None
-    ) -> int:
-        key = (chat_id, message_id)
-        latest = self._latest_edit_tokens.get(key)
-        if update_id is None:
-            floor = latest if latest is not None else 0
-            self._next_edit_token = max(self._next_edit_token, floor) + 1
-            token = self._next_edit_token
-        else:
-            token = update_id
-            self._next_edit_token = max(self._next_edit_token, token)
-        if latest is None or token > latest:
-            self._latest_edit_tokens[key] = token
-        return token
-
-    def is_latest_edit(self, chat_id: int, message_id: int, token: int) -> bool:
-        return self._latest_edit_tokens.get((chat_id, message_id)) == token
-
-    def edit_delivery_lock(self, chat_id: int, message_id: int) -> asyncio.Lock:
-        return self._edit_delivery_locks.setdefault(
-            (chat_id, message_id), asyncio.Lock()
-        )
-
-    def _prune_edit_state(self) -> None:
-        live_keys = set(self._entries)
-        self._latest_edit_tokens = {
-            key: token
-            for key, token in self._latest_edit_tokens.items()
-            if key in live_keys
-        }
-        self._edit_delivery_locks = {
-            key: lock
-            for key, lock in self._edit_delivery_locks.items()
-            if key in live_keys or lock.locked()
-        }
-
-    def mark_in_flight(self, chat_id: int, message_id: int) -> None:
-        self._in_flight.setdefault((chat_id, message_id), asyncio.Event())
-
-    async def wait_in_flight(self, chat_id: int, message_id: int) -> bool:
-        event = self._in_flight.get((chat_id, message_id))
-        if event is None:
-            return False
-        await event.wait()
-        return True
-
-    def finish_in_flight(self, chat_id: int, message_id: int) -> None:
-        event = self._in_flight.pop((chat_id, message_id), None)
-        if event is not None:
-            event.set()
-
-    def persistence_enabled(self) -> bool:
-        return self.storage_path is not None
-
-    def load_failure_count(self) -> int:
-        return self._load_failures
-
-    def last_load_succeeded(self) -> bool | None:
-        return self._last_load_ok
-
-    def save_failure_count(self) -> int:
-        return self._save_failures
-
-    def last_save_succeeded(self) -> bool | None:
-        return self._last_save_ok
-
-    def _record_load_failure(
-        self, message: str = "channel reply index unreadable, starting empty"
-    ) -> None:
-        self._load_failures += 1
-        self._last_load_ok = False
-        LOGGER.warning(message)
-
-    def _load(self) -> None:
-        if self.storage_path is None or not self.storage_path.exists():
-            return
-        try:
-            with self.storage_path.open(encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            self._record_load_failure()
-            return
-        if not isinstance(payload, dict):
-            self._record_load_failure()
-            return
-        rows = payload.get("entries")
-        if not isinstance(rows, list):
-            self._record_load_failure()
-            return
-        skipped_malformed_rows = False
-        now = self._clock()
-        for row in rows:
-            if not isinstance(row, dict):
-                skipped_malformed_rows = True
-                continue
-            try:
-                chat_id = int(row["chat_id"])
-                message_id = int(row["message_id"])
-                expires_at = float(row["expires_at"])
-                reply_ids = tuple(int(item) for item in row["reply_message_ids"])
-            except (KeyError, TypeError, ValueError):
-                skipped_malformed_rows = True
-                continue
-            if expires_at <= now or not reply_ids:
-                if not reply_ids:
-                    skipped_malformed_rows = True
-                continue
-            self._entries[(chat_id, message_id)] = (expires_at, reply_ids)
-        if skipped_malformed_rows:
-            self._record_load_failure(
-                "channel reply index contained malformed rows"
+        self._entries[(chat_id, user_id)] = (now + self.ttl_seconds, verdict)
+        overflow = len(self._entries) - self.max_entries
+        if overflow > 0:
+            oldest = sorted(
+                self._entries,
+                key=lambda key: (self._entries[key][0], key[0], key[1]),
             )
-        else:
-            self._last_load_ok = True
+            for key in oldest[:overflow]:
+                self._entries.pop(key, None)
 
-    def _save_best_effort(self) -> None:
-        if self.storage_path is None:
-            return
-        try:
-            self._save()
-        except OSError:
-            self._save_failures += 1
-            self._last_save_ok = False
-            LOGGER.warning("channel reply index save failed")
-        else:
-            self._last_save_ok = True
-
-    def _save(self) -> None:
-        assert self.storage_path is not None
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for (chat_id, message_id), (expires_at, reply_ids) in sorted(
-            self._entries.items()
-        ):
-            rows.append(
-                {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "expires_at": expires_at,
-                    "reply_message_ids": list(reply_ids),
-                }
-            )
-        payload = {"version": 1, "entries": rows}
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{self.storage_path.name}.", dir=self.storage_path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
-            os.replace(tmp, self.storage_path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+    def entry_count(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        self._entries = {
+            key: entry for key, entry in self._entries.items() if entry[0] > now
+        }
+        return len(self._entries)
 
 
 def is_group_chat(update: Update) -> bool:
@@ -864,10 +665,6 @@ def create_application(
     config: BotConfig | None = None,
     chat_settings: ChatSettings | None = None,
 ) -> Application:
-    # Imported here because channel.py imports the shared bot_data keys and
-    # the rate-limit helper from this module (circular at import time).
-    from .channel import channel_post_handler
-
     config = config or BotConfig.from_env()
     if chat_settings is None:
         chat_settings = ChatSettings(_chat_settings_path_from_env(db_path))
@@ -936,7 +733,24 @@ def run_bot(db_path: str | Path, token: str | None = None) -> None:
     app.run_polling()
 
 
-async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def term_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await _translation_command(update, context, usage_notice=TERM_USAGE_NOTICE)
+
+
+async def sentence_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await _translation_command(update, context, usage_notice=SENTENCE_USAGE_NOTICE)
+
+
+async def _translation_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    usage_notice: str,
+) -> None:
     message = update.effective_message
     if not message:
         return
@@ -955,43 +769,7 @@ async def term_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await reply_to_user(update, THROTTLE_NOTICE)
         return
     if not request.text:
-        await reply_to_user(update, TERM_USAGE_NOTICE)
-        return
-    service: TermService = context.application.bot_data[SERVICE_KEY]
-    translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
-    config: BotConfig = context.application.bot_data[CONFIG_KEY]
-    translated = await translate_request_async(
-        service,
-        translator,
-        request,
-        input_limit=_translation_input_limit(config, request, actor),
-    )
-    if not await _passes_delivery_gate(update, context):
-        LOGGER.info("translation reply skipped: authorization changed before delivery")
-        return
-    await reply_to_user(update, translated.text, parse_mode=translated.parse_mode)
-
-
-async def sentence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if not message:
-        return
-    # Inline text wins; otherwise fall back to the replied-to message's content.
-    parsed = _parse_translation_args(context.args)
-    request = _translation_request(
-        update, parsed.text, forced_to_chinese=parsed.forced_to_chinese
-    )
-    actor = await _translation_actor_or_reject(update, context)
-    if actor is None:
-        return
-    if parsed.direction_error:
-        await _reply_direction_usage(update, context)
-        return
-    if actor.rate_limited and not _consume_rate_limit(update, context):
-        await reply_to_user(update, THROTTLE_NOTICE)
-        return
-    if not request.text:
-        await reply_to_user(update, SENTENCE_USAGE_NOTICE)
+        await reply_to_user(update, usage_notice)
         return
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
@@ -1055,17 +833,31 @@ async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _persist_public(
     update: Update, settings: ChatSettings, chat_id: int, value: bool
 ) -> bool:
-    """Persist a public-mode change. On a settings-file write failure, reply a
-    notice and return False; ChatSettings has already rolled back its in-memory
-    state, so memory never diverges from disk."""
+    """Persist a public-mode change and surface storage failures.
+
+    ChatSettings applies operation-specific fail-closed memory semantics before
+    an error reaches this boundary; the command reports failure either way.
+    """
     try:
         settings.set_public(chat_id, value)
         return True
+    except ChatSettingsDurabilityError as exc:
+        LOGGER.warning(
+            "settings durability uncertain on /public error_type=%s",
+            safe_error_type(exc),
+        )
+        await reply_to_user(update, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
+        return False
     except OSError as exc:
         LOGGER.warning(
             "settings save failed on /public error_type=%s", safe_error_type(exc)
         )
-        await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
+        await reply_to_user(
+            update,
+            SETTINGS_SAVE_FAILED_NOTICE
+            if value
+            else SETTINGS_DENY_NOT_PERSISTED_NOTICE,
+        )
         return False
 
 
@@ -1128,20 +920,35 @@ async def _leave_chat_quietly(
         )
 
 
-def _try_persist(action, chat_id: int) -> bool:
-    """Run a settings mutation that may raise on a write failure; return whether
-    it persisted. ChatSettings rolls back its in-memory state on failure, so a
-    False result means nothing changed and the caller should surface it."""
+class _PersistenceOutcome(Enum):
+    PERSISTED = "persisted"
+    DURABILITY_UNCERTAIN = "durability-uncertain"
+    FAILED = "failed"
+
+
+def _try_persist(action, chat_id: int) -> _PersistenceOutcome:
+    """Run a settings mutation and classify its commit visibility.
+
+    A durability error means replace succeeded and the candidate is visible,
+    while a normal OSError means the mutation did not reach that guarantee.
+    """
     try:
         action(chat_id)
-        return True
+        return _PersistenceOutcome.PERSISTED
+    except ChatSettingsDurabilityError as exc:
+        LOGGER.warning(
+            "settings durability uncertain chat=%s error_type=%s",
+            redact_id(chat_id),
+            safe_error_type(exc),
+        )
+        return _PersistenceOutcome.DURABILITY_UNCERTAIN
     except OSError as exc:
         LOGGER.warning(
             "settings write failed chat=%s error_type=%s",
             redact_id(chat_id),
             safe_error_type(exc),
         )
-        return False
+        return _PersistenceOutcome.FAILED
 
 
 async def my_chat_member_handler(
@@ -1164,7 +971,8 @@ async def my_chat_member_handler(
         and adder is not None
         and adder.id == config.owner_user_id
     ):
-        if not _try_persist(settings.allow, chat.id):
+        outcome = _try_persist(settings.allow, chat.id)
+        if outcome is _PersistenceOutcome.FAILED:
             # Could not persist the authorization (disk full / read-only). Fail
             # closed: leave rather than stay in a chat we cannot remember
             # authorizing. The owner can re-add once the file is writable.
@@ -1174,6 +982,20 @@ async def my_chat_member_handler(
             )
             await _leave_chat_quietly(context, chat.id)
             return
+        if outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
+            LOGGER.warning(
+                "owner-add authorization visible but durability uncertain chat=%s",
+                redact_id(chat.id),
+            )
+            try:
+                await context.bot.send_message(
+                    chat.id, SETTINGS_DURABILITY_UNCERTAIN_NOTICE
+                )
+            except TelegramError as exc:
+                LOGGER.warning(
+                    "owner-add durability notice failed error_type=%s",
+                    safe_error_type(exc),
+                )
         LOGGER.info(
             "added by owner; chat authorized chat=%s type=%s",
             redact_id(chat.id),
@@ -1215,8 +1037,12 @@ async def authorize_command(
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
-        if not _try_persist(settings.allow, cid):
+        outcome = _try_persist(settings.allow, cid)
+        if outcome is _PersistenceOutcome.FAILED:
             await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
+            return
+        if outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
+            await reply_to_user(update, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
             return
         await reply_to_user(
             update,
@@ -1233,8 +1059,12 @@ async def authorize_command(
     except ValueError:
         await reply_to_user(update, AUTHORIZE_USAGE)
         return
-    if not _try_persist(settings.allow, target):
+    outcome = _try_persist(settings.allow, target)
+    if outcome is _PersistenceOutcome.FAILED:
         await reply_to_user(update, SETTINGS_SAVE_FAILED_NOTICE)
+        return
+    if outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
+        await reply_to_user(update, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
         return
     await reply_to_user(update, f"已授权 / Authorized chat_id={target}")
 
@@ -1256,12 +1086,19 @@ async def revoke_command(
     arg = context.args[0].strip().lower() if context.args else ""
     if is_group_chat(update) and not arg:
         cid = update.effective_chat.id
-        persisted = _try_persist(settings.disallow, cid)
-        note = (
-            f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid})."
-            if persisted
-            else f"未能保存撤销，仍退出本群（chat_id={cid}）；请稍后重试 /revoke。\nCouldn't persist the de-authorization; leaving anyway (chat_id={cid}) — please re-run /revoke later."
-        )
+        outcome = _try_persist(settings.disallow, cid)
+        if outcome is _PersistenceOutcome.PERSISTED:
+            note = f"已撤销本群授权并退出本群（chat_id={cid}）\nRevoked; leaving this chat (chat_id={cid})."
+        elif outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
+            note = (
+                f"撤销已应用但持久性不确定，仍退出本群（chat_id={cid}）；请稍后重试确认。\n"
+                f"Revocation is visible but durability is uncertain; leaving anyway (chat_id={cid}) — retry later."
+            )
+        else:
+            note = (
+                f"未能保存撤销，仍退出本群（chat_id={cid}）；请稍后重试 /revoke。\n"
+                f"Couldn't persist the de-authorization; leaving anyway (chat_id={cid}) — please re-run /revoke later."
+            )
         # Best-effort reply BEFORE leaving (the bot cannot post once it leaves);
         # the leave MUST still run even if the reply fails.
         try:
@@ -1279,13 +1116,20 @@ async def revoke_command(
     except ValueError:
         await reply_to_user(update, REVOKE_USAGE)
         return
-    persisted = _try_persist(settings.disallow, target)
+    outcome = _try_persist(settings.disallow, target)
     await _leave_chat_quietly(context, target)
-    note = (
-        f"已撤销并退出 / Revoked and left chat_id={target}"
-        if persisted
-        else f"已退出但未能保存撤销，请稍后重试 / Left, but couldn't persist; re-run /revoke later (chat_id={target})."
-    )
+    if outcome is _PersistenceOutcome.PERSISTED:
+        note = f"已撤销并退出 / Revoked and left chat_id={target}"
+    elif outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
+        note = (
+            "撤销已应用但持久性不确定；已退出，请稍后重试确认 / "
+            f"Revocation is visible but durability is uncertain; left chat_id={target}, retry later."
+        )
+    else:
+        note = (
+            "已退出但未能保存撤销，请稍后重试 / "
+            f"Left, but couldn't persist; re-run /revoke later (chat_id={target})."
+        )
     await reply_to_user(update, note)
 
 

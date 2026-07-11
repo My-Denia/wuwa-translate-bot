@@ -33,31 +33,41 @@ dictionary hits do not call the LLM.
 
 LLM configuration is documented in [Privacy And LLM](privacy-and-llm.md).
 
+Configuration parsing is fail-fast for non-empty invalid values. Booleans accept
+only `1/true/yes/on` and `0/false/no/off` (case-insensitive); unset or empty
+values keep the documented default. Numeric values must parse cleanly and stay
+inside the ranges below, and floating-point values must be finite (`nan` and
+`inf` are rejected). A configuration error names the variable and expected
+range/type but never echoes the raw value.
+
 Optional Telegram/runtime environment variables:
 
-- `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`
+- `WUWATERM_RATE_LIMIT_PER_MINUTE`, default `10`; range `1..10000`
 - `WUWATERM_GROUP_TR_REJECT_TEXT`, default is the bilingual two-line reply
   `仅群管理员可用 /tr` then `Only group admins can use /tr`
 - `WUWATERM_PRIVATE_TR_REJECT_TEXT`, default is the bilingual two-line reply
   `此 bot 仅限群内由管理员使用` then `This bot can only be used by admins inside a group.`
-- `WUWATERM_TR_REJECT_SILENT`, default `0`; set `1` to drop unauthorized
-  `/tr` calls without replying
+- `WUWATERM_TR_REJECT_SILENT`, default `0`; any true token
+  (`1/true/yes/on`) drops unauthorized `/tr` calls without replying; false
+  tokens are `0/false/no/off`
 - `OWNER_USER_ID`, no default; the only Telegram user id allowed to use
   `/tr` in private chat — missing or empty means private `/tr` rejects
   everyone (fail-closed) and a startup warning is logged
-- `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on; set `0`/`false`/`no`/`off`
-  to disable the linked-channel auto-translation listener (kill switch)
-- `WUWATERM_CHANNEL_MIN_CJK`, default `1`; minimum number of CJK ideographs a
-  channel post needs to be auto-translated Chinese -> English
-- `WUWATERM_CHANNEL_MIN_LATIN`, default `2`; for a channel post with no CJK,
-  the minimum number of Latin letters it needs to be auto-translated
-  English -> Chinese (below both thresholds the post is skipped)
-- `WUWATERM_CHANNEL_TEXT_LIMIT`, default `4096`; max text-post length for
-  auto-translation (Telegram's own text limit)
-- `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`; max caption length for
-  auto-translation (Telegram's own caption limit)
-- `WUWATERM_CHANNEL_MAX_AGE_SECONDS`, default `86400`; channel posts older
-  than this are never auto-translated. The default is intentionally broad
+- `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on; true tokens are
+  `1/true/yes/on`; `0/false/no/off` disables the linked-channel
+  auto-translation listener (kill switch)
+- `WUWATERM_CHANNEL_MIN_CJK`, default `1`, range `1..4096`; minimum number
+  of CJK ideographs a channel post needs to be auto-translated Chinese ->
+  English
+- `WUWATERM_CHANNEL_MIN_LATIN`, default `2`, range `1..4096`; for a channel
+  post with no CJK, the minimum number of Latin letters it needs to be
+  auto-translated English -> Chinese (below both thresholds the post is skipped)
+- `WUWATERM_CHANNEL_TEXT_LIMIT`, default `4096`, range `1..4096`; max
+  text-post length for auto-translation
+- `WUWATERM_CHANNEL_CAPTION_LIMIT`, default `1024`, range `1..1024`; max
+  caption length for auto-translation
+- `WUWATERM_CHANNEL_MAX_AGE_SECONDS`, default `86400`, range `1..2592000`;
+  channel posts older than this are never auto-translated. The default is broad
   because linked-channel content is trusted, while still bounding Telegram
   update replays (restart backlog, bot admin promotion) from translating
   old history.
