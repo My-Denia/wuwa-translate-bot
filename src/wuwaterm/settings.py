@@ -98,6 +98,14 @@ def _fsync_parent_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+def _confirm_parent_durability(path: Path) -> None:
+    try:
+        _fsync_parent_directory(path)
+    except OSError:
+        raise ChatSettingsDurabilityError(
+            "chat settings are visible but directory durability is uncertain"
+        ) from None
+
 
 
 class ChatSettings:
@@ -191,12 +199,7 @@ class ChatSettings:
                 pass
             raise
 
-        try:
-            _fsync_parent_directory(self.path)
-        except OSError:
-            raise ChatSettingsDurabilityError(
-                "chat settings were replaced but directory durability is uncertain"
-            ) from None
+        _confirm_parent_durability(self.path)
 
     def _mutate(
         self,
@@ -220,6 +223,8 @@ class ChatSettings:
                     changed = mutator(candidate_public, candidate_allowed)
                     if not changed:
                         self._publish(fresh_public, fresh_allowed)
+                        if self.path.exists():
+                            _confirm_parent_durability(self.path)
                         return False
                     try:
                         self._save_state(candidate_public, candidate_allowed)

@@ -427,6 +427,27 @@ def test_directory_fsync_failure_publishes_visible_candidate(tmp_path: Path, mon
     assert ChatSettings(path).is_allowed(-2001) is True
 
 
+def test_noop_retry_rechecks_directory_durability(tmp_path: Path, monkeypatch):
+    path = tmp_path / "chat_settings.json"
+    settings = ChatSettings(path)
+    calls = 0
+
+    def flaky(_path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(settings_module, "_fsync_parent_directory", flaky)
+    with pytest.raises(ChatSettingsDurabilityError):
+        settings.allow(-2001)
+
+    assert settings.is_allowed(-2001) is True
+    assert calls == 1
+    assert settings.allow(-2001) is False
+    assert calls == 2
+
+
 def test_public_and_allowlist_coexist_in_one_file(tmp_path: Path):
     path = tmp_path / "chat_settings.json"
     s = ChatSettings(path)

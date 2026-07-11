@@ -174,7 +174,7 @@ def _env_int(
     maximum: int,
 ) -> int:
     raw = os.getenv(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     try:
         value = int(raw)
@@ -197,7 +197,7 @@ def _env_float(
     maximum: float,
 ) -> float:
     raw = os.getenv(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     try:
         value = float(raw)

@@ -1934,6 +1934,29 @@ def test_from_env_defaults_match_programmatic_defaults(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("name", "attribute"),
+    [
+        ("WUWATERM_RATE_LIMIT_PER_MINUTE", "rate_limit_per_minute"),
+        ("WUWATERM_CHANNEL_MIN_CJK", "channel_min_cjk"),
+        ("WUWATERM_CHANNEL_MIN_LATIN", "channel_min_latin"),
+        ("WUWATERM_CHANNEL_TEXT_LIMIT", "channel_text_limit"),
+        ("WUWATERM_CHANNEL_CAPTION_LIMIT", "channel_caption_limit"),
+        ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "channel_max_age_seconds"),
+        ("WUWATERM_LLM_TIMEOUT_SECONDS", "llm_timeout_seconds"),
+        ("WUWATERM_LLM_MAX_CONCURRENCY", "llm_max_concurrency"),
+    ],
+)
+def test_from_env_empty_numeric_values_use_defaults(monkeypatch, name, attribute):
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("OWNER_USER_ID", "11")
+    monkeypatch.setenv(name, "  ")
+
+    config = BotConfig.from_env()
+
+    assert getattr(config, attribute) == getattr(BotConfig(), attribute)
+
+
+@pytest.mark.parametrize(
     ("name", "attribute", "lower", "upper"),
     [
         ("WUWATERM_RATE_LIMIT_PER_MINUTE", "rate_limit_per_minute", "1", "10000"),
