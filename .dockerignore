@@ -6,6 +6,7 @@ deploy/env.example
 .git
 .venv
 data
+state
 goal-runs
 __pycache__
 *.py[cod]

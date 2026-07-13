@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from pypinyin import Style, lazy_pinyin
-
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 VERSION_TAG_RE = re.compile(
@@ -60,15 +58,6 @@ def normalize_ascii(value: str) -> str:
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = re.sub(r"[^0-9A-Za-z]+", "", value)
     return value.casefold()
-
-
-def pinyin_for(value: str) -> str:
-    return normalize_ascii("".join(lazy_pinyin(value, style=Style.NORMAL)))
-
-
-def pinyin_abbrev_for(value: str) -> str:
-    parts = lazy_pinyin(value, style=Style.FIRST_LETTER)
-    return normalize_ascii("".join(parts))
 
 
 def count_cjk(text: str) -> int:

@@ -704,6 +704,67 @@ def test_cancelled_async_translation_releases_concurrency_slot(
     asyncio.run(run())
 
 
+def test_async_translator_reuses_client_until_shutdown(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": f"translated-{len(requests)}"}}]},
+        )
+
+    translator = SentenceTranslator(
+        sample_db, llm_transport=httpx.MockTransport(handler)
+    )
+
+    async def run():
+        assert await translator.translate_async("这是一段普通文本") == "translated-1"
+        first_client = translator._llm_client
+        assert first_client is not None
+        assert not first_client.is_closed
+
+        assert await translator.translate_async("这是另一段普通文本") == "translated-2"
+        assert translator._llm_client is first_client
+        assert len(requests) == 2
+
+        await translator.aclose()
+        assert first_client.is_closed
+        assert translator._llm_client is None
+        await translator.aclose()
+
+    asyncio.run(run())
+
+
+def test_async_translator_recreates_client_when_loop_changes(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "translated"}}]},
+        )
+
+    translator = SentenceTranslator(
+        sample_db, llm_transport=httpx.MockTransport(handler)
+    )
+
+    async def translate_once():
+        assert await translator.translate_async("这是一段普通文本") == "translated"
+        assert translator._llm_client is not None
+        return translator._llm_client
+
+    first_client = asyncio.run(translate_once())
+    second_client = asyncio.run(translate_once())
+
+    assert second_client is not first_client
+    assert first_client.is_closed
+    assert not second_client.is_closed
+    asyncio.run(translator.aclose())
+    assert second_client.is_closed
+
+
 def test_translate_english_exact_term_returns_official_chinese(sample_db):
     translator = SentenceTranslator(sample_db)
 

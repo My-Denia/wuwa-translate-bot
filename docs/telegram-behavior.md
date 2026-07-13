@@ -72,8 +72,9 @@ Optional Telegram/runtime environment variables:
   update replays (restart backlog, bot admin promotion) from translating
   old history.
 - `WUWATERM_CHANNEL_REPLY_INDEX_PATH`, optional; defaults to
-  `<db parent>/channel_replies.json` so recent channel post reply ids survive
-  container rebuilds when `data/` is bind-mounted. This file contains Telegram
+  `WUWATERM_STATE_DIR/channel_replies.json` when `WUWATERM_STATE_DIR` is set,
+  otherwise `<db parent>/channel_replies.json` for local compatibility. This
+  file contains Telegram
   chat/message ids and must stay in the ignored runtime data volume, not in
   commits or public logs.
 - `WUWATERM_SOURCE_PROFILE`, default `arikatsu`; supported profiles are listed
@@ -190,9 +191,11 @@ opt in).
 - Public mode only applies inside an authorized group; it never bypasses the
   authorization allowlist (an un-authorized group serves no one, public or not).
 - Per-chat throttling and the 2000-char LLM cap still apply.
-- State is persisted to `WUWATERM_SETTINGS_PATH` (default
-  `<db parent>/chat_settings.json`); on the supported Docker layout this lives
-  in the bind-mounted `data/` volume and survives image rebuilds.
+- State is persisted to `WUWATERM_SETTINGS_PATH`. When unset, the default is
+  `WUWATERM_STATE_DIR/chat_settings.json` if `WUWATERM_STATE_DIR` is set, or
+  `<db parent>/chat_settings.json` for local compatibility. On the supported
+  Docker layout this lives in the writable `state/` volume and survives image
+  rebuilds while `data/terms.db` stays read-only.
 
 ### Linked-Channel Auto-Translation
 
@@ -250,8 +253,9 @@ post to Chinese. No command is involved.
   linked channel edits a post, the bot re-translates and edits existing chunks,
   adds continuation chunks, or deletes stale extras instead of adding untracked
   duplicates. The post-to-reply map is persisted to
-  `<db parent>/channel_replies.json` by default; in the standard Docker layout
-  this is `data/channel_replies.json`. Recent posts can still be reconciled
+  `WUWATERM_STATE_DIR/channel_replies.json` by default in Docker; for local
+  compatibility without `WUWATERM_STATE_DIR`, it falls back to
+  `<db parent>/channel_replies.json`. Recent posts can still be reconciled
   after a container rebuild or restart while they remain inside
   `WUWATERM_CHANNEL_MAX_AGE_SECONDS`. If no tracked reply exists — for a post
   that was never translated, a corrupt/missing persistence file, or an edit made

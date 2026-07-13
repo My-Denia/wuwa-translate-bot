@@ -10,10 +10,14 @@ htmlcov/
 
 # Local WutheringData checkout and generated DBs.
 data/
+state/
 goal-runs/
 *.db
 *.sqlite
 *.sqlite3
+chat_settings.json
+chat_settings.json.lock
+.chat_settings.*
 channel_replies.json
 .channel_replies.json.*
 

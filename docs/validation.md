@@ -9,6 +9,7 @@
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
 .venv/bin/python -m pytest
+uv lock --check
 ```
 
 `verify_idempotent_build.py` compares SHA256 over LF-normalized SQLite logical

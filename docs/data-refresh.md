@@ -32,7 +32,7 @@ permissions, line endings, and virtualenv scripts behave like Linux.
 
 ```bash
 test -x .venv/bin/python || uv venv .venv
-uv pip install -e ".[dev]"
+uv sync --locked --extra dev
 ```
 
 Use `uv venv --clear .venv` only when intentionally rebuilding the local
@@ -45,6 +45,14 @@ path also works:
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
 .venv/bin/python -m pip install -e ".[dev]"
+```
+
+Docker data refresh uses the build image, not the production runtime image:
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder build-db --atomic
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder verify-db
 ```
 
 ## Build Dictionary

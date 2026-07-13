@@ -13,6 +13,11 @@ BULK_GAME_PATH_MARKERS = (
     "ConfigDB/",
     "BinData/",
 )
+RUNTIME_STATE_NAMES = {
+    "chat_settings.json",
+    "chat_settings.json.lock",
+    "channel_replies.json",
+}
 
 
 def candidate_files() -> list[Path]:
@@ -42,12 +47,25 @@ def is_game_text_path(rel: str) -> bool:
     )
 
 
+def is_runtime_state_path(rel: str) -> bool:
+    name = Path(rel).name
+    return (
+        rel.startswith("state/")
+        or name in RUNTIME_STATE_NAMES
+        or name.startswith(".chat_settings.")
+        or name.startswith(".channel_replies.")
+    )
+
+
 def main() -> int:
     failures: list[str] = []
     for path in candidate_files():
         rel = path.relative_to(ROOT).as_posix()
         if rel.endswith((".db", ".sqlite", ".sqlite3")):
             failures.append(f"tracked generated DB: {rel}")
+            continue
+        if is_runtime_state_path(rel):
+            failures.append(f"tracked runtime state: {rel}")
             continue
         if not path.exists():
             continue

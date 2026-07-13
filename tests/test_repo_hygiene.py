@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.check_repo_hygiene import is_game_text_path
+from scripts.check_repo_hygiene import is_game_text_path, is_runtime_state_path
 
 
 def test_repo_hygiene_detects_current_and_legacy_bulk_game_paths():
@@ -15,3 +15,12 @@ def test_repo_hygiene_detects_current_and_legacy_bulk_game_paths():
 def test_repo_hygiene_ignores_normal_source_files():
     assert not is_game_text_path("src/wuwaterm/builder.py")
     assert not is_game_text_path("README.md")
+
+
+def test_repo_hygiene_detects_runtime_state_paths():
+    assert is_runtime_state_path("state/chat_settings.json")
+    assert is_runtime_state_path("state/chat_settings.json.lock")
+    assert is_runtime_state_path("state/channel_replies.json")
+    assert is_runtime_state_path("chat_settings.json")
+    assert is_runtime_state_path(".chat_settings.abc")
+    assert not is_runtime_state_path("src/wuwaterm/settings.py")
