@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .constants import CATEGORY_ORDER, PINNED_WUTHERINGDATA_COMMIT, SourceProfile
 from .models import TermEntry, TermRecord
-from .normalize import normalize_text, pinyin_abbrev_for, pinyin_for
+from .normalize import normalize_text
 
 
 SCHEMA = """
@@ -89,6 +89,8 @@ def create_database(
 
 
 def insert_records(conn: sqlite3.Connection, records: Iterable[TermRecord]) -> int:
+    from .build_pinyin import pinyin_abbrev_for, pinyin_for
+
     rows = []
     seen: set[tuple[str, str, str, str, str, str]] = set()
     for record in sorted(

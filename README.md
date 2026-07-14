@@ -20,7 +20,7 @@ line endings, and virtualenv scripts behave like Linux.
 
 ```bash
 test -x .venv/bin/python || uv venv .venv
-uv pip install -e ".[dev]"
+uv sync --locked --extra dev
 ```
 
 If the WSL image has `python3-venv` and pip installed, the standard-library
@@ -139,12 +139,21 @@ and run Compose through `deploy/docker-compose.yml`.
 
 ```bash
 cd /opt/wuwaterm/current
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm refresh-data
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm build-db --atomic
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm verify-db
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder build-db --atomic
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder verify-db
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
+The production service uses the `runtime` Docker target and only runs the
+Telegram bot. Data refresh/build/verify use the `builder` target through the
+`wuwaterm-builder` service. The runtime service mounts `data/` read-only and
+uses `state/` for writable `chat_settings.json` and `channel_replies.json`.
+When upgrading an older deployment, use `deploy/vps-update.sh` or the
+state-only migration in [Deployment](docs/deployment.md). Both stop the old
+runtime before the validated, atomic one-time migration. Do not manually copy
+state files while the old bot is running. Remove or update old `.env`
+overrides that point those files at `data/`.
 Secrets are injected only through Compose `env_file`; `.env` is ignored and
 excluded from the image build context. Full deployment notes are in
 [Deployment](docs/deployment.md).

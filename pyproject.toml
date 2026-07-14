@@ -12,12 +12,15 @@ license = { text = "MIT" }
 authors = [{ name = "Peter" }]
 dependencies = [
   "httpx>=0.27,<1",
-  "pypinyin>=0.54,<1",
   "python-telegram-bot>=22.7,<23",
 ]
 
 [project.optional-dependencies]
+build = [
+  "pypinyin>=0.54,<1",
+]
 dev = [
+  "pypinyin>=0.54,<1",
   "pytest>=8.0,<9",
 ]
 

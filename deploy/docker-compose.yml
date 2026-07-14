@@ -3,12 +3,36 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: wuwaterm:local
+      target: runtime
+    image: wuwaterm-runtime:local
     container_name: wuwaterm-bot
     restart: unless-stopped
     network_mode: host
     env_file:
       - ../.env
+    environment:
+      WUWATERM_DB_PATH: /app/data/terms.db
+      WUWATERM_STATE_DIR: /app/state
+      WUWATERM_SETTINGS_PATH: /app/state/chat_settings.json
+      WUWATERM_CHANNEL_REPLY_INDEX_PATH: /app/state/channel_replies.json
+    volumes:
+      - ../data:/app/data:ro
+      - ../state:/app/state
+    command: ["bot"]
+
+  wuwaterm-builder:
+    profiles: ["builder"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: builder
+    image: wuwaterm-builder:local
+    network_mode: host
+    env_file:
+      - ../.env
+    environment:
+      WUWATERM_DB_PATH: /app/data/terms.db
+      WUWATERM_DATA_DIR: /app/data/wutheringdata
     volumes:
       - ../data:/app/data
-    command: ["bot"]
+    command: ["verify-db"]

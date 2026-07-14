@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import re
+import tempfile
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -47,7 +49,7 @@ from .runtime_keys import (
     SERVICE_KEY,
     TRANSLATOR_KEY,
 )
-from .settings import ChatSettings, ChatSettingsDurabilityError
+from .settings import ChatSettings, ChatSettingsDurabilityError, ChatSettingsError
 from .telegram_html import strip_telegram_html, validate_telegram_html
 from .telegram_text import (
     TELEGRAM_TEXT_MESSAGE_LIMIT,
@@ -164,6 +166,10 @@ _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 class BotConfigError(ValueError):
     """An environment setting cannot be parsed safely."""
+
+
+class StateMigrationError(RuntimeError):
+    """Legacy runtime state could not be copied into the configured state dir."""
 
 
 def _env_int(
@@ -668,13 +674,19 @@ def create_application(
     config = config or BotConfig.from_env()
     if chat_settings is None:
         chat_settings = ChatSettings(_chat_settings_path_from_env(db_path))
-    app = ApplicationBuilder().token(token).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_shutdown(_close_translator_on_shutdown)
+        .build()
+    )
     app.bot_data[SERVICE_KEY] = TermService(db_path)
-    app.bot_data[TRANSLATOR_KEY] = SentenceTranslator(
+    translator = SentenceTranslator(
         db_path,
         llm_timeout_seconds=config.llm_timeout_seconds,
         llm_max_concurrency=config.llm_max_concurrency,
     )
+    app.bot_data[TRANSLATOR_KEY] = translator
     app.bot_data[CONFIG_KEY] = config
     app.bot_data[RATE_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
     app.bot_data[REJECT_LIMITER_KEY] = PerChatRateLimiter(config.rate_limit_per_minute)
@@ -704,19 +716,150 @@ def create_application(
     return app
 
 
+async def _close_translator_on_shutdown(application: Application) -> None:
+    translator = application.bot_data.get(TRANSLATOR_KEY)
+    if isinstance(translator, SentenceTranslator):
+        await translator.aclose()
+
+
 def _chat_settings_path_from_env(db_path: str | Path) -> Path:
-    """Settings file lives alongside the DB by default so the container's
-    bind-mounted data/ volume preserves it across image rebuilds."""
-    explicit = os.getenv("WUWATERM_SETTINGS_PATH", "").strip()
-    if explicit:
-        return Path(explicit)
-    return Path(db_path).resolve().parent / "chat_settings.json"
+    """Return the settings path with an optional state-dir migration.
+
+    Custom explicit file paths are still respected. When the supported Docker
+    layout sets WUWATERM_STATE_DIR, old DB-adjacent explicit paths are treated
+    as legacy deployment configuration and copied once into the writable state
+    directory.
+    """
+    return _state_file_path(
+        db_path,
+        filename="chat_settings.json",
+        explicit_path=os.getenv("WUWATERM_SETTINGS_PATH", "").strip() or None,
+        label="chat settings",
+    )
 
 
 def _channel_reply_index_path(config: BotConfig, db_path: str | Path) -> Path:
-    if config.channel_reply_index_path:
-        return Path(config.channel_reply_index_path)
-    return Path(db_path).resolve().parent / "channel_replies.json"
+    return _state_file_path(
+        db_path,
+        filename="channel_replies.json",
+        explicit_path=config.channel_reply_index_path,
+        label="channel reply index",
+    )
+
+
+def _state_file_path(
+    db_path: str | Path,
+    *,
+    filename: str,
+    explicit_path: str | Path | None,
+    label: str,
+) -> Path:
+    db_parent = Path(db_path).resolve(strict=False).parent
+    legacy = db_parent / filename
+    state_dir = os.getenv("WUWATERM_STATE_DIR", "").strip()
+    target = Path(state_dir).expanduser() / filename if state_dir else None
+    if explicit_path:
+        explicit = Path(explicit_path).expanduser()
+        if target is not None and (
+            _same_state_path(explicit, legacy)
+            or _same_state_path(explicit, target)
+        ):
+            _migrate_legacy_state_file(legacy, target, label=label)
+            return target
+        return explicit
+    if not state_dir:
+        return legacy
+    assert target is not None
+    _migrate_legacy_state_file(legacy, target, label=label)
+    return target
+
+
+def _same_state_path(left: Path, right: Path) -> bool:
+    return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def _migrate_legacy_state_file(legacy: Path, target: Path, *, label: str) -> None:
+    if target.exists():
+        if legacy.exists():
+            _validate_state_file(target, label=label)
+        return
+    if not legacy.exists():
+        return
+    if legacy.resolve(strict=False) == target.resolve(strict=False):
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{target.name}.migrate.", dir=target.parent
+    )
+    tmp_path = Path(tmp)
+    try:
+        payload = legacy.read_bytes()
+        with os.fdopen(fd, "wb") as file:
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+        _validate_state_file(tmp_path, label=label)
+        try:
+            os.link(tmp_path, target)
+        except FileExistsError:
+            _validate_state_file(target, label=label)
+            return
+        _fsync_state_parent(target)
+    except OSError as exc:
+        raise StateMigrationError(f"could not migrate legacy {label}") from exc
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+    LOGGER.info("migrated legacy %s into configured state dir", label)
+
+
+def _validate_state_file(path: Path, *, label: str) -> None:
+    if label == "chat settings":
+        try:
+            ChatSettings(path)._read_state(strict=True)
+        except ChatSettingsError as exc:
+            raise StateMigrationError(f"invalid {label} state file") from exc
+        return
+    try:
+        with path.open(encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StateMigrationError(f"invalid {label} state file") from exc
+    if not isinstance(payload, dict):
+        raise StateMigrationError(f"invalid {label} state file")
+    if label != "channel reply index":
+        return
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise StateMigrationError(f"invalid {label} state file")
+    for row in entries:
+        if not isinstance(row, dict):
+            raise StateMigrationError(f"invalid {label} state file")
+        try:
+            int(row["chat_id"])
+            int(row["message_id"])
+            float(row["expires_at"])
+            reply_ids = row["reply_message_ids"]
+            if not isinstance(reply_ids, list) or not reply_ids:
+                raise ValueError
+            tuple(int(item) for item in reply_ids)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateMigrationError(f"invalid {label} state file") from exc
+
+
+def _fsync_state_parent(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def run_bot(db_path: str | Path, token: str | None = None) -> None:

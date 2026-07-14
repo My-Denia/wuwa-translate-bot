@@ -88,12 +88,16 @@ class SentenceTranslator:
         *,
         llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
         llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
+        llm_transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.service = TermService(db_path)
         self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self.llm_max_concurrency = max(1, int(llm_max_concurrency))
+        self._llm_transport = llm_transport
         self._llm_slots: asyncio.Semaphore | None = None
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
+        self._llm_client: httpx.AsyncClient | None = None
+        self._llm_client_loop: asyncio.AbstractEventLoop | None = None
 
     def prepare_text(self, text: str) -> str:
         text = normalize_user_text(text)
@@ -268,12 +272,25 @@ class SentenceTranslator:
         to_chinese: bool = False,
     ) -> str:
         async with self._current_llm_slots():
+            kwargs: dict[str, object] = {}
+            supported = inspect.signature(_call_llm_async).parameters
+            client = (
+                await self._current_llm_client()
+                if "client" in supported
+                else None
+            )
+            for name, value in (
+                ("html_mode", html_mode),
+                ("to_chinese", to_chinese),
+                ("timeout_seconds", self.llm_timeout_seconds),
+                ("client", client),
+            ):
+                if name in supported:
+                    kwargs[name] = value
             return await _call_llm_async(
                 locked_text,
                 locks,
-                html_mode=html_mode,
-                to_chinese=to_chinese,
-                timeout_seconds=self.llm_timeout_seconds,
+                **kwargs,
             )
 
     def _call_llm_sync(
@@ -302,6 +319,33 @@ class SentenceTranslator:
             self._llm_slots = asyncio.Semaphore(self.llm_max_concurrency)
             self._llm_slots_loop = loop
         return self._llm_slots
+
+    async def _current_llm_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if (
+            self._llm_client is not None
+            and self._llm_client_loop is loop
+            and not self._llm_client.is_closed
+        ):
+            return self._llm_client
+        await self._close_llm_client()
+        self._llm_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self.llm_timeout_seconds),
+            transport=self._llm_transport,
+        )
+        self._llm_client_loop = loop
+        return self._llm_client
+
+    async def _close_llm_client(self) -> None:
+        client = self._llm_client
+        self._llm_client = None
+        self._llm_client_loop = None
+        if client is None or client.is_closed:
+            return
+        await client.aclose()
+
+    async def aclose(self) -> None:
+        await self._close_llm_client()
 
     def _resolve_speaker_prefix(self, line: str) -> str:
         match = SPEAKER_PREFIX_RE.match(line)
@@ -401,6 +445,34 @@ async def _call_llm_async(
     to_chinese: bool = False,
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     transport: httpx.AsyncBaseTransport | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    if client is not None:
+        return await _call_llm_async_with_client(
+            client,
+            locked_text,
+            locks,
+            html_mode=html_mode,
+            to_chinese=to_chinese,
+        )
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_seconds), transport=transport
+    ) as scoped_client:
+        return await _call_llm_async_with_client(
+            scoped_client,
+            locked_text,
+            locks,
+            html_mode=html_mode,
+            to_chinese=to_chinese,
+        )
+
+
+async def _call_llm_async_with_client(
+    client: httpx.AsyncClient,
+    locked_text: str,
+    locks: tuple[tuple[str, str, str], ...],
+    html_mode: bool = False,
+    to_chinese: bool = False,
 ) -> str:
     base_url = (os.getenv("WUWATERM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = os.getenv("WUWATERM_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -438,14 +510,11 @@ async def _call_llm_async(
         "temperature": 0,
     }
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_seconds), transport=transport
-        ) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-            )
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json=payload,
+        )
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

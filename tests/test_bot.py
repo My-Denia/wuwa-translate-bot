@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import traceback
 from types import SimpleNamespace
@@ -46,6 +47,7 @@ from wuwaterm.bot import (
     BotConfigError,
     ChannelReplyIndex,
     PerChatRateLimiter,
+    StateMigrationError,
     about_command,
     authorize_command,
     create_application,
@@ -1386,6 +1388,234 @@ def test_create_application_wires_llm_timeout(sample_db):
     translator = app.bot_data[TRANSLATOR_KEY]
 
     assert translator.llm_timeout_seconds == 12.5
+
+
+def test_create_application_shutdown_closes_translator(monkeypatch, sample_db):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    translator = app.bot_data[TRANSLATOR_KEY]
+    closed = []
+
+    async def fake_aclose():
+        closed.append(True)
+
+    monkeypatch.setattr(translator, "aclose", fake_aclose)
+
+    asyncio.run(app.post_shutdown(app))
+
+    assert closed == [True]
+
+
+def test_state_dir_keeps_runtime_state_writable_when_db_parent_is_read_only(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+    os.chmod(data_dir, 0o555)
+    try:
+        app = create_application("123:ABC", sample_db, config=BotConfig())
+        settings = app.bot_data[CHAT_SETTINGS_KEY]
+        reply_index = app.bot_data[CHANNEL_REPLY_INDEX_KEY]
+
+        assert app.bot_data[SERVICE_KEY].term_text("声骸") == "Echo"
+        assert settings.allow(-2001) is True
+        reply_index.remember_many(-2001, 4001, (5001,))
+    finally:
+        os.chmod(data_dir, 0o755)
+
+    assert (state_dir / "chat_settings.json").exists()
+    assert (state_dir / "chat_settings.json.lock").exists()
+    assert (state_dir / "channel_replies.json").exists()
+    assert not (data_dir / "chat_settings.json").exists()
+    assert not (data_dir / "chat_settings.json.lock").exists()
+    assert not (data_dir / "channel_replies.json").exists()
+
+
+def test_state_dir_migrates_legacy_db_adjacent_state_once(monkeypatch, sample_db):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    (data_dir / "channel_replies.json").write_text(
+        '{"version":1,"entries":[{"chat_id":-2001,"message_id":4001,'
+        '"expires_at":9999999999,"reply_message_ids":[5001]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    settings = app.bot_data[CHAT_SETTINGS_KEY]
+    reply_index = app.bot_data[CHANNEL_REPLY_INDEX_KEY]
+
+    assert settings.is_allowed(-2001) is True
+    assert settings.is_public(-2001) is True
+    assert reply_index.get_many(-2001, 4001) == (5001,)
+    assert (state_dir / "chat_settings.json").read_text(encoding="utf-8") == (
+        data_dir / "chat_settings.json"
+    ).read_text(encoding="utf-8")
+    assert (state_dir / "channel_replies.json").read_text(encoding="utf-8") == (
+        data_dir / "channel_replies.json"
+    ).read_text(encoding="utf-8")
+
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-3001":true},"allowed":[-3001]}',
+        encoding="utf-8",
+    )
+    (data_dir / "channel_replies.json").write_text(
+        '{"version":1,"entries":[{"chat_id":-3001,"message_id":6001,'
+        '"expires_at":9999999999,"reply_message_ids":[7001]}]}',
+        encoding="utf-8",
+    )
+
+    restarted = create_application("123:ABC", sample_db, config=BotConfig())
+    restarted_settings = restarted.bot_data[CHAT_SETTINGS_KEY]
+    restarted_replies = restarted.bot_data[CHANNEL_REPLY_INDEX_KEY]
+
+    assert restarted_settings.is_allowed(-2001) is True
+    assert restarted_settings.is_allowed(-3001) is False
+    assert restarted_replies.get_many(-2001, 4001) == (5001,)
+    assert restarted_replies.get_many(-3001, 6001) == ()
+
+
+def test_state_dir_migrates_legacy_explicit_db_adjacent_paths(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    legacy_settings = data_dir / "chat_settings.json"
+    legacy_replies = data_dir / "channel_replies.json"
+    legacy_settings.write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    legacy_replies.write_text(
+        '{"version":1,"entries":[{"chat_id":-2001,"message_id":4001,'
+        '"expires_at":9999999999,"reply_message_ids":[5001]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("WUWATERM_SETTINGS_PATH", str(legacy_settings))
+
+    app = create_application(
+        "123:ABC",
+        sample_db,
+        config=BotConfig(channel_reply_index_path=str(legacy_replies)),
+    )
+    settings = app.bot_data[CHAT_SETTINGS_KEY]
+    reply_index = app.bot_data[CHANNEL_REPLY_INDEX_KEY]
+
+    assert settings.path == (state_dir / "chat_settings.json").resolve(strict=False)
+    assert reply_index.storage_path == state_dir / "channel_replies.json"
+    assert settings.is_allowed(-2001) is True
+    assert settings.is_public(-2001) is True
+    assert reply_index.get_many(-2001, 4001) == (5001,)
+
+
+def test_state_dir_migrates_legacy_when_explicit_paths_are_state_targets(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    (data_dir / "channel_replies.json").write_text(
+        '{"version":1,"entries":[{"chat_id":-2001,"message_id":4001,'
+        '"expires_at":9999999999,"reply_message_ids":[5001]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+    monkeypatch.setenv(
+        "WUWATERM_SETTINGS_PATH", str(state_dir / "chat_settings.json")
+    )
+
+    app = create_application(
+        "123:ABC",
+        sample_db,
+        config=BotConfig(
+            channel_reply_index_path=str(state_dir / "channel_replies.json")
+        ),
+    )
+
+    assert app.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is True
+    assert app.bot_data[CHANNEL_REPLY_INDEX_KEY].get_many(-2001, 4001) == (5001,)
+
+
+def test_state_dir_migration_never_overwrites_existing_state(monkeypatch, sample_db):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    state_dir.mkdir()
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    existing = '{"public":{},"allowed":[]}'
+    (state_dir / "chat_settings.json").write_text(existing, encoding="utf-8")
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    settings = app.bot_data[CHAT_SETTINGS_KEY]
+
+    assert settings.is_allowed(-2001) is False
+    assert (state_dir / "chat_settings.json").read_text(encoding="utf-8") == existing
+
+
+def test_state_dir_invalid_existing_target_with_legacy_fails_fast(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    state_dir.mkdir()
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    (state_dir / "chat_settings.json").write_text("", encoding="utf-8")
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+
+    with pytest.raises(StateMigrationError):
+        create_application("123:ABC", sample_db, config=BotConfig())
+
+
+def test_state_dir_invalid_chat_settings_schema_with_legacy_fails_fast(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    state_dir.mkdir()
+    (data_dir / "chat_settings.json").write_text(
+        '{"public":{"-2001":true},"allowed":[-2001]}',
+        encoding="utf-8",
+    )
+    (state_dir / "chat_settings.json").write_text(
+        '{"public":{"01":true},"allowed":[]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+
+    with pytest.raises(StateMigrationError):
+        create_application("123:ABC", sample_db, config=BotConfig())
+
+
+def test_state_dir_invalid_channel_reply_target_with_legacy_fails_fast(
+    monkeypatch, sample_db
+):
+    data_dir = sample_db.parent
+    state_dir = data_dir.with_name(f"{data_dir.name}-state")
+    state_dir.mkdir()
+    (data_dir / "channel_replies.json").write_text(
+        '{"version":1,"entries":[{"chat_id":-2001,"message_id":4001,'
+        '"expires_at":9999999999,"reply_message_ids":[5001]}]}',
+        encoding="utf-8",
+    )
+    (state_dir / "channel_replies.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WUWATERM_STATE_DIR", str(state_dir))
+
+    with pytest.raises(StateMigrationError):
+        create_application("123:ABC", sample_db, config=BotConfig())
 
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):

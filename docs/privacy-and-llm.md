@@ -69,10 +69,12 @@ Private `/tr` is owner-only. Missing or empty `OWNER_USER_ID` means private
 `/tr` rejects everyone and logs a startup warning. Group serving is gated on the
 authorization allowlist, and public mode never bypasses that allowlist.
 
-The allowlist and `/public` state are persisted to `WUWATERM_SETTINGS_PATH`,
-defaulting alongside the DB. The linked-channel reply index defaults to
-`<db parent>/channel_replies.json`. Both are runtime data files and should stay
-in the ignored `data/` volume.
+The allowlist and `/public` state are persisted to `WUWATERM_SETTINGS_PATH`.
+The linked-channel reply index is persisted to `WUWATERM_CHANNEL_REPLY_INDEX_PATH`.
+When those explicit paths are unset and `WUWATERM_STATE_DIR` is set, the files
+default to that writable state directory. Otherwise they default alongside the
+DB for local compatibility. Both are runtime data files and should stay in an
+ignored local volume or directory, not in commits.
 
 ## Logging And Status Output
 
