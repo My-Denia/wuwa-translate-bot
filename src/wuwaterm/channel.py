@@ -24,7 +24,12 @@ from .runtime_keys import (
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
 from .normalize import count_cjk, count_latin
-from .sentence import LLMTranslationError, SentenceTranslator, _llm_configured
+from .sentence import (
+    LLMTranslationError,
+    TRANSLATION_UNAVAILABLE_NOTICE,
+    SentenceTranslator,
+    _llm_configured,
+)
 from .settings import ChatSettings
 from .telegram_html import strip_telegram_html, validate_telegram_html
 from .telegram_text import (
@@ -451,17 +456,39 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     text_len=safe_text_len(plain),
                 )
                 return
-            _channel_event(
-                runtime,
-                stage="llm",
-                reason="started",
-                message=message,
-                chat_id=chat_id,
-                is_edit=is_edit,
-                direction=direction,
-                text_len=safe_text_len(plain),
-                mode=f"calls:{required_calls}",
-            )
+            started_calls = 0
+
+            def mark_channel_llm_call_started() -> None:
+                """Recheck volatile policy after the shared LLM-slot wait."""
+
+                nonlocal started_calls
+
+                if not _message_is_fresh(
+                    message, config.channel_max_age_seconds
+                ):
+                    raise LLMTranslationError(
+                        TRANSLATION_UNAVAILABLE_NOTICE,
+                        reason="stale_before_llm",
+                    )
+                if not _passes_channel_delivery_gate(context, chat_id):
+                    raise LLMTranslationError(
+                        TRANSLATION_UNAVAILABLE_NOTICE,
+                        reason="authorization_changed_before_llm",
+                    )
+                admission.mark_call_started()
+                started_calls += 1
+                _channel_event(
+                    runtime,
+                    stage="llm",
+                    reason="started",
+                    message=message,
+                    chat_id=chat_id,
+                    is_edit=is_edit,
+                    direction=direction,
+                    text_len=safe_text_len(plain),
+                    mode=f"call:{started_calls}/{required_calls}",
+                )
+
             try:
                 (
                     translated,
@@ -472,13 +499,22 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     plain,
                     html_text,
                     to_chinese=to_chinese,
-                    before_llm_call=admission.mark_call_started,
+                    before_llm_call=mark_channel_llm_call_started,
                 )
             except LLMTranslationError as exc:
+                reason = getattr(exc, "reason", "translation_unavailable")
                 _channel_event(
                     runtime,
-                    stage="llm",
-                    reason=getattr(exc, "reason", "translation_unavailable"),
+                    stage=(
+                        "skipped"
+                        if reason
+                        in {
+                            "stale_before_llm",
+                            "authorization_changed_before_llm",
+                        }
+                        else "llm"
+                    ),
+                    reason=reason,
                     message=message,
                     chat_id=chat_id,
                     is_edit=is_edit,

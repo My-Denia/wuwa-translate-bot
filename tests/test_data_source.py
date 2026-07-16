@@ -116,6 +116,35 @@ def test_refresh_data_measures_checkout_and_includes_version_file(local_source, 
     assert provenance.changelist == "8059200"
 
 
+def test_refresh_data_honors_explicit_repo_url_override(local_source, tmp_path):
+    source, _profile = local_source
+    mirror = tmp_path / "mirror.git"
+    _git("clone", "--bare", str(source), str(mirror), cwd=tmp_path)
+
+    checkout = refresh_data(
+        tmp_path / "checkout-from-mirror",
+        repo_url=str(mirror),
+        profile_name="arikatsu",
+    )
+
+    provenance = inspect_data_source(
+        checkout,
+        "arikatsu",
+        expected_repo_url=str(mirror),
+    )
+    assert provenance.repo_url == str(mirror)
+    with pytest.raises(DataSourceError, match="expected origin"):
+        inspect_data_source(checkout, "arikatsu")
+
+    _git("remote", "set-url", "origin", str(tmp_path / "other"), cwd=checkout)
+    with pytest.raises(DataSourceError, match="expected origin"):
+        inspect_data_source(
+            checkout,
+            "arikatsu",
+            expected_repo_url=str(mirror),
+        )
+
+
 def test_refresh_data_measures_unversioned_legacy_checkout(
     local_source, monkeypatch, tmp_path
 ):

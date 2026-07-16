@@ -66,6 +66,8 @@ def parse_source_version(path: str | Path) -> dict[str, str]:
 def inspect_data_source(
     data_dir: str | Path,
     profile_name: str | None = None,
+    *,
+    expected_repo_url: str | None = None,
 ) -> SourceProvenance:
     """Measure and validate the active checkout before a database build."""
 
@@ -75,9 +77,12 @@ def inspect_data_source(
         raise DataSourceError(f"{root} is not a Git checkout")
 
     actual_repo = _run(["git", "remote", "get-url", "origin"], cwd=root)
-    if actual_repo != profile.repo_url:
+    expected_repo = (
+        profile.repo_url if expected_repo_url is None else expected_repo_url
+    )
+    if actual_repo != expected_repo:
         raise DataSourceError(
-            f"expected origin {profile.repo_url}, got {actual_repo}"
+            f"expected origin {expected_repo}, got {actual_repo}"
         )
     actual_commit = _run(["git", "rev-parse", "HEAD"], cwd=root)
     if actual_commit != profile.pinned_commit:
@@ -141,16 +146,35 @@ def refresh_data(
     repo_url: str | None = None,
     profile_name: str | None = None,
 ) -> Path:
+    """Refresh the pinned checkout, optionally through an explicit mirror.
+
+    The override is validated for this refresh only. Subsequent database builds
+    remain strictly bound to the profile origin; this function does not weaken
+    the default provenance anchor.
+    """
+
     profile = get_source_profile(profile_name)
-    repo_url = repo_url or profile.repo_url or WUTHERINGDATA_REPO
+    effective_repo_url = repo_url or profile.repo_url or WUTHERINGDATA_REPO
     dest_path = Path(dest)
     if not dest_path.exists():
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        _run(["git", "clone", "--filter=blob:none", "--sparse", repo_url, str(dest_path)])
+        _run(
+            [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                "--sparse",
+                effective_repo_url,
+                str(dest_path),
+            ]
+        )
     elif not (dest_path / ".git").exists():
         raise DataSourceError(f"{dest_path} exists but is not a Git checkout")
     else:
-        _run(["git", "remote", "set-url", "origin", repo_url], cwd=dest_path)
+        _run(
+            ["git", "remote", "set-url", "origin", effective_repo_url],
+            cwd=dest_path,
+        )
 
     sparse_paths = [
         f"/{path}" if path == profile.version_file else f"/{path}/"
@@ -160,5 +184,9 @@ def refresh_data(
     _run(["git", "fetch", "--depth", "1", "origin", profile.pinned_commit], cwd=dest_path)
     _run(["git", "checkout", "--detach", profile.pinned_commit], cwd=dest_path)
     _run(["git", "sparse-checkout", "set", "--no-cone", *sparse_paths], cwd=dest_path)
-    inspect_data_source(dest_path, profile.name)
+    inspect_data_source(
+        dest_path,
+        profile.name,
+        expected_repo_url=effective_repo_url,
+    )
     return dest_path

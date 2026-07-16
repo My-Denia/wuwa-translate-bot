@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -19,7 +20,13 @@ from wuwaterm.db import create_database
 from wuwaterm.models import TermRecord
 
 import scripts.deployment_manifest as deployment_manifest_module
-from scripts.deployment_manifest import build_manifest, verify_manifest, write_manifest
+from scripts.deployment_manifest import (
+    build_manifest,
+    durable_remove,
+    durable_replace,
+    verify_manifest,
+    write_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +82,55 @@ def test_vps_update_freezes_legacy_state_only_after_database_is_ready():
     assert builder < refresh < build < verify < stop < migrate < start
     assert "rollback_on_failure" in text
     assert "rollback_image_ref" in text
+
+
+def test_vps_update_durably_promotes_and_restores_database_and_pointer():
+    text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    promotion = text.index(
+        'db_promoted=1\npython3 scripts/deployment_manifest.py durable-replace'
+    )
+    pointer = text.index(
+        'pointer_published=1\npython3 scripts/deployment_manifest.py publish-pointer'
+    )
+    assert promotion < pointer
+    assert (
+        'python3 scripts/deployment_manifest.py durable-remove --path "$db_path"'
+        in text
+    )
+    assert '--path "$pointer_path"' in text
+    assert '--source "$restore_tmp" --destination "$db_path"' in text
+
+
+def test_durable_replace_and_remove_fsync_changed_directories(monkeypatch, tmp_path):
+    source_dir = tmp_path / "candidates"
+    destination_dir = tmp_path / "data"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    source = source_dir / "candidate.db"
+    destination = destination_dir / "terms.db"
+    source.write_bytes(b"new")
+    destination.write_bytes(b"old")
+    synced_files: list[Path] = []
+    synced: list[Path] = []
+    monkeypatch.setattr(
+        deployment_manifest_module, "_fsync_file", synced_files.append
+    )
+    monkeypatch.setattr(
+        deployment_manifest_module, "_fsync_directory", synced.append
+    )
+
+    durable_replace(source, destination)
+
+    assert destination.read_bytes() == b"new"
+    assert not source.exists()
+    assert synced_files == [source]
+    assert synced == [destination_dir.resolve(), source_dir.resolve()]
+
+    synced.clear()
+    durable_remove(destination)
+    assert not destination.exists()
+    assert synced == [destination_dir.resolve()]
 
 
 def test_deployment_docs_do_not_recommend_live_non_atomic_state_copy():
@@ -569,6 +625,51 @@ def deploy_harness(tmp_path):
         encoding="utf-8",
     )
     docker_script.chmod(0o755)
+
+    python_script = fake_bin / "python3"
+    python_script.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f"real_python={shlex.quote(sys.executable)}\n"
+        "case \"$*\" in\n"
+        "  *'deployment_manifest.py durable-replace --source data/candidates/'*)\n"
+        "    if [ \"${FAKE_DB_PROMOTION_PRE_REPLACE_FAILURE:-0}\" = 1 ]; then\n"
+        "      exit 94\n"
+        "    fi\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_DB_PROMOTION_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      exit 95\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        f"  *'deployment_manifest.py publish-pointer --path .deploy_commit --source-commit {OLD_COMMIT}'*)\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_POINTER_ROLLBACK_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected pointer rollback durability failure' >&2\n"
+        "      exit 92\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  *'deployment_manifest.py durable-replace --source data/terms.db.rollback.'*)\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_DB_ROLLBACK_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected rollback durability failure' >&2\n"
+        "      exit 93\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        f"  *'deployment_manifest.py publish-pointer --path .deploy_commit --source-commit {NEW_COMMIT}'*)\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_POINTER_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      exit 96\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "exec \"$real_python\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    python_script.chmod(0o755)
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
 
     old_hash = hashlib.sha256(old_db.read_bytes()).hexdigest()
@@ -617,6 +718,115 @@ def test_vps_update_failure_injection_preserves_previous_binding(
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
     assert list((root / "data" / "deployment-backups").glob("*.deploy_commit"))
+
+
+@pytest.mark.parametrize(
+    ("failure_env", "returncode"),
+    (
+        ("FAKE_DB_PROMOTION_PRE_REPLACE_FAILURE", 94),
+        ("FAKE_DB_PROMOTION_DURABILITY_FAILURE", 95),
+        ("FAKE_POINTER_DURABILITY_FAILURE", 96),
+    ),
+)
+def test_vps_update_rolls_back_after_replace_before_durability_confirmation(
+    deploy_harness, failure_env, returncode
+):
+    root, env, old_hash, _new_hash = deploy_harness
+    env[failure_env] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == returncode, result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+
+
+def test_vps_update_surfaces_rollback_durability_failure(deploy_harness):
+    root, env, old_hash, _new_hash = deploy_harness
+    env["FAKE_DB_PROMOTION_DURABILITY_FAILURE"] = "1"
+    env["FAKE_DB_ROLLBACK_DURABILITY_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 93
+    assert "injected rollback durability failure" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+
+
+def test_vps_update_reports_pointer_rollback_durability_failure(deploy_harness):
+    root, env, old_hash, _new_hash = deploy_harness
+    env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
+    env["FAKE_POINTER_ROLLBACK_DURABILITY_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 96
+    assert "injected pointer rollback durability failure" in result.stderr
+    assert "restored pointer durability could not be confirmed" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+
+
+def test_vps_update_removes_new_pointer_when_no_previous_pointer_existed(
+    deploy_harness,
+):
+    root, env, old_hash, _new_hash = deploy_harness
+    (root / ".deploy_commit").unlink()
+    (root / ".deployments" / f"{OLD_COMMIT}.json").unlink()
+    env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 96, result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert not (root / ".deploy_commit").exists()
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
 
 
 def test_vps_update_success_publishes_verified_immutable_binding(deploy_harness):

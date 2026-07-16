@@ -162,18 +162,23 @@ rollback_on_failure() {
   if [ "$db_promoted" -eq 1 ]; then
     if [ "$old_db_present" -eq 1 ]; then
       restore_tmp="$db_path.rollback.$deployment_id"
-      cp -p "$db_backup" "$restore_tmp" && mv -f "$restore_tmp" "$db_path"
+      cp -p "$db_backup" "$restore_tmp"
+      python3 scripts/deployment_manifest.py durable-replace \
+        --source "$restore_tmp" --destination "$db_path"
     else
-      rm -f "$db_path"
+      python3 scripts/deployment_manifest.py durable-remove --path "$db_path"
     fi
   fi
 
   if [ "$pointer_published" -eq 1 ]; then
     if [ "$old_pointer_present" -eq 1 ]; then
-      python3 scripts/deployment_manifest.py publish-pointer \
-        --path "$pointer_path" --source-commit "$old_pointer" || true
+      if ! python3 scripts/deployment_manifest.py publish-pointer \
+        --path "$pointer_path" --source-commit "$old_pointer"; then
+        echo "warning: restored pointer durability could not be confirmed" >&2
+      fi
     else
-      rm -f "$pointer_path"
+      python3 scripts/deployment_manifest.py durable-remove \
+        --path "$pointer_path"
     fi
   fi
 
@@ -203,8 +208,9 @@ trap rollback_on_failure EXIT
 # Candidate DB and immutable image are both verified before this stop.
 compose stop wuwaterm
 runtime_stopped=1
-mv "$candidate_path" "$db_path"
 db_promoted=1
+python3 scripts/deployment_manifest.py durable-replace \
+  --source "$candidate_path" --destination "$db_path"
 
 # Freeze and validate the legacy state only while the old runtime is stopped.
 for state_file in chat_settings.json channel_replies.json; do
@@ -266,9 +272,9 @@ python3 scripts/deployment_manifest.py verify \
   --image-digest "$image_digest" \
   --db "$db_path"
 
+pointer_published=1
 python3 scripts/deployment_manifest.py publish-pointer \
   --path "$pointer_path" --source-commit "$source_commit"
-pointer_published=1
 python3 scripts/deployment_manifest.py verify-pointer \
   --path "$pointer_path" --source-commit "$source_commit"
 fail_if pointer

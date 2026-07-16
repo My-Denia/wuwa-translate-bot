@@ -36,6 +36,47 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def durable_replace(source: Path, destination: Path) -> None:
+    """Fsync, atomically replace, and durably publish a file."""
+
+    source_parent = source.parent.resolve()
+    destination_parent = destination.parent.resolve()
+    _fsync_file(source)
+    os.replace(source, destination)
+    _fsync_directory(destination_parent)
+    if source_parent != destination_parent:
+        _fsync_directory(source_parent)
+
+
+def durable_remove(path: Path) -> None:
+    """Remove a file, if present, and fsync the containing directory."""
+
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent.resolve())
+
+
 PROVENANCE_KEYS = (
     "schema_version",
     "source_profile",
@@ -220,11 +261,7 @@ def write_manifest(path: Path, payload: dict[str, Any]) -> None:
             os.link(tmp_path, path)
         except FileExistsError:
             raise ManifestError(f"immutable deployment manifest already exists: {path}")
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        _fsync_directory(path.parent)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -242,11 +279,7 @@ def publish_commit_pointer(path: Path, source_commit: str) -> None:
             os.fsync(stream.fileno())
         os.chmod(tmp_path, 0o444)
         os.replace(tmp_path, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        _fsync_directory(path.parent)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -288,6 +321,13 @@ def main() -> int:
     publish_pointer.add_argument("--path", required=True, type=Path)
     publish_pointer.add_argument("--source-commit", required=True)
 
+    replace_file = subparsers.add_parser("durable-replace")
+    replace_file.add_argument("--source", required=True, type=Path)
+    replace_file.add_argument("--destination", required=True, type=Path)
+
+    remove_file = subparsers.add_parser("durable-remove")
+    remove_file.add_argument("--path", required=True, type=Path)
+
     verify_pointer = subparsers.add_parser("verify-pointer")
     verify_pointer.add_argument("--path", required=True, type=Path)
     verify_pointer.add_argument("--source-commit", required=True)
@@ -326,6 +366,10 @@ def main() -> int:
             )
         elif args.command == "publish-pointer":
             publish_commit_pointer(args.path, args.source_commit)
+        elif args.command == "durable-replace":
+            durable_replace(args.source, args.destination)
+        elif args.command == "durable-remove":
+            durable_remove(args.path)
         else:
             verify_commit_pointer(args.path, args.source_commit)
     except ManifestError as exc:

@@ -776,6 +776,140 @@ def test_channel_rechecks_freshness_after_waiting_for_llm_slot(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("policy_change", "expected_reason"),
+    (
+        ("stale", "stale_before_llm"),
+        ("revoked", "authorization_changed_before_llm"),
+    ),
+)
+def test_channel_rechecks_policy_after_shared_llm_semaphore_wait(
+    monkeypatch, sample_db, policy_change, expected_reason
+):
+    async def run() -> None:
+        monkeypatch.setenv(
+            "WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1"
+        )
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        current = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls, _tz=None):
+                return current
+
+        monkeypatch.setattr("wuwaterm.channel.datetime", FakeDateTime)
+        command_entered = asyncio.Event()
+        release_command = asyncio.Event()
+        calls: list[str] = []
+
+        async def fake_call(locked_text, *_args, **_kwargs):
+            calls.append(locked_text)
+            if len(calls) == 1:
+                command_entered.set()
+                await release_command.wait()
+            return "translated"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(
+            sample_db,
+            config=BotConfig(
+                owner_user_id=11,
+                llm_max_concurrency=1,
+                channel_max_age_seconds=1,
+            ),
+        )
+        translator = context.application.bot_data[TRANSLATOR_KEY]
+        command_task = asyncio.create_task(
+            translator.translate_async("命令翻译占用共享并发槽", propagate_errors=True)
+        )
+        await asyncio.wait_for(command_entered.wait(), timeout=0.2)
+
+        update, message = channel_update(
+            text=CN_TEXT, message_id=4722, date=current
+        )
+        channel_task = asyncio.create_task(channel_post_handler(update, context))
+        await asyncio.sleep(0)
+        assert not channel_task.done()
+
+        if policy_change == "stale":
+            current += timedelta(seconds=2)
+        else:
+            context.application.bot_data[CHAT_SETTINGS_KEY].disallow(-2001)
+        release_command.set()
+        await asyncio.gather(command_task, channel_task)
+
+        assert len(calls) == 1
+        assert message.replies == []
+        runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+        snapshot = runtime.snapshot()
+        assert snapshot.outcomes[f"skipped:{expected_reason}"] == 1
+        assert snapshot.outcomes.get("llm:started", 0) == 0
+        assert snapshot.active == 0
+        assert snapshot.pending == 0
+
+    asyncio.run(run())
+
+
+def test_channel_rechecks_policy_before_each_multichunk_llm_call(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv(
+        "WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1"
+    )
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    current = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, _tz=None):
+            return current
+
+    monkeypatch.setattr("wuwaterm.channel.datetime", FakeDateTime)
+    calls: list[str] = []
+
+    async def fake_call(locked_text, *_args, **_kwargs):
+        nonlocal current
+        calls.append(locked_text)
+        current += timedelta(seconds=2)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    context = make_context(
+        sample_db,
+        config=BotConfig(
+            owner_user_id=11,
+            channel_max_age_seconds=1,
+            channel_llm_calls_per_minute=2,
+        ),
+    )
+    update, message = channel_update(
+        text="测" * (LLM_INPUT_CHAR_LIMIT + 10),
+        message_id=4723,
+        date=current,
+    )
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(calls) == 1
+    assert message.replies == []
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    snapshot = runtime.snapshot()
+    assert snapshot.outcomes["skipped:stale_before_llm"] == 1
+    assert snapshot.outcomes["llm:started"] == 1
+    replacement, rejection = runtime.reserve(1)
+    assert replacement is not None
+    assert rejection is None
+
+    async def release_replacement() -> None:
+        async with replacement:
+            pass
+
+    asyncio.run(release_replacement())
+
+
 def test_channel_rechecks_freshness_after_slow_llm_before_delivery(
     monkeypatch, sample_db
 ):
