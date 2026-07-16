@@ -8,6 +8,8 @@ deploy/env.example
 data
 state
 goal-runs
+.deployments
+.deploy_commit
 __pycache__
 *.py[cod]
 *.egg-info

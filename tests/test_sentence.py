@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
+import shutil
 
 import httpx
 import pytest
@@ -131,6 +134,75 @@ def test_sentence_locking_reuses_lookup_exact_decision(sample_db):
     assert translator.translate("巧手烹调") == "Skillful Cooking"
 
 
+def test_long_sentence_and_speaker_checks_never_enter_fuzzy_lookup(
+    monkeypatch, sample_db
+):
+    monkeypatch.delenv("WUWATERM_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("WUWATERM_OPENAI_MODEL", raising=False)
+    translator = SentenceTranslator(sample_db)
+
+    def fail_fuzzy(*_args, **_kwargs):
+        raise AssertionError("sentence exact decisions must not scan fuzzy candidates")
+
+    monkeypatch.setattr(translator.service, "_fuzzy", fail_fuzzy)
+    text = "未知角色：这是一个不包含官方术语的普通长句。" * 200
+
+    assert translator.translate(text) == translator.prepare_text(text)
+
+
+def test_lockable_sources_cache_reuses_rows_and_invalidates_on_provenance(
+    monkeypatch, sample_db
+):
+    translator = SentenceTranslator(sample_db)
+    real_entries = translator.service.entries
+    real_metadata = translator.service.metadata
+    revision = {"value": "revision-one"}
+    entry_calls = 0
+
+    def counted_entries():
+        nonlocal entry_calls
+        entry_calls += 1
+        return real_entries()
+
+    def metadata():
+        return {**real_metadata(), "test_revision": revision["value"]}
+
+    monkeypatch.setattr(translator.service, "entries", counted_entries)
+    monkeypatch.setattr(translator.service, "metadata", metadata)
+
+    translator.lock_terms("今汐和声骸")
+    translator.lock_terms("守岸人和声骸")
+    assert entry_calls == 1
+
+    revision["value"] = "revision-two"
+    translator.lock_terms("今汐和声骸")
+    assert entry_calls == 2
+
+
+def test_lockable_sources_cache_invalidates_after_atomic_db_replacement(
+    sample_db,
+):
+    translator = SentenceTranslator(sample_db)
+    initial = translator.lock_terms("声骸")
+    assert initial.restore(initial.locked_text) == "Echo"
+
+    candidate = sample_db.with_name("terms.candidate.db")
+    shutil.copy2(sample_db, candidate)
+    with connect(candidate) as conn:
+        conn.execute(
+            "UPDATE terms SET en = ?, en_norm = ? WHERE zh = ?",
+            ("Upgraded Echo", "upgraded echo", "声骸"),
+        )
+        conn.commit()
+    os.replace(candidate, sample_db)
+
+    refreshed = translator.lock_terms("声骸")
+    assert refreshed.restore(refreshed.locked_text) == "Upgraded Echo"
+
+
 def test_prepare_text_strips_screenshot_noise_and_resolves_speaker(sample_db):
     translator = SentenceTranslator(sample_db)
 
@@ -196,7 +268,7 @@ def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_d
         assert html_mode is True
         assert "__TERM_0__" in locked_text
         assert len(locks) == 1
-        return f"<b>__TERM_0__</b>{locks[0][0]}"
+        return locked_text
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     translator = SentenceTranslator(sample_db)
@@ -205,6 +277,141 @@ def test_html_literal_legacy_placeholder_text_is_preserved(monkeypatch, sample_d
         return await translator.translate_html_async("<b>__TERM_0__</b>声骸")
 
     assert asyncio.run(run()) == "<b>__TERM_0__</b>Echo"
+
+
+@pytest.mark.parametrize(
+    ("to_chinese", "html_text", "expected"),
+    [
+        (
+            False,
+            '<blockquote expandable><a href="https://example.com/声骸?q=1&amp;x=2">'
+            '<b>今汐</b></a><code class="language-python">声骸</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            '<blockquote expandable><a href="https://example.com/声骸?q=1&amp;x=2">'
+            '<b>Jinhsi</b></a><code class="language-python">Echo</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+        ),
+        (
+            True,
+            '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
+            '<b>Jinhsi</b></a><code class="language-python">Echo</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+            '<blockquote expandable><a href="https://example.com/Echo?q=1&amp;x=2">'
+            '<b>今汐</b></a><code class="language-python">声骸</code> &amp; '
+            '<tg-emoji emoji-id="5368324170671202286">⭐</tg-emoji></blockquote>',
+        ),
+    ],
+)
+def test_html_translation_protects_structure_and_only_locks_visible_text(
+    monkeypatch, sample_db, to_chinese, html_text, expected
+):
+    enable_llm_env(monkeypatch)
+    seen = {}
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        seen["locked_text"] = locked_text
+        seen["locks"] = locks
+        assert html_mode is True
+        return locked_text
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return await translator.translate_html_async(
+            html_text, to_chinese=to_chinese
+        )
+
+    assert asyncio.run(run()) == expected
+    locked_text = seen["locked_text"]
+    assert "<" not in locked_text
+    assert "href=" not in locked_text
+    assert "emoji-id=" not in locked_text
+    assert "&amp;" not in locked_text
+    assert "https://example.com" not in locked_text
+    assert {lock[2] for lock in seen["locks"]} >= {"Jinhsi", "Echo"}
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "removed",
+        "duplicated",
+        "reordered",
+        "unknown",
+        "added-tag",
+        "added-entity",
+        "unterminated-tag",
+    ],
+)
+def test_html_translation_rejects_any_structural_drift(
+    monkeypatch, sample_db, drift
+):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(
+        locked_text,
+        locks,
+        html_mode=False,
+        to_chinese=False,
+        timeout_seconds=30.0,
+        transport=None,
+    ):
+        tokens = re.findall(r"__WUWA_HTML_[0-9a-f]+_[0-9]{4}__", locked_text)
+        assert len(tokens) >= 2
+        if drift == "removed":
+            return locked_text.replace(tokens[0], "", 1)
+        if drift == "duplicated":
+            return f"{locked_text}{tokens[0]}"
+        if drift == "reordered":
+            marker = "__STRUCTURE_SWAP_SENTINEL__"
+            return (
+                locked_text.replace(tokens[0], marker, 1)
+                .replace(tokens[1], tokens[0], 1)
+                .replace(marker, tokens[1], 1)
+            )
+        if drift == "unknown":
+            return f"{locked_text}__WUWA_HTML_deadbeefdeadbeef_9999__"
+        if drift == "added-tag":
+            return f"{locked_text}<i>injected</i>"
+        if drift == "unterminated-tag":
+            return f"{locked_text}<i"
+        return f"{locked_text}&quot;"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        return await translator.translate_html_async(
+            "<b>今汐</b> &amp; <i>声骸</i>"
+        )
+
+    with pytest.raises(LLMTranslationError) as exc_info:
+        asyncio.run(run())
+    assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_sync_html_translation_rejects_structural_drift(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    def fake_call(locked_text, locks, html_mode=False, to_chinese=False):
+        token = re.search(r"__WUWA_HTML_[0-9a-f]+_[0-9]{4}__", locked_text)
+        assert token is not None
+        return locked_text.replace(token.group(), "", 1)
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    with pytest.raises(LLMTranslationError) as exc_info:
+        translator.translate_html("<b>今汐</b>")
+    assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
 
 def test_repeated_terms_get_distinct_placeholders(sample_db):
@@ -497,6 +704,15 @@ def test_llm_budget_and_quota_errors_keep_budget_notice(response):
     assert error.user_message == BUDGET_EXHAUSTED_NOTICE
 
 
+def test_llm_errors_expose_safe_reason_codes() -> None:
+    assert _llm_error_from_response(
+        httpx.Response(429, text='{"error":"max_budget exceeded"}')
+    ).reason == "budget"
+    assert _llm_error_from_response(httpx.Response(429)).reason == "rate_limit"
+    assert _llm_error_from_response(httpx.Response(500)).reason == "upstream"
+    assert _llm_error_from_response(httpx.Response(400)).reason == "http"
+
+
 def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -517,6 +733,31 @@ def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, s
     translator = SentenceTranslator(sample_db)
 
     assert translator.translate("这是一个需要翻译的句子。") == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_async_translator_can_propagate_safe_failure_reason(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE, reason="rate_limit"
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        assert (
+            await translator.translate_async("这是一个需要翻译的句子。")
+            == TRANSLATION_UNAVAILABLE_NOTICE
+        )
+        with pytest.raises(LLMTranslationError) as exc_info:
+            await translator.translate_async(
+                "这是一个需要翻译的句子。", propagate_errors=True
+            )
+        assert exc_info.value.reason == "rate_limit"
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(

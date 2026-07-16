@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from wuwaterm.builder import build_database
+from wuwaterm.builder import iter_records
+from wuwaterm.constants import get_source_profile
+from wuwaterm.data_source import SourceProvenance
+from wuwaterm.db import create_database
 
 
 @pytest.fixture()
@@ -95,5 +98,18 @@ def sample_data_dir(tmp_path: Path) -> Path:
 @pytest.fixture()
 def sample_db(tmp_path: Path, sample_data_dir: Path) -> Path:
     db_path = tmp_path / "terms.db"
-    build_database(sample_data_dir, db_path)
+    profile = get_source_profile("dimbreath_legacy")
+    create_database(
+        db_path,
+        iter_records(sample_data_dir, profile.name),
+        source_profile=profile,
+        source_provenance=SourceProvenance(
+            profile=profile.name,
+            repo_url=profile.repo_url,
+            commit=profile.pinned_commit,
+            game_version="fixture-unavailable",
+            resource_version="fixture-unavailable",
+            changelist="fixture-unavailable",
+        ),
+    )
     return db_path

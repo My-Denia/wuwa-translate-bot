@@ -41,8 +41,8 @@ Build the local dictionary:
 
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
-.venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.db --profile arikatsu
-.venv/bin/python scripts/verify_db.py data/terms.db --min-category resonator --min-category weapon --min-category echo --min-category item --min-category skill --min-category sonata_effect --min-category location
+.venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
 ```
 
 Look up terms and translate a sentence:
@@ -94,8 +94,8 @@ Run the standard validation set:
 Primary source:
 
 - `https://github.com/Arikatsu/WutheringWaves_Data`
-- pinned commit: `58ec43698d2b4e188cb285467ce1ae887612dd92`
-- pinned version: `GameVer 3.4.0 | ResVer 3.4.13`
+- pinned commit: `dae29691c04ef0f48d0810b5d244fb0b37288c60`
+- pinned version: `GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
 
 Fallback mirror to try manually if the primary source is unavailable:
 
@@ -103,8 +103,9 @@ Fallback mirror to try manually if the primary source is unavailable:
   (`e9234ffe094b2d944d16b222d31102e8ab32d954`, 2026-03-13) and is kept only
   as a legacy fallback.
 
-The active Arikatsu source profile uses sparse checkout for only `BinData` and
-`Textmaps`. Bulk TextMap data and generated `terms.db` are local artifacts and
+The active Arikatsu source profile uses sparse checkout for only `README.md`,
+`BinData`, and `Textmaps`. The root README is a required version-provenance
+file. Bulk TextMap data and generated databases are local artifacts and
 are ignored by Git. This project does not redistribute Wuthering Waves game
 data; only a small derived term dictionary is built locally from the public
 source above. All Wuthering Waves game data and in-game terminology are
@@ -133,29 +134,35 @@ details.
 ## Deployment Entry
 
 The VPS target uses Docker Compose because the current system Python there is
-older than the project target. Copy the repo to `/opt/wuwaterm/current`, create
+older than the project target. `/opt/wuwaterm/current` must be a clean Git
+checkout whose `HEAD` can be verified against freshly fetched `origin/main`;
+an exported source copy without `.git` is deliberately rejected. Create
 `/opt/wuwaterm/current/.env` from `deploy/env.example`, set it to mode `600`,
 and run Compose through `deploy/docker-compose.yml`.
 
 ```bash
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder build-db --atomic
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder verify-db
-docker compose -f deploy/docker-compose.yml up -d
+WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
 ```
 
-The production service uses the `runtime` Docker target and only runs the
-Telegram bot. Data refresh/build/verify use the `builder` target through the
-`wuwaterm-builder` service. The runtime service mounts `data/` read-only and
-uses `state/` for writable `chat_settings.json` and `channel_replies.json`.
+The updater builds and strongly verifies a separate candidate database and an
+immutable source-revision image before it stops the old service. It then
+promotes, starts, smokes, writes an immutable manifest, and atomically publishes
+`.deploy_commit`; any post-promotion failure restores the previous database,
+image, and pointer. The production service uses the `runtime` Docker target and
+only runs the Telegram bot. Data refresh/build/verify use the `builder` target
+through the `wuwaterm-builder` service. The runtime service mounts `data/`
+read-only and uses `state/` for writable `chat_settings.json` and
+`channel_replies.json`.
 When upgrading an older deployment, use `deploy/vps-update.sh` or the
 state-only migration in [Deployment](docs/deployment.md). Both stop the old
 runtime before the validated, atomic one-time migration. Do not manually copy
 state files while the old bot is running. Remove or update old `.env`
 overrides that point those files at `data/`.
-Secrets are injected only through Compose `env_file`; `.env` is ignored and
-excluded from the image build context. Full deployment notes are in
+Runtime secrets are injected only into the runtime service through Compose
+`env_file`; the builder has no `env_file`, and `.env` is ignored and excluded
+from the image build context. Full deployment notes are in
 [Deployment](docs/deployment.md).
 
 ## Validation Entry
@@ -163,8 +170,9 @@ excluded from the image build context. Full deployment notes are in
 For a full local validation pass, run:
 
 ```bash
-.venv/bin/python scripts/verify_seed_terms.py data/terms.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
-.venv/bin/python scripts/verify_exact_hits.py data/terms.db --sample-size 500
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
+.venv/bin/python scripts/verify_seed_terms.py data/terms.candidate.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
+.venv/bin/python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py

@@ -17,6 +17,7 @@ from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
+    CHANNEL_RUNTIME_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     DEFAULT_GROUP_TR_REJECT_TEXT,
@@ -59,8 +60,10 @@ from wuwaterm.bot import (
     status_command,
     term_command,
     translate_query_async,
+    _validate_llm_config_env,
 )
 from wuwaterm.lookup import TermService
+from wuwaterm.channel_runtime import ChannelRuntime
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     TRANSLATION_UNAVAILABLE_NOTICE,
@@ -83,9 +86,16 @@ _BOT_CONFIG_ENV_NAMES = (
     "WUWATERM_CHANNEL_TEXT_LIMIT",
     "WUWATERM_CHANNEL_CAPTION_LIMIT",
     "WUWATERM_CHANNEL_MAX_AGE_SECONDS",
+    "WUWATERM_CHANNEL_MAX_PENDING",
+    "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE",
     "WUWATERM_CHANNEL_REPLY_INDEX_PATH",
     "WUWATERM_LLM_TIMEOUT_SECONDS",
     "WUWATERM_LLM_MAX_CONCURRENCY",
+    "WUWATERM_OPENAI_BASE_URL",
+    "WUWATERM_OPENAI_API_KEY",
+    "WUWATERM_OPENAI_MODEL",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
 )
 
 
@@ -310,6 +320,16 @@ def placeholder_for(locks, official):
     raise AssertionError(f"missing official lock {official}")
 
 
+def html_with_segments(locked_text: str, *segments: str) -> str:
+    placeholders = re.findall(r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4}__", locked_text)
+    assert len(segments) == len(placeholders) + 1
+    parts: list[str] = []
+    for segment, placeholder in zip(segments, placeholders, strict=False):
+        parts.extend((segment, placeholder))
+    parts.append(segments[-1])
+    return "".join(parts)
+
+
 def test_term_command_uses_db_first(sample_db):
     update, message = fake_update()
     context = fake_context(sample_db, ["声骸"])
@@ -417,7 +437,7 @@ def test_group_html_reply_missing_target_then_parse_error_falls_back_plain(
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         locks,
         html_mode=False,
         to_chinese=False,
@@ -425,7 +445,9 @@ def test_group_html_reply_missing_target_then_parse_error_falls_back_plain(
         transport=None,
     ):
         assert html_mode is True
-        return f"<b>{placeholder_for(locks, 'Jinhsi')}</b> says hi"
+        return html_with_segments(
+            locked_text, "", placeholder_for(locks, "Jinhsi"), " says hi"
+        )
 
     def fail_then_parse_error(_text, kwargs, call_number):
         if call_number == 1:
@@ -617,7 +639,7 @@ def test_term_command_budget_exhaustion_returns_clean_bot_reply(monkeypatch, sam
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         _locks,
         html_mode=False,
         to_chinese=False,
@@ -725,7 +747,7 @@ def test_tr_auto_chinese_sentence_defaults_to_english(monkeypatch, sample_db):
     calls = []
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         locks,
         html_mode=False,
         to_chinese=False,
@@ -2157,6 +2179,62 @@ def test_from_env_parses_llm_timeout_and_concurrency(monkeypatch):
     assert config.llm_max_concurrency == 2
 
 
+def test_long_query_never_enters_fuzzy_table_scan(sample_db, monkeypatch):
+    service = TermService(sample_db)
+    translator = SentenceTranslator(sample_db)
+
+    def fail_fuzzy(*_args, **_kwargs):
+        raise AssertionError("long translation input must not run fuzzy lookup")
+
+    monkeypatch.setattr(service, "_fuzzy", fail_fuzzy)
+
+    result = asyncio.run(
+        translate_query_async(service, translator, "中" * (LLM_INPUT_CHAR_LIMIT + 1))
+    )
+
+    assert "too long" in result
+
+
+def test_llm_config_requires_complete_stripped_http_values(monkeypatch):
+    clear_bot_config_env(monkeypatch)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", " https://gateway.example/v1 ")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", " secret ")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", " model ")
+
+    _validate_llm_config_env()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"WUWATERM_OPENAI_BASE_URL": "https://gateway.example/v1"},
+        {
+            "WUWATERM_OPENAI_BASE_URL": "gateway.example/v1",
+            "WUWATERM_OPENAI_API_KEY": "secret",
+            "WUWATERM_OPENAI_MODEL": "model",
+        },
+        {
+            "WUWATERM_OPENAI_BASE_URL": "   ",
+            "WUWATERM_OPENAI_API_KEY": "secret",
+            "WUWATERM_OPENAI_MODEL": "model",
+        },
+    ],
+)
+def test_llm_config_rejects_partial_or_invalid_without_leaking_values(
+    monkeypatch, values
+):
+    clear_bot_config_env(monkeypatch)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(BotConfigError) as caught:
+        _validate_llm_config_env()
+
+    formatted = str(caught.value)
+    assert "secret" not in formatted
+    assert "gateway.example/v1" not in formatted
+
+
 def test_from_env_defaults_match_programmatic_defaults(monkeypatch):
     clear_bot_config_env(monkeypatch)
 
@@ -2172,6 +2250,11 @@ def test_from_env_defaults_match_programmatic_defaults(monkeypatch):
         ("WUWATERM_CHANNEL_TEXT_LIMIT", "channel_text_limit"),
         ("WUWATERM_CHANNEL_CAPTION_LIMIT", "channel_caption_limit"),
         ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "channel_max_age_seconds"),
+        ("WUWATERM_CHANNEL_MAX_PENDING", "channel_max_pending"),
+        (
+            "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE",
+            "channel_llm_calls_per_minute",
+        ),
         ("WUWATERM_LLM_TIMEOUT_SECONDS", "llm_timeout_seconds"),
         ("WUWATERM_LLM_MAX_CONCURRENCY", "llm_max_concurrency"),
     ],
@@ -2195,6 +2278,13 @@ def test_from_env_empty_numeric_values_use_defaults(monkeypatch, name, attribute
         ("WUWATERM_CHANNEL_TEXT_LIMIT", "channel_text_limit", "1", "4096"),
         ("WUWATERM_CHANNEL_CAPTION_LIMIT", "channel_caption_limit", "1", "1024"),
         ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "channel_max_age_seconds", "1", "2592000"),
+        ("WUWATERM_CHANNEL_MAX_PENDING", "channel_max_pending", "0", "1024"),
+        (
+            "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE",
+            "channel_llm_calls_per_minute",
+            "1",
+            "10000",
+        ),
         ("WUWATERM_LLM_TIMEOUT_SECONDS", "llm_timeout_seconds", "0.1", "300"),
         ("WUWATERM_LLM_MAX_CONCURRENCY", "llm_max_concurrency", "1", "64"),
     ],
@@ -2221,6 +2311,10 @@ def test_from_env_accepts_numeric_boundaries(
         ("WUWATERM_CHANNEL_TEXT_LIMIT", "4097"),
         ("WUWATERM_CHANNEL_CAPTION_LIMIT", "1025"),
         ("WUWATERM_CHANNEL_MAX_AGE_SECONDS", "2592001"),
+        ("WUWATERM_CHANNEL_MAX_PENDING", "-1"),
+        ("WUWATERM_CHANNEL_MAX_PENDING", "1025"),
+        ("WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE", "0"),
+        ("WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE", "10001"),
         ("WUWATERM_LLM_TIMEOUT_SECONDS", "nan"),
         ("WUWATERM_LLM_TIMEOUT_SECONDS", "inf"),
         ("WUWATERM_LLM_TIMEOUT_SECONDS", "-inf"),
@@ -2422,7 +2516,7 @@ def test_tr_reply_to_formatted_message_preserves_html(monkeypatch, sample_db):
     calls = []
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         locks,
         html_mode=False,
         to_chinese=False,
@@ -2432,9 +2526,8 @@ def test_tr_reply_to_formatted_message_preserves_html(monkeypatch, sample_db):
         calls.append((html_mode, to_chinese))
         jinhsi = placeholder_for(locks, "Jinhsi")
         echo = placeholder_for(locks, "Echo")
-        return (
-            f'<b>{jinhsi}</b> says '
-            f'<a href="https://example.com">{echo}</a> is strong'
+        return html_with_segments(
+            locked_text, "", jinhsi, " says ", echo, " is strong"
         )
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
@@ -2467,7 +2560,7 @@ def test_sentence_reply_to_formatted_caption_preserves_html(monkeypatch, sample_
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         locks,
         html_mode=False,
         to_chinese=False,
@@ -2477,7 +2570,7 @@ def test_sentence_reply_to_formatted_caption_preserves_html(monkeypatch, sample_
         assert html_mode is True
         assert to_chinese is False
         jinhsi = placeholder_for(locks, "Jinhsi")
-        return f"<tg-spoiler>{jinhsi}</tg-spoiler> arrives"
+        return html_with_segments(locked_text, "", jinhsi, " arrives")
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     replied = SimpleNamespace(
@@ -2542,7 +2635,7 @@ def test_formatted_reply_without_llm_uses_plain_fallback(monkeypatch, sample_db)
     assert message.reply_kwargs == [{"do_quote": False}]
 
 
-def test_formatted_reply_invalid_llm_html_falls_back_to_plain(monkeypatch, sample_db):
+def test_formatted_reply_structural_drift_fails_closed(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
@@ -2571,7 +2664,7 @@ def test_formatted_reply_invalid_llm_html_falls_back_to_plain(monkeypatch, sampl
 
     asyncio.run(term_command(update, context))
 
-    assert message.replies == [("translated", None)]
+    assert message.replies == [(TRANSLATION_UNAVAILABLE_NOTICE, None)]
     assert message.reply_kwargs == [{"do_quote": False}]
 
 
@@ -2823,6 +2916,30 @@ def test_status_reports_channel_reply_persistence_health_without_paths(
     assert "-2001" not in reply
     assert "4001" not in reply
     assert "5001" not in reply
+
+
+def test_status_reports_channel_runtime_counters_without_message_content(sample_db):
+    update, message = fake_update(chat_id=1, chat_type="private", user_id=11)
+    context = fake_context(sample_db, [])
+    runtime = ChannelRuntime(
+        max_active=2,
+        max_pending=3,
+        llm_calls_per_minute=7,
+    )
+    runtime.record("received", "update")
+    runtime.record("skipped", "queue_full")
+    runtime.record("delivery", "success")
+    context.application.bot_data[CHANNEL_RUNTIME_KEY] = runtime
+
+    asyncio.run(status_command(update, context))
+
+    reply = message.replies[0][0]
+    assert "Channel translation active: 0" in reply
+    assert "Channel translation pending: 0" in reply
+    assert "delivery:success=1" in reply
+    assert "received:update=1" in reply
+    assert "skipped:queue_full=1" in reply
+    assert "sensitive message body" not in reply
 
 
 def test_status_reports_healthy_channel_reply_persistence_without_paths(

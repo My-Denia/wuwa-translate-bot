@@ -18,6 +18,7 @@ case "$COMMAND" in
     ;;
   verify-db)
     exec python scripts/verify_db.py "$DB_PATH" \
+      --profile "$SOURCE_PROFILE" \
       --min-category resonator \
       --min-category weapon \
       --min-category echo \

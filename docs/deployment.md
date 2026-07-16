@@ -3,11 +3,15 @@
 ## VPS Docker Compose
 
 The VPS target uses Docker Compose because the current system Python there is
-older than the project target. Copy the repo to `/opt/wuwaterm/current`, create
-`/opt/wuwaterm/current/.env` from `.env.example` or `deploy/env.example`, and
-set it to mode `600`. These two template files are intentionally identical and
-tested for drift. Secrets are injected only through Compose `env_file`; `.env`
-is ignored and excluded from the image build context.
+older than the project target. `/opt/wuwaterm/current` must be a clean Git
+checkout with an `origin` remote and a `main` ref; the updater fetches and
+requires `HEAD == origin/main`, so an exported source copy without `.git` is
+intentionally not deployable. Create `/opt/wuwaterm/current/.env` from
+`.env.example` or `deploy/env.example`, and set it to mode `600`. These two
+template files are intentionally identical and tested for drift. Runtime
+secrets are injected only into `wuwaterm` through Compose `env_file`; the
+builder has no `env_file`, and `.env` is ignored and excluded from the image
+build context.
 
 The Compose file has two image roles:
 
@@ -17,19 +21,17 @@ The Compose file has two image roles:
   dependencies, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
 
-Prepare or refresh data without starting the service:
+Prepare and verify a candidate without changing the serving database:
 
 ```bash
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder build-db --atomic
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder verify-db
+docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
+docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
 ```
 
-For each real game-version refresh, pick at least one term that exists only in
-the new game data and run a live `/tr <term>` check in Telegram after the DB
-build. Counts and hashes prove rebuild mechanics; a new-term live check proves
-the running bot is serving the refreshed content.
+Do not move this candidate over `data/terms.db` manually. The transactional
+updater is the production promotion boundary.
 
 The compose service uses long polling (`wuwaterm bot`) and
 `restart: unless-stopped`. It does not configure webhook delivery, inline query
@@ -47,12 +49,34 @@ Older deployments stored `chat_settings.json` and `channel_replies.json` in
 `data/` beside `terms.db`. The current runtime keeps `terms.db` read-only under
 `data/` and writes runtime state under `state/`.
 
-For a normal live upgrade, run `deploy/vps-update.sh`. It refreshes, atomically
-builds, and verifies `terms.db` while the old bot can remain live. It then stops
-the runtime, copies both legacy state files with validation and atomic
-create-if-absent publication, and starts the new runtime. Stopping the old bot
-before the copy is required: otherwise an authorization or reply-index update
-written after the copy could be lost.
+For a normal live upgrade, run `deploy/vps-update.sh`. Before any stop it:
+
+1. fetches `origin/main`, requires clean `HEAD == origin/main`, and records the
+   full source commit;
+2. rebuilds the mutable local builder image from that exact clean checkout,
+   then proves the builder container has none of the runtime secret variables;
+3. refreshes source data, builds a unique candidate, and runs the strong DB
+   verifier against that candidate;
+4. builds an immutable `wuwaterm-runtime:<source-commit>` image and verifies its
+   `org.opencontainers.image.revision` label.
+
+It then snapshots the old database and commit pointer, tags the old image for
+rollback, stops the runtime, promotes the candidate, validates/migrates state,
+starts the exact validated image, and runs `scripts/deploy_smoke.py` with
+diagnostic message sending explicitly disabled. Only after smoke and running
+image-ID checks pass does it create and read back
+`.deployments/<source-commit>.json`, then atomically publish `.deploy_commit`.
+The manifest contains source commit, image ref/ID/digest/revision, DB SHA-256,
+DB source profile/commit/game/resource/changelist, deployment UTC, and backup
+path. It is mode read-only and never overwritten with different content.
+Re-running the same source commit is accepted only when its image and database
+binding is byte-for-byte identical; a different rebuild must use a new source
+commit instead of deleting or rewriting the historical manifest.
+
+Any post-promotion state/start/smoke/manifest/pointer failure restores the old
+DB, recreates the runtime from the tagged old image, and restores or removes
+the commit pointer. Timestamped DB and pointer backups and rollback image tags
+are retained; no historical snapshot or state file is deleted.
 
 For a state-only migration using an existing `terms.db`, let the new runtime
 perform the same validated, atomic one-time migration during startup:
@@ -90,3 +114,21 @@ After the service starts, use `scripts/deploy_smoke.py` as a deployment
 reachability check. It verifies `getMe`, and when `TELEGRAM_TEST_CHAT_ID` is set
 it sends one diagnostic message without printing the token or chat id. See
 [Validation](validation.md) for live smoke caveats.
+
+## Traceability Readback
+
+After an owner-authorized deployment, read the pointer and its immutable
+manifest together:
+
+```bash
+cd /opt/wuwaterm/current
+cat .deploy_commit
+python3 -m json.tool ".deployments/$(cat .deploy_commit).json"
+docker inspect --format '{{.Image}}' wuwaterm-bot
+sha256sum data/terms.db
+```
+
+The pointer must equal the intended source SHA exactly; the running image ID
+and DB hash must match the manifest. These are runtime evidence only when read
+from the actual VPS after deployment. Local tests and failure injection are
+offline/deployment validation, not proof that production changed.

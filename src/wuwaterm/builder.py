@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import CORE_TERM_KEYS, SourceProfile, get_source_profile
+from .data_source import SourceProvenance, inspect_data_source
 from .db import create_database
 from .models import TermRecord
 from .normalize import clean_source_text
@@ -265,8 +266,16 @@ def build_database(
     profile_name: str | None = None,
 ) -> int:
     profile = source_profile_for_data_dir(data_dir, profile_name)
+    provenance = inspect_data_source(data_dir, profile.name)
     records = iter_records(data_dir, profile.name)
-    create_database(db_path, records, source_profile=profile)
+    if inspect_data_source(data_dir, profile.name) != provenance:
+        raise BuildError("source provenance changed during database extraction")
+    create_database(
+        db_path,
+        records,
+        source_profile=profile,
+        source_provenance=provenance,
+    )
     return len(records)
 
 

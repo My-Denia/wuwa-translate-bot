@@ -15,17 +15,27 @@ class SourceProfile:
     sparse_paths: tuple[str, ...]
     textmap_root: str
     textmap_record_kind: str
+    version_file: str | None = None
+    expected_game_version: str | None = None
+    expected_resource_version: str | None = None
+    expected_changelist: str | None = None
+    representative_exact_hits: tuple[tuple[str, str], ...] = ()
 
 
 SOURCE_PROFILES = {
     "arikatsu": SourceProfile(
         name="arikatsu",
         repo_url="https://github.com/Arikatsu/WutheringWaves_Data.git",
-        pinned_commit="58ec43698d2b4e188cb285467ce1ae887612dd92",
+        pinned_commit="dae29691c04ef0f48d0810b5d244fb0b37288c60",
         layout="arikatsu_textmaps",
-        sparse_paths=("Textmaps", "BinData"),
+        sparse_paths=("README.md", "Textmaps", "BinData"),
         textmap_root="Textmaps",
         textmap_record_kind="id_content_arrays",
+        version_file="README.md",
+        expected_game_version="3.5.0",
+        expected_resource_version="3.5.5",
+        expected_changelist="8059200",
+        representative_exact_hits=(("穗穗", "Suisui"),),
     ),
     "dimbreath_legacy": SourceProfile(
         name="dimbreath_legacy",

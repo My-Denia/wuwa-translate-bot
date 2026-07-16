@@ -117,9 +117,10 @@ admin (see that section).
   `/sentence --to zh`, or `/sent --to zh`, the bot uses the replied-to text
   with the requested direction.
   Replying to a formatted text or caption preserves Telegram HTML formatting
-  through the LLM path. Dictionary exact and fuzzy hits remain official plain
-  text, and invalid translated markup falls back to plain text instead of
-  failing the reply.
+  through the LLM path. Tags, attributes, links, custom emoji ids, and entities
+  are replaced with opaque structural placeholders before the model sees only
+  visible text. Missing, duplicated, reordered, or newly injected structure
+  fails closed. Dictionary exact and fuzzy hits remain official plain text.
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
   user id; everyone else gets a short bilingual reply, default
@@ -137,8 +138,9 @@ admin (see that section).
 - `/status` is owner-only and reports operational counts and flags only:
   dictionary term count, data profile/short commit, LLM configured yes/no,
   channel auto-translation on/off, tracked channel-post count, allowlist/public
-  counts, channel reply persistence health, and message limits. It does not
-  print secrets, storage paths, or chat ids.
+  counts, channel reply persistence health, channel active/pending/high-water
+  counts, aggregate outcome counters, admission caps, and message limits. It
+  does not print secrets, storage paths, chat ids, message bodies, or URLs.
   Channel reply load/save failures are cumulative since process start; the
   last-load and last-save fields show whether the most recent persistence read
   or write succeeded.
@@ -220,11 +222,13 @@ post to Chinese. No command is involved.
   letters (`WUWATERM_CHANNEL_MIN_LATIN`, default 2) is translated to Chinese; a
   post with neither (emoji / links / numbers only) is skipped silently with
   zero LLM calls and zero throttle consumption.
-- The reply uses Telegram HTML (`parse_mode=HTML`) rendered from the
-  post's entities, with DB terms locked before the LLM call. If the
-  translated markup fails validation against Telegram's HTML subset, the
-  bot strips the tags and sends a plain-text reply instead — formatting
-  never fails the reply. If the translated output exceeds Telegram's
+- The reply uses Telegram HTML (`parse_mode=HTML`) rendered from the post's
+  entities. Every tag, attribute, link, custom emoji id, and entity is replaced
+  by an opaque placeholder before the LLM sees only visible text; DB terms in
+  visible text are locked separately. Placeholder count/order changes, unknown
+  tags, and raw structural injection fail closed with no delivery. If Telegram
+  rejects byte-preserved, locally validated HTML at delivery time, the bot may
+  retry the same translation as plain text. If the translated output exceeds Telegram's
   4096-character text message limit, the bot strips HTML formatting and sends
   the full translation as tracked plain-text chunks.
 - Dictionary-first still applies: a post that is exactly one official term
@@ -238,8 +242,14 @@ post to Chinese. No command is involved.
 - Channel auto-translation is a trusted publisher path. It does not share the
   ordinary public-member command throttle; it is bounded by allowlist,
   text/caption limits, direction checks, the LLM configuration/budget, and the
-  freshness gate below. Budget exhaustion still skips silently with one log
-  line — no notice comment under the post.
+  freshness gate below. `WUWATERM_CHANNEL_MAX_PENDING` (default 16) bounds the
+  waiting queue on top of `WUWATERM_LLM_MAX_CONCURRENCY`; queue-full posts are
+  skipped before an LLM call. `WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE` (default
+  60) is a rolling process-local call budget. A multi-chunk post atomically
+  reserves every required call before the first call, so it is either admitted
+  in full or skipped. Authorization, freshness, and edit currency are checked
+  again after a queue wait. Budget exhaustion skips silently with one
+  privacy-safe log line — no notice comment under the post.
 - Kill switch: `WUWATERM_CHANNEL_AUTOTRANSLATE`, default on.
 - Freshness gate: posts older than `WUWATERM_CHANNEL_MAX_AGE_SECONDS`
   (default 86400) are skipped silently. Linked-channel content is trusted, so

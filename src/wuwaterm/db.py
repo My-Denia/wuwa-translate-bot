@@ -6,10 +6,13 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from .constants import CATEGORY_ORDER, PINNED_WUTHERINGDATA_COMMIT, SourceProfile
+from .constants import CATEGORY_ORDER, SourceProfile
+from .data_source import SourceProvenance
 from .models import TermEntry, TermRecord
 from .normalize import normalize_text
 
+
+SCHEMA_VERSION = "2"
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -56,7 +59,12 @@ def create_database(
     db_path: str | Path,
     records: Iterable[TermRecord],
     source_profile: SourceProfile | None = None,
+    source_provenance: SourceProvenance | None = None,
 ) -> None:
+    if source_provenance is None:
+        raise ValueError("measured source_provenance is required")
+    if source_profile is not None and source_provenance.profile != source_profile.name:
+        raise ValueError("source profile and measured provenance disagree")
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -64,23 +72,21 @@ def create_database(
     conn = connect(path)
     try:
         initialize(conn)
-        commit = (
-            source_profile.pinned_commit
-            if source_profile is not None
-            else PINNED_WUTHERINGDATA_COMMIT
-        )
-        conn.execute(
+        metadata = {
+            "schema_version": SCHEMA_VERSION,
+            "source_profile": source_provenance.profile,
+            "source_repo_url": source_provenance.repo_url,
+            "source_commit": source_provenance.commit,
+            "source_game_version": source_provenance.game_version,
+            "source_resource_version": source_provenance.resource_version,
+            "source_changelist": source_provenance.changelist,
+            # Compatibility key used by /about and /status.
+            "wutheringdata_commit": source_provenance.commit,
+        }
+        conn.executemany(
             "INSERT INTO metadata(key, value) VALUES (?, ?)",
-            ("wutheringdata_commit", commit),
+            sorted(metadata.items()),
         )
-        if source_profile is not None:
-            conn.executemany(
-                "INSERT INTO metadata(key, value) VALUES (?, ?)",
-                (
-                    ("source_profile", source_profile.name),
-                    ("source_repo_url", source_profile.repo_url),
-                ),
-            )
         insert_records(conn, records)
         conn.commit()
         conn.execute("VACUUM")
