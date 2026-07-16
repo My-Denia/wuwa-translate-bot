@@ -12,10 +12,24 @@ import time
 from pathlib import Path
 from typing import Callable, Literal
 
+from .channel_reply_schema import (
+    CHANNEL_REPLY_INDEX_VERSION,
+    ChannelReplyPayloadError,
+    parse_channel_reply_payload,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 CHANNEL_REPLY_INDEX_MAX_ENTRIES = 1024
 OriginalPostClaimRole = Literal["producer", "waiter", "done"]
+
+
+class ChannelReplyIndexDurabilityError(OSError):
+    """The new file is visible but its directory entry may not be durable."""
+
+
+def _flush_file(file) -> None:
+    file.flush()
 
 
 @dataclass(frozen=True)
@@ -63,6 +77,7 @@ class ChannelReplyIndex:
         self._last_load_ok: bool | None = None
         self._save_failures = 0
         self._last_save_ok: bool | None = None
+        self._last_save_durable: bool | None = None
         self._load()
 
     def remember(
@@ -304,6 +319,9 @@ class ChannelReplyIndex:
     def last_save_succeeded(self) -> bool | None:
         return self._last_save_ok
 
+    def last_save_durable(self) -> bool | None:
+        return self._last_save_durable
+
     def _record_load_failure(
         self, message: str = "channel reply index unreadable, starting empty"
     ) -> None:
@@ -320,32 +338,21 @@ class ChannelReplyIndex:
         except (OSError, json.JSONDecodeError):
             self._record_load_failure()
             return
-        if not isinstance(payload, dict):
+        try:
+            rows, skipped_malformed_rows = parse_channel_reply_payload(
+                payload, allow_partial=True
+            )
+        except ChannelReplyPayloadError:
             self._record_load_failure()
             return
-        rows = payload.get("entries")
-        if not isinstance(rows, list):
-            self._record_load_failure()
-            return
-        skipped_malformed_rows = False
         now = self._clock()
         for row in rows:
-            if not isinstance(row, dict):
-                skipped_malformed_rows = True
+            if row.expires_at <= now:
                 continue
-            try:
-                chat_id = int(row["chat_id"])
-                message_id = int(row["message_id"])
-                expires_at = float(row["expires_at"])
-                reply_ids = tuple(int(item) for item in row["reply_message_ids"])
-            except (KeyError, TypeError, ValueError):
-                skipped_malformed_rows = True
-                continue
-            if expires_at <= now or not reply_ids:
-                if not reply_ids:
-                    skipped_malformed_rows = True
-                continue
-            self._entries[(chat_id, message_id)] = (expires_at, reply_ids)
+            self._entries[(row.chat_id, row.message_id)] = (
+                row.expires_at,
+                row.reply_message_ids,
+            )
         if skipped_malformed_rows:
             self._record_load_failure(
                 "channel reply index contained malformed rows"
@@ -360,12 +367,19 @@ class ChannelReplyIndex:
             return
         try:
             self._save()
+        except ChannelReplyIndexDurabilityError:
+            self._save_failures += 1
+            self._last_save_ok = True
+            self._last_save_durable = False
+            LOGGER.warning("channel reply index durability uncertain")
         except OSError:
             self._save_failures += 1
             self._last_save_ok = False
+            self._last_save_durable = False
             LOGGER.warning("channel reply index save failed")
         else:
             self._last_save_ok = True
+            self._last_save_durable = True
 
     def _save(self) -> None:
         assert self.storage_path is not None
@@ -382,14 +396,24 @@ class ChannelReplyIndex:
                     "reply_message_ids": list(reply_ids),
                 }
             )
-        payload = {"version": 1, "entries": rows}
+        payload = {"version": CHANNEL_REPLY_INDEX_VERSION, "entries": rows}
         fd, tmp = tempfile.mkstemp(
             prefix=f".{self.storage_path.name}.", dir=self.storage_path.parent
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+                _flush_file(f)
+                os.fsync(f.fileno())
             os.replace(tmp, self.storage_path)
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(self.storage_path.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                raise ChannelReplyIndexDurabilityError() from exc
+            finally:
+                os.close(directory_fd)
         except Exception:
             try:
                 os.unlink(tmp)

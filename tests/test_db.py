@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import hashlib
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from wuwaterm.constants import get_source_profile
+from wuwaterm.data_source import SourceProvenance
+from wuwaterm.db import create_database
+from wuwaterm.models import TermRecord
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture()
+def verified_db(tmp_path):
+    profile = get_source_profile("arikatsu")
+    provenance = SourceProvenance(
+        profile=profile.name,
+        repo_url=profile.repo_url,
+        commit=profile.pinned_commit,
+        game_version=profile.expected_game_version or "",
+        resource_version=profile.expected_resource_version or "",
+        changelist=profile.expected_changelist or "",
+    )
+    records = [
+        TermRecord(
+            category=category,
+            source_file=f"{category}.json",
+            source_id=str(index),
+            text_key=f"{category}_{index}",
+            zh="穗穗" if category == "resonator" else f"测试{index}",
+            en="Suisui" if category == "resonator" else f"Test {index}",
+        )
+        for index, category in enumerate(
+            (
+                "core_term",
+                "resonator",
+                "weapon",
+                "echo",
+                "item",
+                "skill",
+                "sonata_effect",
+                "location",
+            ),
+            start=1,
+        )
+    ]
+    path = tmp_path / "terms.candidate.db"
+    create_database(
+        path,
+        records,
+        source_profile=profile,
+        source_provenance=provenance,
+    )
+    return path
+
+
+def _verify(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_db.py"), str(path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def _copy_db(source: Path, tmp_path: Path, name: str) -> Path:
+    target = tmp_path / name
+    shutil.copy2(source, target)
+    return target
+
+
+def test_strong_verifier_accepts_complete_candidate_read_only(verified_db):
+    before = hashlib.sha256(verified_db.read_bytes()).hexdigest()
+
+    result = _verify(verified_db)
+
+    assert result.returncode == 0, result.stderr
+    assert "source_commit\tdae29691c04ef0f48d0810b5d244fb0b37288c60" in result.stdout
+    assert "source_changelist\t8059200" in result.stdout
+    assert hashlib.sha256(verified_db.read_bytes()).hexdigest() == before
+
+
+def test_database_creation_requires_measured_provenance(tmp_path):
+    target = tmp_path / "terms.db"
+    target.write_bytes(b"old database")
+
+    with pytest.raises(ValueError, match="measured source_provenance"):
+        create_database(target, [])
+
+    assert target.read_bytes() == b"old database"
+
+
+@pytest.mark.parametrize(
+    ("name", "mutation"),
+    [
+        (
+            "metadata",
+            "UPDATE metadata SET value = 'wrong' WHERE key = 'source_commit'",
+        ),
+        ("schema", "CREATE TABLE unexpected(value TEXT)"),
+        ("index", "DROP INDEX idx_terms_zh_norm"),
+        ("category", "DELETE FROM terms WHERE category = 'item'"),
+        ("exact", "UPDATE terms SET en = 'Wrong' WHERE zh = '穗穗'"),
+    ],
+)
+def test_strong_verifier_rejects_invalid_candidate(
+    verified_db, tmp_path, name, mutation
+):
+    candidate = _copy_db(verified_db, tmp_path, f"{name}.db")
+    with sqlite3.connect(candidate) as conn:
+        conn.execute(mutation)
+
+    result = _verify(candidate)
+
+    assert result.returncode == 1
+    assert "database verification failed" in result.stderr
+
+
+def test_strong_verifier_rejects_corrupt_database(verified_db, tmp_path):
+    candidate = _copy_db(verified_db, tmp_path, "corrupt.db")
+    data = candidate.read_bytes()
+    candidate.write_bytes(data[: len(data) // 2])
+
+    result = _verify(candidate)
+
+    assert result.returncode == 1
+    assert "database verification failed" in result.stderr

@@ -3,6 +3,35 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Data And Deployment
+
+- Updated the active source profile to Wuthering Waves 3.5.0 / resource 3.5.5
+  / changelist 8059200 at exact upstream commit
+  `dae29691c04ef0f48d0810b5d244fb0b37288c60`, with observed checkout and
+  README provenance recorded in generated DB metadata.
+- Added read-only strong candidate verification, including schema, integrity,
+  metadata, category, and `穗穗 -> Suisui` exact-hit gates.
+- Made VPS updates transactional around a separately verified candidate and
+  immutable revision-labelled image, with DB/image/pointer rollback and an
+  immutable deployment manifest. Builder containers no longer receive the
+  runtime `.env`.
+
+### Telegram Runtime
+
+- Protected every Telegram HTML tag, attribute, link, custom emoji id, and
+  entity with opaque structural placeholders so only visible text reaches the
+  translator; structural drift now fails closed.
+- Added bounded linked-channel admission, atomic multi-chunk LLM call budgets,
+  post-queue freshness/authorization checks, privacy-safe outcome telemetry,
+  and owner status counters.
+- Hardened linked-channel reply-index schema validation and persistence
+  diagnostics, including explicit reporting when directory durability is
+  uncertain.
+- Avoided fuzzy dictionary scans for long translation inputs while retaining
+  exact and short ASCII/pinyin lookup behavior.
+
 ## 0.1.0 - 2026-07-04
 
 Initial release preparation for the self-hosted WuWa Term Bot.

@@ -3,8 +3,9 @@
 ## Offline Validation
 
 ```bash
-.venv/bin/python scripts/verify_seed_terms.py data/terms.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
-.venv/bin/python scripts/verify_exact_hits.py data/terms.db --sample-size 500
+.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
+.venv/bin/python scripts/verify_seed_terms.py data/terms.candidate.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
+.venv/bin/python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
@@ -15,6 +16,10 @@ uv lock --check
 `verify_idempotent_build.py` compares SHA256 over LF-normalized SQLite logical
 dumps, not raw database bytes, so Windows/Linux SQLite formatting differences
 do not create false mismatches.
+
+All database checks above target the candidate. They do not promote or replace
+`data/terms.db`; production promotion belongs to the transactional deployment
+workflow after every candidate gate passes.
 
 ## Live Telegram Smoke
 

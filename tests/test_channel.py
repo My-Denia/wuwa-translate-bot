@@ -15,6 +15,7 @@ from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 from wuwaterm.bot import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
+    CHANNEL_RUNTIME_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     RATE_LIMITER_KEY,
@@ -287,15 +288,31 @@ def placeholder_for(locks, official):
     raise AssertionError(f"missing official lock {official}")
 
 
+def html_with_segments(locked_text: str, *segments: str) -> str:
+    placeholders = re.findall(r"__WUWA_HTML_[0-9a-f]{16}_[0-9]{4}__", locked_text)
+    assert len(segments) == len(placeholders) + 1
+    parts: list[str] = []
+    for segment, placeholder in zip(segments, placeholders, strict=False):
+        parts.extend((segment, placeholder))
+    parts.append(segments[-1])
+    return "".join(parts)
+
+
 def test_cn_formatted_post_gets_html_reply_with_tags_and_locks(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
+    def response(locked_text, locks):
         jinhsi = placeholder_for(locks, "Jinhsi")
         echo = placeholder_for(locks, "Echo")
-        return (
-            f'<b>{jinhsi}</b> says <a href="https://example.com">{echo}</a>'
-            f" is <tg-spoiler>strong</tg-spoiler>"
+        return html_with_segments(
+            locked_text,
+            "",
+            jinhsi,
+            " says ",
+            echo,
+            " is ",
+            "strong",
+            "",
         )
 
     enable_mock_llm(monkeypatch, calls, response)
@@ -327,7 +344,7 @@ def test_channel_autotranslate_uses_default_llm_timeout(monkeypatch, sample_db):
     seen: list[float] = []
 
     async def fake_call(
-        _locked_text,
+        locked_text,
         _locks,
         html_mode=False,
         to_chinese=False,
@@ -335,7 +352,9 @@ def test_channel_autotranslate_uses_default_llm_timeout(monkeypatch, sample_db):
         transport=None,
     ):
         seen.append(timeout_seconds)
-        return "translated"
+        return html_with_segments(
+            locked_text, "", "translated", "", "", "", "", ""
+        )
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML)
@@ -345,7 +364,14 @@ def test_channel_autotranslate_uses_default_llm_timeout(monkeypatch, sample_db):
 
     assert seen == [DEFAULT_LLM_TIMEOUT_SECONDS]
     assert DEFAULT_LLM_TIMEOUT_SECONDS == 45.0
-    assert message.replies == [("translated", "HTML", 4001)]
+    assert message.replies == [
+        (
+            '<b>translated</b><a href="https://example.com"></a>'
+            "<tg-spoiler></tg-spoiler>",
+            "HTML",
+            4001,
+        )
+    ]
 
 
 def test_non_translatable_post_is_silent_and_consumes_no_throttle(monkeypatch, sample_db):
@@ -375,10 +401,12 @@ def test_non_translatable_post_is_silent_and_consumes_no_throttle(monkeypatch, s
 def test_english_post_translates_to_chinese_html(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
+    def response(locked_text, locks):
         jinhsi = placeholder_for(locks, "Jinhsi")
         echo = placeholder_for(locks, "Echo")
-        return f"<b>{jinhsi}</b>装备了<tg-spoiler>{echo}</tg-spoiler>"
+        return html_with_segments(
+            locked_text, "", jinhsi, "装备了", echo, ""
+        )
 
     enable_mock_llm(monkeypatch, calls, response)
     update, message = channel_update(
@@ -423,7 +451,7 @@ def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db):
     assert len(calls) == 1
 
 
-def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):
+def test_structurally_changed_llm_html_fails_closed(monkeypatch, sample_db):
     calls = []
 
     def response(_locked_text, locks):
@@ -437,16 +465,15 @@ def test_invalid_llm_html_falls_back_to_plain_reply(monkeypatch, sample_db):
 
     asyncio.run(channel_post_handler(update, context))
 
-    assert message.replies == [("Jinhsi says Echo is strong", None, 4020)]
-    assert "<" not in message.replies[0][0]
+    assert message.replies == []
 
 
 def test_caption_post_uses_same_html_pipeline(monkeypatch, sample_db):
     calls = []
 
-    def response(_locked_text, locks):
+    def response(locked_text, locks):
         jinhsi = placeholder_for(locks, "Jinhsi")
-        return f"<b>{jinhsi}</b> arrives"
+        return html_with_segments(locked_text, "", jinhsi, " arrives")
 
     enable_mock_llm(monkeypatch, calls, response)
     update, message = channel_update(
@@ -582,7 +609,263 @@ def test_budget_exhaustion_is_silent_with_one_clean_warning(
     warning_text = warnings[0].getMessage()
     assert "max_budget" not in warning_text
     assert "429" not in warning_text
-    assert re.search(r"\d", warning_text) is None
+    assert CN_TEXT not in warning_text
+    assert "127.0.0.1" not in warning_text
+    assert "test-key" not in warning_text
+    assert "stage=llm" in warning_text
+
+
+def test_channel_llm_burst_is_bounded_and_queue_full_is_observable(
+    monkeypatch, sample_db
+):
+    async def run() -> None:
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        release = asyncio.Event()
+        started = 0
+
+        async def fake_call(*_args, **_kwargs):
+            nonlocal started
+            started += 1
+            await release.wait()
+            return "translated"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        config = BotConfig(
+            owner_user_id=11,
+            llm_max_concurrency=1,
+            channel_max_pending=1,
+            channel_llm_calls_per_minute=10,
+        )
+        context = make_context(sample_db, config=config)
+        updates = [channel_update(text=CN_TEXT, message_id=4700 + index) for index in range(3)]
+        tasks = [
+            asyncio.create_task(channel_post_handler(update, context))
+            for update, _message in updates
+        ]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+        snapshot = runtime.snapshot()
+        assert started == 1
+        assert snapshot.active == 1
+        assert snapshot.pending == 1
+        assert snapshot.outcomes["skipped:queue_full"] == 1
+
+        release.set()
+        await asyncio.gather(*tasks)
+        assert started == 2
+        assert updates[2][1].replies == []
+        assert runtime.snapshot().active == 0
+        assert runtime.snapshot().pending == 0
+
+    asyncio.run(run())
+
+
+def test_channel_multichunk_budget_rejects_before_first_llm_call(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    calls = []
+
+    async def fake_call(*_args, **_kwargs):
+        calls.append(True)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    context = make_context(
+        sample_db,
+        config=BotConfig(
+            owner_user_id=11,
+            channel_text_limit=4096,
+            channel_llm_calls_per_minute=2,
+        ),
+    )
+    update, message = channel_update(text="中" * 4096, message_id=4710)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert calls == []
+    assert message.replies == []
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    assert runtime.snapshot().outcomes["skipped:llm_budget"] == 1
+
+
+def test_channel_rechecks_freshness_after_waiting_for_llm_slot(
+    monkeypatch, sample_db
+):
+    async def run() -> None:
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        current = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls, _tz=None):
+                return current
+
+        monkeypatch.setattr("wuwaterm.channel.datetime", FakeDateTime)
+        release = asyncio.Event()
+        calls = 0
+
+        async def fake_call(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return "translated"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(
+            sample_db,
+            config=BotConfig(
+                owner_user_id=11,
+                llm_max_concurrency=1,
+                channel_max_pending=1,
+                channel_max_age_seconds=1,
+            ),
+        )
+        first, _ = channel_update(text=CN_TEXT, message_id=4720, date=current)
+        second, second_message = channel_update(
+            text=CN_TEXT, message_id=4721, date=current
+        )
+        first_task = asyncio.create_task(channel_post_handler(first, context))
+        await asyncio.sleep(0)
+        second_task = asyncio.create_task(channel_post_handler(second, context))
+        await asyncio.sleep(0)
+        current += timedelta(seconds=2)
+        release.set()
+        await asyncio.gather(first_task, second_task)
+
+        assert calls == 1
+        assert second_message.replies == []
+        runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+        assert runtime.snapshot().outcomes["skipped:stale_after_wait"] == 1
+
+    asyncio.run(run())
+
+
+def test_channel_rechecks_freshness_after_slow_llm_before_delivery(
+    monkeypatch, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    current = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, _tz=None):
+            return current
+
+    monkeypatch.setattr("wuwaterm.channel.datetime", FakeDateTime)
+    calls = 0
+
+    async def slow_call(*_args, **_kwargs):
+        nonlocal calls, current
+        calls += 1
+        current += timedelta(seconds=2)
+        return "translated"
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", slow_call)
+    context = make_context(
+        sample_db,
+        config=BotConfig(owner_user_id=11, channel_max_age_seconds=1),
+    )
+    update, message = channel_update(text=CN_TEXT, message_id=4725, date=current)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert calls == 1
+    assert message.replies == []
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    assert runtime.snapshot().outcomes["skipped:stale_before_delivery"] == 1
+
+
+def test_queued_edit_rechecks_freshness_after_delivery_lock(
+    monkeypatch, sample_db
+):
+    async def run() -> None:
+        monkeypatch.setenv(
+            "WUWATERM_OPENAI_BASE_URL", "https://gateway.example/v1"
+        )
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        current = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        class FakeDateTime:
+            @classmethod
+            def now(cls, _tz=None):
+                return current
+
+        monkeypatch.setattr("wuwaterm.channel.datetime", FakeDateTime)
+        llm_completed = asyncio.Event()
+
+        async def fake_call(*_args, **_kwargs):
+            llm_completed.set()
+            return "translated"
+
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_max_age_seconds=1),
+        )
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4726, date=current
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("translated", "HTML", 4726)]
+
+        reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+        lock = reply_index.edit_delivery_lock(-2001, 4726)
+        await lock.acquire()
+        llm_completed.clear()
+        edit, edit_message = channel_update(
+            text=f"{CN_TEXT}更新",
+            message_id=4726,
+            update_id=200,
+            date=current,
+            edit_date=current,
+        )
+        task = asyncio.create_task(channel_post_handler(edit, context))
+        await asyncio.wait_for(llm_completed.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        current += timedelta(seconds=2)
+        lock.release()
+        await asyncio.wait_for(task, timeout=0.2)
+
+        assert edit_message.replies == []
+        assert context.bot.edits == []
+        runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+        assert runtime.snapshot().outcomes["skipped:stale_before_delivery"] == 1
+
+    asyncio.run(run())
+
+
+def test_channel_delivery_failure_is_safe_and_observable(monkeypatch, sample_db, caplog):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
+    context = make_context(sample_db)
+    update, message = channel_update(text=CN_TEXT, message_id=4730)
+
+    async def fail_delivery(_text: str, **_kwargs):
+        raise TelegramError("sensitive upstream detail")
+
+    message.reply_text = fail_delivery
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    outcomes = runtime.snapshot().outcomes
+    assert outcomes["delivery:TelegramError"] == 1
+    assert "sensitive upstream detail" not in caplog.text
+    assert CN_TEXT not in caplog.text
 
 
 def test_kill_switch_disables_listener_without_llm(monkeypatch, sample_db):
@@ -1320,7 +1603,7 @@ def test_long_channel_html_reply_is_split_to_plain_chunks(monkeypatch, sample_db
     enable_mock_llm(
         monkeypatch,
         calls,
-        lambda _locked_text, _locks: f"<b>{long_visible_text}</b>",
+        lambda _locked_text, _locks: long_visible_text,
     )
     context = make_context(sample_db)
     update, message = channel_update(text=CN_TEXT, message_id=4280)
@@ -1353,7 +1636,7 @@ def test_long_channel_emoji_reply_is_split_by_telegram_utf16_units(
     enable_mock_llm(
         monkeypatch,
         calls,
-        lambda _locked_text, _locks: f"<b>{long_visible_text}</b>",
+        lambda _locked_text, _locks: long_visible_text,
     )
     context = make_context(sample_db)
     update, message = channel_update(text=CN_TEXT, message_id=4285)
@@ -1385,7 +1668,7 @@ def test_long_channel_reply_remembers_sent_chunks_after_mid_send_failure(
     enable_mock_llm(
         monkeypatch,
         calls,
-        lambda _locked_text, _locks: f"<div>{long_visible_text}</div>",
+        lambda _locked_text, _locks: long_visible_text,
     )
     context = make_context(sample_db)
     update, message = channel_update(text=CN_TEXT, message_id=4288)
@@ -1401,8 +1684,7 @@ def test_long_channel_reply_remembers_sent_chunks_after_mid_send_failure(
 
     message.reply_text = flaky_reply_text
 
-    with pytest.raises(BadRequest, match="temporary send failed"):
-        asyncio.run(channel_post_handler(update, context))
+    asyncio.run(channel_post_handler(update, context))
 
     assert len(message.replies) == 1
     assert send_attempts == ["E" * TELEGRAM_TEXT_MESSAGE_LIMIT, "E" * 12]
@@ -1440,7 +1722,7 @@ def test_long_channel_edit_remembers_continuations_after_mid_send_failure(
 ):
     calls = []
     long_visible_text = "F" * (TELEGRAM_TEXT_MESSAGE_LIMIT * 2 + 7)
-    responses = iter(["short translation", f"<div>{long_visible_text}</div>"])
+    responses = iter(["short translation", long_visible_text])
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
     context = make_context(sample_db)
 
@@ -1460,8 +1742,7 @@ def test_long_channel_edit_remembers_continuations_after_mid_send_failure(
 
     edit_message.reply_text = flaky_reply_text
 
-    with pytest.raises(BadRequest, match="temporary continuation send failed"):
-        asyncio.run(channel_post_handler(edit_update, context))
+    asyncio.run(channel_post_handler(edit_update, context))
 
     assert context.bot.edits == [
         ("F" * TELEGRAM_TEXT_MESSAGE_LIMIT, None, -2001, 5291)
@@ -1600,6 +1881,9 @@ def test_long_channel_edit_reply_gone_does_not_send_continuation_chunks(
     assert len(bot.edit_attempts) == 1
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
     assert reply_index.get_many(-2001, 4298) == ()
+    outcomes = context.application.bot_data[CHANNEL_RUNTIME_KEY].snapshot().outcomes
+    assert outcomes["delivery:edit_target_unavailable"] == 1
+    assert outcomes["delivery:success"] == 1  # original delivery only
     assert len(calls) == 2
 
 
@@ -1707,6 +1991,8 @@ def test_channel_edit_keeps_failed_delete_tracked_for_retry(
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
     assert bot.deleted_messages == [(-2001, 5304)]
     assert reply_index.get_many(-2001, 4303) == (5303, 5304)
+    outcomes = context.application.bot_data[CHANNEL_RUNTIME_KEY].snapshot().outcomes
+    assert outcomes["delivery:stale_chunks_retained"] == 1
 
     second_edit_update, _ = channel_update(
         text=CN_TEXT, message_id=4303, edit_date=datetime.now(timezone.utc)
@@ -1813,10 +2099,12 @@ def test_edit_identical_translation_is_silent_noop(monkeypatch, sample_db):
 def test_edit_invalid_html_falls_back_to_plain_edit(monkeypatch, sample_db):
     # An HTML edit Telegram rejects re-raises into the plain-edit fallback,
     # mirroring the new-post fallback — formatting never fails the update.
-    def response(_locked_text, locks):
+    def response(locked_text, locks):
         jinhsi = placeholder_for(locks, "Jinhsi")
         echo = placeholder_for(locks, "Echo")
-        return f'<b>{jinhsi}</b> says <a href="https://example.com">{echo}</a> is strong'
+        return html_with_segments(
+            locked_text, "", jinhsi, " says ", echo, " is strong", "", ""
+        )
 
     calls = []
     enable_mock_llm(monkeypatch, calls, response)

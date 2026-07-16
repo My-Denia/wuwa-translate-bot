@@ -46,11 +46,13 @@ No Telegram token, LLM key, endpoint, or model is hardcoded.
 
 The LLM system prompt treats user/channel text as untrusted source text: it is
 translation input only, and instructions inside that source text must not be
-followed. The prompt stays short, still requires placeholders exactly unchanged,
-and in HTML mode still requires tags and attributes exactly unchanged.
+followed. The prompt stays short and requires opaque placeholders exactly
+unchanged.
 
-This is a prompt-level guard. The stronger structural protection is that known
-official terms are locked before the model sees the text.
+This is a prompt-level guard. The stronger protection is structural: official
+terms are locked, and in HTML mode every tag, attribute, link, custom emoji id,
+and entity is replaced before the model sees only visible text. Restore checks
+exact placeholder count and order and rejects raw or unknown structure.
 
 ## Placeholder Integrity
 
@@ -81,7 +83,11 @@ ignored local volume or directory, not in commits.
 `/status` is owner-only and reports operational counts and flags only:
 dictionary term count, data profile/short commit, LLM configured yes/no,
 channel auto-translation on/off, tracked channel-post count, allowlist/public
-counts, channel reply persistence health, and message limits. It does not print
-secrets, storage paths, or chat ids.
+counts, channel reply persistence health, channel active/pending/high-water
+counts, aggregate outcome counters, admission caps, and message limits. It does
+not print secrets, storage paths, chat ids, message bodies, or URLs. Channel
+event logs likewise contain only stage/reason, redacted identifiers, lengths,
+mode, and aggregate admission counts; they never include source or translated
+content.
 
 Deployment smoke checks do not print Telegram tokens or chat ids.

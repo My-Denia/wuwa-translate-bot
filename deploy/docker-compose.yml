@@ -4,7 +4,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       target: runtime
-    image: wuwaterm-runtime:local
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:-unknown}
+    image: ${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}
     container_name: wuwaterm-bot
     restart: unless-stopped
     network_mode: host
@@ -28,11 +30,10 @@ services:
       target: builder
     image: wuwaterm-builder:local
     network_mode: host
-    env_file:
-      - ../.env
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db
       WUWATERM_DATA_DIR: /app/data/wutheringdata
+      WUWATERM_SOURCE_PROFILE: ${WUWATERM_SOURCE_PROFILE:-arikatsu}
     volumes:
       - ../data:/app/data
     command: ["verify-db"]

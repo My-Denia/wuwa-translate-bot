@@ -12,6 +12,8 @@ htmlcov/
 data/
 state/
 goal-runs/
+.deployments/
+.deploy_commit
 *.db
 *.sqlite
 *.sqlite3

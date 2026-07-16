@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Deque
+from urllib.parse import urlparse
 
 from telegram import ChatMember, Update
 from telegram.error import BadRequest, TelegramError
@@ -29,6 +30,8 @@ from telegram.ext import (
 
 from .channel import channel_post_handler
 from .channel_reply_index import ChannelReplyIndex
+from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_payload
+from .channel_runtime import ChannelRuntime
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
 from .normalize import has_cjk
@@ -42,6 +45,7 @@ from .sentence import (
 from .runtime_keys import (
     ADMIN_CACHE_KEY,
     CHANNEL_REPLY_INDEX_KEY,
+    CHANNEL_RUNTIME_KEY,
     CHAT_SETTINGS_KEY,
     CONFIG_KEY,
     RATE_LIMITER_KEY,
@@ -245,6 +249,8 @@ class BotConfig:
     channel_text_limit: int = 4096
     channel_caption_limit: int = 1024
     channel_max_age_seconds: int = DEFAULT_CHANNEL_MAX_AGE_SECONDS
+    channel_max_pending: int = 16
+    channel_llm_calls_per_minute: int = 60
     channel_reply_index_path: str | None = None
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY
@@ -303,6 +309,18 @@ class BotConfig:
                 minimum=1,
                 maximum=2592000,
             ),
+            channel_max_pending=_env_int(
+                "WUWATERM_CHANNEL_MAX_PENDING",
+                16,
+                minimum=0,
+                maximum=1024,
+            ),
+            channel_llm_calls_per_minute=_env_int(
+                "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE",
+                60,
+                minimum=1,
+                maximum=10000,
+            ),
             channel_reply_index_path=(
                 os.getenv("WUWATERM_CHANNEL_REPLY_INDEX_PATH", "").strip() or None
             ),
@@ -337,6 +355,33 @@ def _owner_user_id_from_env() -> int | None:
         "OWNER_USER_ID is not configured; private /tr will reject everyone"
     )
     return None
+
+
+def _validate_llm_config_env() -> None:
+    values = {
+        "WUWATERM_OPENAI_BASE_URL": (
+            os.getenv("WUWATERM_OPENAI_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or ""
+        ).strip(),
+        "WUWATERM_OPENAI_API_KEY": (
+            os.getenv("WUWATERM_OPENAI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        ).strip(),
+        "WUWATERM_OPENAI_MODEL": os.getenv("WUWATERM_OPENAI_MODEL", "").strip(),
+    }
+    configured = [name for name, value in values.items() if value]
+    if not configured:
+        return
+    if len(configured) != len(values):
+        missing = ", ".join(name for name, value in values.items() if not value)
+        raise BotConfigError(f"incomplete LLM configuration; missing: {missing}")
+    parsed = urlparse(values["WUWATERM_OPENAI_BASE_URL"])
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise BotConfigError(
+            "WUWATERM_OPENAI_BASE_URL must be an absolute HTTP(S) URL"
+        )
 
 
 class PerChatRateLimiter:
@@ -672,6 +717,7 @@ def create_application(
     chat_settings: ChatSettings | None = None,
 ) -> Application:
     config = config or BotConfig.from_env()
+    _validate_llm_config_env()
     if chat_settings is None:
         chat_settings = ChatSettings(_chat_settings_path_from_env(db_path))
     app = (
@@ -694,6 +740,11 @@ def create_application(
     app.bot_data[CHANNEL_REPLY_INDEX_KEY] = ChannelReplyIndex(
         ttl_seconds=config.channel_max_age_seconds,
         storage_path=_channel_reply_index_path(config, db_path),
+    )
+    app.bot_data[CHANNEL_RUNTIME_KEY] = ChannelRuntime(
+        max_active=config.llm_max_concurrency,
+        max_pending=config.channel_max_pending,
+        llm_calls_per_minute=config.channel_llm_calls_per_minute,
     )
     app.bot_data[CHAT_SETTINGS_KEY] = chat_settings
     app.add_handler(CommandHandler(["tr", "term"], term_command, block=False))
@@ -827,26 +878,14 @@ def _validate_state_file(path: Path, *, label: str) -> None:
             payload = json.load(file)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise StateMigrationError(f"invalid {label} state file") from exc
-    if not isinstance(payload, dict):
-        raise StateMigrationError(f"invalid {label} state file")
     if label != "channel reply index":
-        return
-    entries = payload.get("entries")
-    if not isinstance(entries, list):
-        raise StateMigrationError(f"invalid {label} state file")
-    for row in entries:
-        if not isinstance(row, dict):
+        if not isinstance(payload, dict):
             raise StateMigrationError(f"invalid {label} state file")
-        try:
-            int(row["chat_id"])
-            int(row["message_id"])
-            float(row["expires_at"])
-            reply_ids = row["reply_message_ids"]
-            if not isinstance(reply_ids, list) or not reply_ids:
-                raise ValueError
-            tuple(int(item) for item in reply_ids)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise StateMigrationError(f"invalid {label} state file") from exc
+        return
+    try:
+        parse_channel_reply_payload(payload)
+    except ChannelReplyPayloadError as exc:
+        raise StateMigrationError(f"invalid {label} state file") from exc
 
 
 def _fsync_state_parent(path: Path) -> None:
@@ -1302,7 +1341,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     reply_index: ChannelReplyIndex = context.application.bot_data[
         CHANNEL_REPLY_INDEX_KEY
     ]
-    await reply_to_user(update, _status_text(service, config, settings, reply_index))
+    channel_runtime = context.application.bot_data.get(CHANNEL_RUNTIME_KEY)
+    if not isinstance(channel_runtime, ChannelRuntime):
+        channel_runtime = ChannelRuntime(
+            max_active=config.llm_max_concurrency,
+            max_pending=config.channel_max_pending,
+            llm_calls_per_minute=config.channel_llm_calls_per_minute,
+        )
+        context.application.bot_data[CHANNEL_RUNTIME_KEY] = channel_runtime
+    await reply_to_user(
+        update,
+        _status_text(service, config, settings, reply_index, channel_runtime),
+    )
 
 
 def _about_text(service: TermService, config: BotConfig) -> str:
@@ -1327,6 +1377,7 @@ def _status_text(
     config: BotConfig,
     settings: ChatSettings,
     reply_index: ChannelReplyIndex,
+    channel_runtime: ChannelRuntime,
 ) -> str:
     meta = service.metadata()
     commit = meta.get("wutheringdata_commit") or "unknown"
@@ -1338,6 +1389,10 @@ def _status_text(
     # the health fields below report the refreshed state.
     tracked_channel_posts = reply_index.entry_count()
     reply_index_persistence = "on" if reply_index.persistence_enabled() else "off"
+    channel_snapshot = channel_runtime.snapshot()
+    channel_outcomes = ",".join(
+        f"{key}={value}" for key, value in channel_snapshot.outcomes.items()
+    ) or "none"
     return (
         "wuwaterm /status\n"
         f"Dictionary terms: {service.term_count()}\n"
@@ -1351,6 +1406,12 @@ def _status_text(
         f"Channel reply last load: {_reply_index_last_load_status(reply_index)}\n"
         f"Channel reply save failures: {reply_index.save_failure_count()}\n"
         f"Channel reply last save: {_reply_index_last_save_status(reply_index)}\n"
+        f"Channel translation active: {channel_snapshot.active}\n"
+        f"Channel translation pending: {channel_snapshot.pending}\n"
+        f"Channel translation high-water: {channel_snapshot.high_water}\n"
+        f"Channel translation outcomes: {channel_outcomes}\n"
+        f"Channel pending cap: {config.channel_max_pending}\n"
+        f"Channel LLM call budget: {config.channel_llm_calls_per_minute}/min\n"
         f"Authorized chats: {settings.allowed_count()}\n"
         f"Public chats: {settings.public_count()}\n"
         f"Rate limit: {config.rate_limit_per_minute}/min per chat\n"
@@ -1376,6 +1437,8 @@ def _reply_index_last_save_status(reply_index: ChannelReplyIndex) -> str:
     last_save = reply_index.last_save_succeeded()
     if last_save is None:
         return "not attempted"
+    if last_save and reply_index.last_save_durable() is False:
+        return "durability uncertain"
     return "ok" if last_save else "failed"
 
 
@@ -1403,13 +1466,15 @@ def translate_query(
     # Direction is auto-detected by default; explicit command flags override it.
     # Dictionary and LLM honor the same target direction.
     to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
-    result = service.lookup(prepared, limit=5)
+    result = service.lookup_exact(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return official
-    if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
-        return result.best.entry.zh if to_chinese else result.best.entry.en
+    if _is_ascii_fuzzy_query(prepared):
+        fuzzy = service.lookup(prepared, limit=5)
+        if fuzzy.best and fuzzy.best.score >= 80.0:
+            return fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = translator.translate(prepared, to_chinese=to_chinese)
@@ -1431,13 +1496,15 @@ async def translate_query_async(
     # Direction is auto-detected by default; explicit command flags override it.
     # Dictionary and LLM honor the same target direction.
     to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
-    result = service.lookup(prepared, limit=5)
+    result = service.lookup_exact(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return official
-    if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
-        return result.best.entry.zh if to_chinese else result.best.entry.en
+    if _is_ascii_fuzzy_query(prepared):
+        fuzzy = service.lookup(prepared, limit=5)
+        if fuzzy.best and fuzzy.best.score >= 80.0:
+            return fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = await translator.translate_async(prepared, to_chinese=to_chinese)
@@ -1459,15 +1526,17 @@ async def translate_request_async(
     # Direction is auto-detected from the visible text unless the command
     # supplies an explicit target. Dictionary and LLM use the same direction.
     to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
-    result = service.lookup(prepared, limit=5)
+    result = service.lookup_exact(prepared, limit=5)
     if result.exact and result.best:
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return TranslationReply(official)
-    if _is_ascii_fuzzy_query(prepared) and result.best and result.best.score >= 80.0:
-        return TranslationReply(
-            result.best.entry.zh if to_chinese else result.best.entry.en
-        )
+    if _is_ascii_fuzzy_query(prepared):
+        fuzzy = service.lookup(prepared, limit=5)
+        if fuzzy.best and fuzzy.best.score >= 80.0:
+            return TranslationReply(
+                fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
+            )
     if len(prepared) > input_limit:
         return TranslationReply(
             f"Input is too long for translation ({input_limit} character limit)."
