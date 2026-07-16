@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tomllib
@@ -17,6 +18,7 @@ from wuwaterm.data_source import SourceProvenance
 from wuwaterm.db import create_database
 from wuwaterm.models import TermRecord
 
+import scripts.deployment_manifest as deployment_manifest_module
 from scripts.deployment_manifest import build_manifest, verify_manifest, write_manifest
 
 
@@ -434,6 +436,29 @@ def test_historical_manifest_readback_survives_a_later_data_pin(
     assert verified["database"]["provenance"]["source_commit"] == (
         current.pinned_commit
     )
+
+
+def test_read_db_provenance_closes_database_connection(monkeypatch, tmp_path):
+    db_path = tmp_path / "terms.db"
+    _deployment_db(db_path, "close-check")
+    real_connect = sqlite3.connect
+    closed: list[bool] = []
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    def tracking_connect(*args, **kwargs):
+        return real_connect(*args, factory=TrackingConnection, **kwargs)
+
+    monkeypatch.setattr(
+        deployment_manifest_module.sqlite3, "connect", tracking_connect
+    )
+
+    deployment_manifest_module.read_db_provenance(db_path)
+
+    assert closed == [True]
 
 
 @pytest.fixture()

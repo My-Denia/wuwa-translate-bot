@@ -8,6 +8,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,9 @@ def read_db_provenance(
     if not path.is_file():
         raise ManifestError(f"database is missing: {path}")
     try:
-        with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        with closing(
+            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conn:
             rows = conn.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
     except sqlite3.Error as exc:
         raise ManifestError(f"cannot read database provenance: {exc}") from exc
