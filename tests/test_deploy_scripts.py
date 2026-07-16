@@ -87,13 +87,18 @@ def test_vps_update_freezes_legacy_state_only_after_database_is_ready():
 def test_vps_update_durably_promotes_and_restores_database_and_pointer():
     text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
 
+    backup = text.index(
+        'python3 scripts/deployment_manifest.py durable-replace \\\n'
+        '    --source "$db_backup_tmp" --destination "$db_backup"'
+    )
+    backup_hash = text.index('sha256sum "$db_backup"', backup)
     promotion = text.index(
         'db_promoted=1\npython3 scripts/deployment_manifest.py durable-replace'
     )
     pointer = text.index(
         'pointer_published=1\npython3 scripts/deployment_manifest.py publish-pointer'
     )
-    assert promotion < pointer
+    assert backup < backup_hash < promotion < pointer
     assert (
         'python3 scripts/deployment_manifest.py durable-remove \\\n'
         '        --path "$db_path"'
@@ -633,6 +638,14 @@ def deploy_harness(tmp_path):
         "set -eu\n"
         f"real_python={shlex.quote(sys.executable)}\n"
         "case \"$*\" in\n"
+        "  *'deployment_manifest.py durable-replace --source data/terms.db.backup.'*)\n"
+        "    \"$real_python\" \"$@\"\n"
+        "    if [ \"${FAKE_DB_BACKUP_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected database backup durability failure' >&2\n"
+        "      exit 98\n"
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
         "  *'deployment_manifest.py durable-replace --source data/candidates/'*)\n"
         "    if [ \"${FAKE_DB_PROMOTION_PRE_REPLACE_FAILURE:-0}\" = 1 ]; then\n"
         "      exit 94\n"
@@ -723,6 +736,38 @@ def test_vps_update_failure_injection_preserves_previous_binding(
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
     assert list((root / "data" / "deployment-backups").glob("*.deploy_commit"))
+
+
+def test_vps_update_refuses_promotion_when_backup_durability_is_uncertain(
+    deploy_harness,
+):
+    root, env, old_hash, _new_hash = deploy_harness
+    env["FAKE_DB_BACKUP_DURABILITY_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 98
+    assert "injected database backup durability failure" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    assert not any("stop wuwaterm" in line for line in docker_lines)
+    assert not any(
+        "up -d --no-build --force-recreate wuwaterm" in line
+        for line in docker_lines
+    )
 
 
 @pytest.mark.parametrize(

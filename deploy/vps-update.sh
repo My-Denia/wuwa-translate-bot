@@ -141,7 +141,22 @@ fail_if image
 if [ "$old_db_present" -eq 1 ]; then
   old_db_hash="$(sha256sum "$db_path" | awk '{print $1}')"
   db_backup="$backup_dir/terms.$deployment_id.$old_db_hash.db"
-  cp -p "$db_path" "$db_backup"
+  db_backup_tmp="$db_path.backup.$deployment_id"
+  if [ -e "$db_backup" ] || [ -e "$db_backup_tmp" ]; then
+    echo "refusing to overwrite an existing database backup" >&2
+    exit 1
+  fi
+  cp -p "$db_path" "$db_backup_tmp"
+  # The source temp lives in data/ while the destination lives in the backup
+  # directory. durable-replace therefore fsyncs the backup file, the backup
+  # directory, and data/ (which also makes a newly created backup directory
+  # durable) before the live database can be promoted.
+  python3 scripts/deployment_manifest.py durable-replace \
+    --source "$db_backup_tmp" --destination "$db_backup"
+  if [ "$(sha256sum "$db_backup" | awk '{print $1}')" != "$old_db_hash" ]; then
+    echo "database backup verification failed" >&2
+    exit 1
+  fi
 else
   db_backup="none"
 fi
