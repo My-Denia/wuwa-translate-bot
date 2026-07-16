@@ -735,6 +735,31 @@ def test_generic_llm_failure_returns_bilingual_unavailable_notice(monkeypatch, s
     assert translator.translate("这是一个需要翻译的句子。") == TRANSLATION_UNAVAILABLE_NOTICE
 
 
+def test_async_translator_can_propagate_safe_failure_reason(monkeypatch, sample_db):
+    enable_llm_env(monkeypatch)
+
+    async def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE, reason="rate_limit"
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        assert (
+            await translator.translate_async("这是一个需要翻译的句子。")
+            == TRANSLATION_UNAVAILABLE_NOTICE
+        )
+        with pytest.raises(LLMTranslationError) as exc_info:
+            await translator.translate_async(
+                "这是一个需要翻译的句子。", propagate_errors=True
+            )
+        assert exc_info.value.reason == "rate_limit"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "transport",
     [

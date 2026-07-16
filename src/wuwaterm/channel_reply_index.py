@@ -407,13 +407,14 @@ class ChannelReplyIndex:
                 os.fsync(f.fileno())
             os.replace(tmp, self.storage_path)
             directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            directory_fd = os.open(self.storage_path.parent, directory_flags)
             try:
-                os.fsync(directory_fd)
+                directory_fd = os.open(self.storage_path.parent, directory_flags)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             except OSError as exc:
                 raise ChannelReplyIndexDurabilityError() from exc
-            finally:
-                os.close(directory_fd)
         except Exception:
             try:
                 os.unlink(tmp)

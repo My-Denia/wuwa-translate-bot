@@ -247,6 +247,7 @@ class SentenceTranslator:
         *,
         to_chinese: bool = False,
         before_llm_call=None,
+        propagate_errors: bool = False,
     ) -> str:
         prepared = self.prepare_text(text)
         if not prepared:
@@ -276,6 +277,8 @@ class SentenceTranslator:
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
+            if propagate_errors:
+                raise
             return exc.user_message
 
     def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:

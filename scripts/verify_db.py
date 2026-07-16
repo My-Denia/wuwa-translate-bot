@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,7 +179,7 @@ def verify_database(
     profile = get_source_profile(profile_name)
     checks = profile.representative_exact_hits if exact_hits is None else exact_hits
     errors: list[str] = []
-    with _connect_read_only(Path(path)) as conn:
+    with closing(_connect_read_only(Path(path))) as conn:
         try:
             integrity = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
         except sqlite3.Error as exc:

@@ -69,6 +69,9 @@ image-ID checks pass does it create and read back
 The manifest contains source commit, image ref/ID/digest/revision, DB SHA-256,
 DB source profile/commit/game/resource/changelist, deployment UTC, and backup
 path. It is mode read-only and never overwritten with different content.
+Re-running the same source commit is accepted only when its image and database
+binding is byte-for-byte identical; a different rebuild must use a new source
+commit instead of deleting or rewriting the historical manifest.
 
 Any post-promotion state/start/smoke/manifest/pointer failure restores the old
 DB, recreates the runtime from the tagged old image, and restores or removes

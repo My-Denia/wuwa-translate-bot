@@ -32,7 +32,7 @@ from .telegram_text import (
     split_telegram_text,
     telegram_text_units,
 )
-from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
+from .translation_policy import LLM_INPUT_CHAR_LIMIT
 
 if TYPE_CHECKING:
     from .bot import BotConfig
@@ -705,9 +705,8 @@ async def _translate_channel_input(
             chunk,
             to_chinese=to_chinese,
             before_llm_call=before_llm_call,
+            propagate_errors=True,
         )
-        if translated in LLM_FAILURE_NOTICES:
-            raise LLMTranslationError(translated)
         translated_chunks.append(translated)
     return "\n".join(translated_chunks), None, "plain-input-split"
 

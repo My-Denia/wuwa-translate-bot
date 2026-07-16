@@ -179,3 +179,26 @@ def test_channel_reply_directory_fsync_reports_uncertain_with_new_file_readable(
     assert index.last_save_succeeded() is True
     assert index.last_save_durable() is False
     assert index.save_failure_count() == 1
+
+
+def test_channel_reply_directory_open_failure_reports_uncertain_after_replace(
+    monkeypatch, tmp_path
+) -> None:
+    path = tmp_path / "channel_replies.json"
+    index = ChannelReplyIndex(storage_path=path, clock=lambda: 1000.0)
+    index.remember(1, 1, 101)
+    real_open = os.open
+
+    def fail_directory_open(path_arg, flags, *args, **kwargs):
+        if os.fspath(path_arg) == os.fspath(tmp_path):
+            raise OSError("directory open failed")
+        return real_open(path_arg, flags, *args, **kwargs)
+
+    monkeypatch.setattr("wuwaterm.channel_reply_index.os.open", fail_directory_open)
+    index.remember(2, 2, 202)
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert {row["chat_id"] for row in persisted["entries"]} == {1, 2}
+    assert index.last_save_succeeded() is True
+    assert index.last_save_durable() is False
+    assert index.save_failure_count() == 1

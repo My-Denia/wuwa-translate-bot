@@ -14,6 +14,8 @@ from wuwaterm.data_source import SourceProvenance
 from wuwaterm.db import create_database
 from wuwaterm.models import TermRecord
 
+from scripts import verify_db as verify_db_module
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,6 +90,25 @@ def test_strong_verifier_accepts_complete_candidate_read_only(verified_db):
     assert "source_commit\tdae29691c04ef0f48d0810b5d244fb0b37288c60" in result.stdout
     assert "source_changelist\t8059200" in result.stdout
     assert hashlib.sha256(verified_db.read_bytes()).hexdigest() == before
+
+
+def test_imported_verifier_closes_read_only_connection(monkeypatch, verified_db):
+    closed = []
+    real_connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    def tracking_connect(*args, **kwargs):
+        return real_connect(*args, factory=TrackingConnection, **kwargs)
+
+    monkeypatch.setattr(verify_db_module.sqlite3, "connect", tracking_connect)
+
+    verify_db_module.verify_database(verified_db)
+
+    assert closed == [True]
 
 
 def test_database_creation_requires_measured_provenance(tmp_path):

@@ -615,6 +615,33 @@ def test_budget_exhaustion_is_silent_with_one_clean_warning(
     assert "stage=llm" in warning_text
 
 
+def test_long_channel_failure_keeps_granular_reason(monkeypatch, sample_db, caplog):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError("unavailable", reason="rate_limit")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = channel_update(text=CN_TEXT * 160, message_id=4061)
+    context = make_context(sample_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == []
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "wuwaterm.channel"
+    ]
+    assert len(warnings) == 1
+    assert "stage=llm" in warnings[0]
+    assert "reason=rate_limit" in warnings[0]
+    assert CN_TEXT not in warnings[0]
+
+
 def test_channel_llm_burst_is_bounded_and_queue_full_is_observable(
     monkeypatch, sample_db
 ):
