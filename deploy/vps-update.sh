@@ -159,14 +159,36 @@ rollback_on_failure() {
   fi
 
   echo "deployment failed; restoring previous database, image and pointer" >&2
+  rollback_failed=0
+  db_binding_restored=1
   if [ "$db_promoted" -eq 1 ]; then
     if [ "$old_db_present" -eq 1 ]; then
       restore_tmp="$db_path.rollback.$deployment_id"
-      cp -p "$db_backup" "$restore_tmp"
-      python3 scripts/deployment_manifest.py durable-replace \
-        --source "$restore_tmp" --destination "$db_path"
+      if ! cp -p "$db_backup" "$restore_tmp"; then
+        echo "warning: could not prepare database rollback copy" >&2
+        rollback_failed=1
+      elif ! python3 scripts/deployment_manifest.py durable-replace \
+        --source "$restore_tmp" --destination "$db_path"; then
+        echo "warning: restored database durability could not be confirmed" >&2
+        rollback_failed=1
+      fi
+      if [ ! -f "$db_path" ] || \
+        [ "$(sha256sum "$db_path" | awk '{print $1}')" != "$old_db_hash" ]; then
+        echo "warning: old database content was not restored" >&2
+        rollback_failed=1
+        db_binding_restored=0
+      fi
     else
-      python3 scripts/deployment_manifest.py durable-remove --path "$db_path"
+      if ! python3 scripts/deployment_manifest.py durable-remove \
+        --path "$db_path"; then
+        echo "warning: database removal durability could not be confirmed" >&2
+        rollback_failed=1
+      fi
+      if [ -e "$db_path" ]; then
+        echo "warning: promoted database still exists after rollback" >&2
+        rollback_failed=1
+        db_binding_restored=0
+      fi
     fi
   fi
 
@@ -175,31 +197,57 @@ rollback_on_failure() {
       if ! python3 scripts/deployment_manifest.py publish-pointer \
         --path "$pointer_path" --source-commit "$old_pointer"; then
         echo "warning: restored pointer durability could not be confirmed" >&2
+        rollback_failed=1
       fi
     else
-      python3 scripts/deployment_manifest.py durable-remove \
-        --path "$pointer_path"
+      if ! python3 scripts/deployment_manifest.py durable-remove \
+        --path "$pointer_path"; then
+        echo "warning: pointer removal durability could not be confirmed" >&2
+        rollback_failed=1
+      fi
     fi
   fi
 
   if [ "$runtime_stopped" -eq 1 ]; then
     if [ -n "$old_image_id" ]; then
-      WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" compose up -d --no-build \
-        --force-recreate wuwaterm || true
+      if [ "$db_binding_restored" -eq 1 ]; then
+        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+          compose up -d --no-build --force-recreate wuwaterm; then
+          echo "warning: old runtime image could not be restarted" >&2
+          rollback_failed=1
+        fi
+      else
+        echo "warning: refusing to restart old runtime without its database" >&2
+        rollback_failed=1
+        if ! compose stop wuwaterm >/dev/null 2>&1; then
+          echo "warning: replacement runtime could not be stopped" >&2
+        fi
+      fi
     else
-      compose stop wuwaterm >/dev/null 2>&1 || true
+      if ! compose stop wuwaterm >/dev/null 2>&1; then
+        echo "warning: replacement runtime could not be stopped" >&2
+        rollback_failed=1
+      fi
     fi
   fi
 
   if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ]; then
-    python3 scripts/deployment_manifest.py verify \
+    if ! python3 scripts/deployment_manifest.py verify \
       --path "$manifest_dir/$old_pointer.json" \
       --source-commit "$old_pointer" \
       --image-id "$old_image_id" \
-      --db "$db_path" || echo "warning: restored deployment binding verification failed" >&2
-    python3 scripts/deployment_manifest.py verify-pointer \
-      --path "$pointer_path" --source-commit "$old_pointer" \
-      || echo "warning: restored deployment pointer verification failed" >&2
+      --db "$db_path"; then
+      echo "warning: restored deployment binding verification failed" >&2
+      rollback_failed=1
+    fi
+    if ! python3 scripts/deployment_manifest.py verify-pointer \
+      --path "$pointer_path" --source-commit "$old_pointer"; then
+      echo "warning: restored deployment pointer verification failed" >&2
+      rollback_failed=1
+    fi
+  fi
+  if [ "$rollback_failed" -ne 0 ]; then
+    echo "warning: rollback completed with errors; manual recovery is required" >&2
   fi
   exit "$status"
 }

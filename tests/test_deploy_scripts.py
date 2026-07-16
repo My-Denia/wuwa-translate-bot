@@ -95,7 +95,8 @@ def test_vps_update_durably_promotes_and_restores_database_and_pointer():
     )
     assert promotion < pointer
     assert (
-        'python3 scripts/deployment_manifest.py durable-remove --path "$db_path"'
+        'python3 scripts/deployment_manifest.py durable-remove \\\n'
+        '        --path "$db_path"'
         in text
     )
     assert '--path "$pointer_path"' in text
@@ -651,6 +652,10 @@ def deploy_harness(tmp_path):
         "    exit 0\n"
         "    ;;\n"
         "  *'deployment_manifest.py durable-replace --source data/terms.db.rollback.'*)\n"
+        "    if [ \"${FAKE_DB_ROLLBACK_CONTENT_FAILURE:-0}\" = 1 ]; then\n"
+        "      echo 'injected rollback content failure' >&2\n"
+        "      exit 91\n"
+        "    fi\n"
         "    \"$real_python\" \"$@\"\n"
         "    if [ \"${FAKE_DB_ROLLBACK_DURABILITY_FAILURE:-0}\" = 1 ]; then\n"
         "      echo 'injected rollback durability failure' >&2\n"
@@ -755,7 +760,7 @@ def test_vps_update_rolls_back_after_replace_before_durability_confirmation(
 
 def test_vps_update_surfaces_rollback_durability_failure(deploy_harness):
     root, env, old_hash, _new_hash = deploy_harness
-    env["FAKE_DB_PROMOTION_DURABILITY_FAILURE"] = "1"
+    env["WUWATERM_FAIL_STEP"] = "pointer"
     env["FAKE_DB_ROLLBACK_DURABILITY_FAILURE"] = "1"
 
     result = subprocess.run(
@@ -768,11 +773,21 @@ def test_vps_update_surfaces_rollback_durability_failure(deploy_harness):
         check=False,
     )
 
-    assert result.returncode == 93
+    assert result.returncode == 97
     assert "injected rollback durability failure" in result.stderr
+    assert "restored database durability could not be confirmed" in result.stderr
+    assert "rollback completed with errors; manual recovery is required" in result.stderr
     assert (
         hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
         == old_hash
+    )
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+    docker_log = (root / "docker.log").read_text(encoding="utf-8")
+    assert any(
+        "rollback-" in line
+        and "up -d --no-build --force-recreate wuwaterm" in line
+        for line in docker_log.splitlines()
     )
 
 
@@ -800,6 +815,54 @@ def test_vps_update_reports_pointer_rollback_durability_failure(deploy_harness):
     )
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+
+
+def test_vps_update_stops_replacement_when_old_database_cannot_be_restored(
+    deploy_harness,
+):
+    root, env, old_hash, new_hash = deploy_harness
+    env["WUWATERM_FAIL_STEP"] = "pointer"
+    env["FAKE_DB_ROLLBACK_CONTENT_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 97
+    assert "injected rollback content failure" in result.stderr
+    assert "old database content was not restored" in result.stderr
+    assert "refusing to restart old runtime without its database" in result.stderr
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == new_hash
+    )
+    assert new_hash != old_hash
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    stop_indices = [
+        index
+        for index, line in enumerate(docker_lines)
+        if "stop wuwaterm" in line
+    ]
+    new_runtime_up_index = next(
+        index
+        for index, line in enumerate(docker_lines)
+        if "rollback-" not in line
+        and "up -d --no-build --force-recreate wuwaterm" in line
+    )
+    assert len(stop_indices) == 2
+    assert stop_indices[0] < new_runtime_up_index < stop_indices[1]
+    assert not any(
+        "rollback-" in line
+        and "up -d --no-build --force-recreate wuwaterm" in line
+        for line in docker_lines
+    )
 
 
 def test_vps_update_removes_new_pointer_when_no_previous_pointer_existed(
