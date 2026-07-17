@@ -228,6 +228,20 @@ release commit, then create the release and upload only those assets:
 
 ```bash
 NEXT_VERSION=vX.Y.Z
+reviewed_main_commit=<reviewed-main-commit-sha>
+
+# Every gate below must abort publication on failure.
+set -euo pipefail
+
+# Build from the exact reviewed commit, not whatever the checkout drifted to.
+test "$(git rev-parse HEAD)" = "$reviewed_main_commit"
+test -z "$(git status --porcelain --untracked-files=all)"
+
+# The tag must match the declared package version so a 0.2.0 wheel cannot be
+# published under a different release tag.
+declared_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+test "v$declared_version" = "$NEXT_VERSION"
+
 python -m pip install --upgrade build twine  # not in the dev extra; or: uv pip install build twine
 python -m build
 python -m twine check --strict dist/*
@@ -246,7 +260,7 @@ python -m venv "$smoke_dir/sdist-venv"
 "$smoke_dir/sdist-venv/bin/python" -c "import wuwaterm"
 "$smoke_dir/sdist-venv/bin/wuwaterm" --help
 
-gh release create "$NEXT_VERSION" --target <reviewed-main-commit-sha> --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+gh release create "$NEXT_VERSION" --target "$reviewed_main_commit" --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md dist/*.whl dist/*.tar.gz dist/SHA256SUMS
 ```
 
 After creation, re-download the assets and verify them against `SHA256SUMS`
