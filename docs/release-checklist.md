@@ -3,6 +3,13 @@
 Use this checklist before publishing a GitHub release. Do not attach generated
 SQLite databases, TextMap files, or bulk game data to the release.
 
+The only authorized release assets are the audited source-only Python package
+artifacts built from the exact release commit: one wheel, one sdist, and a
+`SHA256SUMS` file covering both. Every asset must pass
+`scripts/check_package_artifacts.py`, `twine check --strict`, and a
+clean-environment install/import/CLI smoke before upload. Nothing else may be
+attached.
+
 ## Release Metadata
 
 - Prospective release version: `<next-version>` (set `NEXT_VERSION` explicitly
@@ -27,6 +34,9 @@ Run the full offline validation set from a clean checkout:
 python scripts/check_repo_hygiene.py
 python scripts/check_non_goals.py
 python -m pytest
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
 ```
 
 For a locally built release candidate database, also run:
@@ -115,9 +125,11 @@ esac
 gh release view "$NEXT_VERSION" --json tagName,targetCommitish,url,assets
 ```
 
-Create the release with no asset paths. After creation, verify that the release
-has no assets and that `refs/tags/$NEXT_VERSION` points at the reviewed release
-target.
+Create the release with only the authorized package assets (wheel, sdist,
+`SHA256SUMS`), all built from the exact reviewed release commit and audited
+before upload. After creation, verify that the release carries exactly those
+assets — re-download them and check `sha256sum -c SHA256SUMS` — and that
+`refs/tags/$NEXT_VERSION` points at the reviewed release target.
 For an annotated tag, compare the reviewed target against the peeled commit ref
 `refs/tags/$NEXT_VERSION^{}`; otherwise compare against the tag ref itself:
 
@@ -182,6 +194,12 @@ an OpenAI-compatible endpoint only when the operator configures one. Do not
 include tokens, API keys, chat IDs, owner IDs, `.env` files, runtime settings, or
 deployment logs in release materials.
 
+### Assets
+
+This release attaches the audited source-only Python package artifacts built
+from the exact release commit: one wheel, one sdist, and `SHA256SUMS`. Verify
+downloads with `sha256sum -c SHA256SUMS`.
+
 ### Distribution Boundary
 
 This release distributes source code only. It does not distribute generated
@@ -204,7 +222,17 @@ local `RELEASE_NOTES.md` file and review it; that file is a maintainer working
 artifact, not a required committed file. Replace `<reviewed-main-commit-sha>`
 with the exact `origin/main` commit that passed CI and review.
 
+Build and audit the release assets from a clean checkout of the exact reviewed
+release commit, then create the release and upload only those assets:
+
 ```bash
 NEXT_VERSION=vX.Y.Z
-gh release create "$NEXT_VERSION" --target <reviewed-main-commit-sha> --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
+(cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
+gh release create "$NEXT_VERSION" --target <reviewed-main-commit-sha> --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md dist/*.whl dist/*.tar.gz dist/SHA256SUMS
 ```
+
+After creation, re-download the assets and verify them against `SHA256SUMS`
+before reporting the release as published.
