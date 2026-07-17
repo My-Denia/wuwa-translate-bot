@@ -34,6 +34,7 @@ Run the full offline validation set from a clean checkout:
 python scripts/check_repo_hygiene.py
 python scripts/check_non_goals.py
 python -m pytest
+python -m pip install --upgrade build twine  # not in the dev extra; or: uv pip install build twine
 python -m build
 python -m twine check --strict dist/*
 python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
@@ -227,10 +228,24 @@ release commit, then create the release and upload only those assets:
 
 ```bash
 NEXT_VERSION=vX.Y.Z
+python -m pip install --upgrade build twine  # not in the dev extra; or: uv pip install build twine
 python -m build
 python -m twine check --strict dist/*
 python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
 (cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
+
+# Smoke the exact artifacts being uploaded, not CI's separately built copies:
+# clean-venv install + import + CLI for both the wheel and the sdist.
+smoke_dir="$(mktemp -d)"
+python -m venv "$smoke_dir/wheel-venv"
+"$smoke_dir/wheel-venv/bin/pip" install --no-cache-dir dist/*.whl
+"$smoke_dir/wheel-venv/bin/python" -c "import wuwaterm"
+"$smoke_dir/wheel-venv/bin/wuwaterm" --help
+python -m venv "$smoke_dir/sdist-venv"
+"$smoke_dir/sdist-venv/bin/pip" install --no-cache-dir dist/*.tar.gz
+"$smoke_dir/sdist-venv/bin/python" -c "import wuwaterm"
+"$smoke_dir/sdist-venv/bin/wuwaterm" --help
+
 gh release create "$NEXT_VERSION" --target <reviewed-main-commit-sha> --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md dist/*.whl dist/*.tar.gz dist/SHA256SUMS
 ```
 
