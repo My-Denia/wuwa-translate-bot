@@ -273,10 +273,24 @@ python -m venv "$smoke_dir/sdist-venv"
 # published release with missing assets; set -e cannot roll back a remote
 # mutation. Verify the draft's assets, then publish.
 gh release create "$NEXT_VERSION" --draft --target "$reviewed_main_commit" --title "$NEXT_VERSION" --notes-file "$notes_file" dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+
+# Run every integrity gate while the release is still a draft: asset count,
+# re-downloaded checksums, and a repeat tag-absence check. GitHub ignores
+# target_commitish when the tag already exists, so a tag created by another
+# actor between preflight and publish would silently retarget the release.
 test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" -eq 3
+verify_dir="$(mktemp -d)"
+gh release download "$NEXT_VERSION" --dir "$verify_dir"
+(cd "$verify_dir" && sha256sum -c SHA256SUMS)
+tag_lookup_status=0
+git ls-remote --exit-code --tags origin "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
+test "$tag_lookup_status" -eq 2  # the tag must still be absent right before publish
+
 gh release edit "$NEXT_VERSION" --draft=false
 ```
 
-After publishing, re-download the assets and verify them against `SHA256SUMS`
-before reporting the release as published. If a draft is left behind by a
-failed upload, delete the draft (drafts have no tag yet) and rerun the block.
+After publishing, verify that `refs/tags/$NEXT_VERSION` resolves to
+`$reviewed_main_commit` (see the readback block above), and re-download the
+published assets against `SHA256SUMS` before reporting the release as
+published. If a draft is left behind by a failed upload, delete the draft
+(drafts have no tag yet) and rerun the block.
