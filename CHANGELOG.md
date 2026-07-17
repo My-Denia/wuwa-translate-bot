@@ -5,6 +5,19 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### CI And Packaging
+
+- Added `scripts/check_package_artifacts.py`, a wheel/sdist content audit that
+  fails on generated databases, game data, runtime state, environment files,
+  deployment internals, secret-looking files, missing package members, and
+  version-metadata drift against `pyproject.toml`.
+- Extended default CI with lockfile drift checking (`uv lock --check` pinned to
+  the deploy image's uv version), wheel/sdist build with strict metadata
+  validation and clean-venv install/import/CLI smoke for both artifacts,
+  deploy shell script syntax checks, compose config validation, and Docker
+  runtime/builder boundary assertions (runtime refuses non-bot commands and
+  ships without git/uv).
+
 ### Data And Deployment
 
 - Updated the active source profile to Wuthering Waves 3.5.0 / resource 3.5.5
