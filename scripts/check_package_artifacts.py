@@ -9,6 +9,7 @@ artifact metadata disagrees with the version declared in pyproject.toml.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tarfile
 import tomllib
@@ -18,6 +19,14 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = "wuwaterm"
 
+# Declared versions must already be in canonical PEP 440 form so the audit can
+# predict the exact dist-info/sdist directory names the build backend emits.
+CANONICAL_VERSION_RE = re.compile(
+    r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$"
+)
+
+# All name-based checks compare casefolded values so case variants such as
+# terms.DB or TEXTMAP/ cannot slip past the gate.
 FORBIDDEN_SUFFIXES = (
     ".db",
     ".sqlite",
@@ -34,10 +43,10 @@ FORBIDDEN_SEGMENTS = {
     ".deployments",
     "deploy",
     "tests",
-    "TextMap",
-    "Textmaps",
-    "ConfigDB",
-    "BinData",
+    "textmap",
+    "textmaps",
+    "configdb",
+    "bindata",
 }
 FORBIDDEN_NAME_PREFIXES = (
     ".env",
@@ -73,12 +82,12 @@ def declared_version(pyproject_path: Path | None = None) -> str:
 
 def forbidden_member_reason(member: str) -> str | None:
     path = PurePosixPath(member)
-    name = path.name
+    name = path.name.casefold()
     lowered = member.casefold()
     if name.endswith(FORBIDDEN_SUFFIXES):
         return f"forbidden file type: {member}"
     for part in path.parts:
-        if part in FORBIDDEN_SEGMENTS:
+        if part.casefold() in FORBIDDEN_SEGMENTS:
             return f"forbidden path segment {part!r}: {member}"
     for prefix in FORBIDDEN_NAME_PREFIXES:
         if name.startswith(prefix):
@@ -201,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
 
     expected = args.expect_version or declared_version()
     failures: list[str] = []
+    if not CANONICAL_VERSION_RE.fullmatch(expected):
+        failures.append(
+            f"declared version {expected!r} is not canonical PEP 440; the"
+            " audit cannot predict backend-normalized artifact names"
+        )
     wheel_count = 0
     sdist_count = 0
     for artifact in args.artifacts:

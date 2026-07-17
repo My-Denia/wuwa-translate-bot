@@ -105,6 +105,15 @@ def test_forbidden_member_reasons():
     assert forbidden_member_reason("vps.credential.xml")
 
 
+def test_forbidden_member_is_case_insensitive():
+    assert forbidden_member_reason("wuwaterm/terms.DB")
+    assert forbidden_member_reason("wuwaterm/key.PEM")
+    assert forbidden_member_reason("TEXTMAP/en/MultiText.json")
+    assert forbidden_member_reason("textmap/en/MultiText.json")
+    assert forbidden_member_reason("Data/terms.db")
+    assert forbidden_member_reason(".ENV")
+
+
 def test_forbidden_member_allows_normal_source():
     assert forbidden_member_reason("wuwaterm/__init__.py") is None
     assert forbidden_member_reason("wuwaterm/data_source.py") is None
@@ -197,3 +206,9 @@ def test_main_requires_wheel_and_sdist(tmp_path: Path):
 
 def test_main_reports_missing_artifact(tmp_path: Path):
     assert main([str(tmp_path / "absent.whl"), "--expect-version", VERSION]) == 1
+
+
+def test_main_rejects_noncanonical_version(tmp_path: Path):
+    wheel = build_wheel(tmp_path / f"wuwaterm-{VERSION}-py3-none-any.whl")
+    sdist = build_sdist(tmp_path / f"wuwaterm-{VERSION}.tar.gz")
+    assert main([str(wheel), str(sdist), "--expect-version", "1.0-1"]) == 1
