@@ -34,7 +34,13 @@ Run the full offline validation set from a clean checkout:
 python scripts/check_repo_hygiene.py
 python scripts/check_non_goals.py
 python -m pytest
-python -m pip install --upgrade build twine  # not in the dev extra; or: uv pip install build twine
+```
+
+Packaging validation additionally needs `build` and `twine`, which are not in
+the `dev` extra; installing them requires package-index access:
+
+```bash
+python -m pip install --upgrade build twine  # or: uv pip install build twine
 python -m build
 python -m twine check --strict dist/*
 python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
@@ -219,9 +225,11 @@ SQLite databases, generated TextMap files, or Wuthering Waves game data.
 
 Do not run this command until CI and review are green and repository policy
 allows publishing a release. First copy the release note template above into a
-local `RELEASE_NOTES.md` file and review it; that file is a maintainer working
-artifact, not a required committed file. Replace `<reviewed-main-commit-sha>`
-with the exact `origin/main` commit that passed CI and review.
+release-notes file OUTSIDE the checkout (for example
+`"$(mktemp -d)/RELEASE_NOTES.md"`) and review it; it is a maintainer working
+artifact, not a committed file, and keeping it outside the checkout keeps the
+clean-tree gate below meaningful. Replace `<reviewed-main-commit-sha>` with the
+exact `origin/main` commit that passed CI and review.
 
 Build and audit the release assets from a clean checkout of the exact reviewed
 release commit, then create the release and upload only those assets:
@@ -229,6 +237,7 @@ release commit, then create the release and upload only those assets:
 ```bash
 NEXT_VERSION=vX.Y.Z
 reviewed_main_commit=<reviewed-main-commit-sha>
+notes_file=<path-to-release-notes-outside-the-checkout>
 
 # Every gate below must abort publication on failure.
 set -euo pipefail
@@ -260,8 +269,14 @@ python -m venv "$smoke_dir/sdist-venv"
 "$smoke_dir/sdist-venv/bin/python" -c "import wuwaterm"
 "$smoke_dir/sdist-venv/bin/wuwaterm" --help
 
-gh release create "$NEXT_VERSION" --target "$reviewed_main_commit" --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+# Create as a DRAFT first so a failed or partial asset upload never leaves a
+# published release with missing assets; set -e cannot roll back a remote
+# mutation. Verify the draft's assets, then publish.
+gh release create "$NEXT_VERSION" --draft --target "$reviewed_main_commit" --title "$NEXT_VERSION" --notes-file "$notes_file" dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" -eq 3
+gh release edit "$NEXT_VERSION" --draft=false
 ```
 
-After creation, re-download the assets and verify them against `SHA256SUMS`
-before reporting the release as published.
+After publishing, re-download the assets and verify them against `SHA256SUMS`
+before reporting the release as published. If a draft is left behind by a
+failed upload, delete the draft (drafts have no tag yet) and rerun the block.
