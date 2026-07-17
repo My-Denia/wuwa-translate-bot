@@ -3,6 +3,13 @@
 Use this checklist before publishing a GitHub release. Do not attach generated
 SQLite databases, TextMap files, or bulk game data to the release.
 
+The only authorized release assets are the audited source-only Python package
+artifacts built from the exact release commit: one wheel, one sdist, and a
+`SHA256SUMS` file covering both. Every asset must pass
+`scripts/check_package_artifacts.py`, `twine check --strict`, and a
+clean-environment install/import/CLI smoke before upload. Nothing else may be
+attached.
+
 ## Release Metadata
 
 - Prospective release version: `<next-version>` (set `NEXT_VERSION` explicitly
@@ -27,6 +34,16 @@ Run the full offline validation set from a clean checkout:
 python scripts/check_repo_hygiene.py
 python scripts/check_non_goals.py
 python -m pytest
+```
+
+Packaging validation additionally needs `build` and `twine`, which are not in
+the `dev` extra; installing them requires package-index access:
+
+```bash
+python -m pip install --upgrade build twine  # or: uv pip install build twine
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
 ```
 
 For a locally built release candidate database, also run:
@@ -115,9 +132,11 @@ esac
 gh release view "$NEXT_VERSION" --json tagName,targetCommitish,url,assets
 ```
 
-Create the release with no asset paths. After creation, verify that the release
-has no assets and that `refs/tags/$NEXT_VERSION` points at the reviewed release
-target.
+Create the release with only the authorized package assets (wheel, sdist,
+`SHA256SUMS`), all built from the exact reviewed release commit and audited
+before upload. After creation, verify that the release carries exactly those
+assets — re-download them and check `sha256sum -c SHA256SUMS` — and that
+`refs/tags/$NEXT_VERSION` points at the reviewed release target.
 For an annotated tag, compare the reviewed target against the peeled commit ref
 `refs/tags/$NEXT_VERSION^{}`; otherwise compare against the tag ref itself:
 
@@ -182,6 +201,12 @@ an OpenAI-compatible endpoint only when the operator configures one. Do not
 include tokens, API keys, chat IDs, owner IDs, `.env` files, runtime settings, or
 deployment logs in release materials.
 
+### Assets
+
+This release attaches the audited source-only Python package artifacts built
+from the exact release commit: one wheel, one sdist, and `SHA256SUMS`. Verify
+downloads with `sha256sum -c SHA256SUMS`.
+
 ### Distribution Boundary
 
 This release distributes source code only. It does not distribute generated
@@ -200,11 +225,72 @@ SQLite databases, generated TextMap files, or Wuthering Waves game data.
 
 Do not run this command until CI and review are green and repository policy
 allows publishing a release. First copy the release note template above into a
-local `RELEASE_NOTES.md` file and review it; that file is a maintainer working
-artifact, not a required committed file. Replace `<reviewed-main-commit-sha>`
-with the exact `origin/main` commit that passed CI and review.
+release-notes file OUTSIDE the checkout (for example
+`"$(mktemp -d)/RELEASE_NOTES.md"`) and review it; it is a maintainer working
+artifact, not a committed file, and keeping it outside the checkout keeps the
+clean-tree gate below meaningful. Replace `<reviewed-main-commit-sha>` with the
+exact `origin/main` commit that passed CI and review.
+
+Build and audit the release assets from a clean checkout of the exact reviewed
+release commit, then create the release and upload only those assets:
 
 ```bash
 NEXT_VERSION=vX.Y.Z
-gh release create "$NEXT_VERSION" --target <reviewed-main-commit-sha> --title "$NEXT_VERSION" --notes-file RELEASE_NOTES.md
+reviewed_main_commit=<reviewed-main-commit-sha>
+notes_file=<path-to-release-notes-outside-the-checkout>
+
+# Every gate below must abort publication on failure.
+set -euo pipefail
+
+# Build from the exact reviewed commit, not whatever the checkout drifted to.
+test "$(git rev-parse HEAD)" = "$reviewed_main_commit"
+test -z "$(git status --porcelain --untracked-files=all)"
+
+# The tag must match the declared package version so a 0.2.0 wheel cannot be
+# published under a different release tag.
+declared_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+test "v$declared_version" = "$NEXT_VERSION"
+
+python -m pip install --upgrade build twine  # not in the dev extra; or: uv pip install build twine
+python -m build
+python -m twine check --strict dist/*
+python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
+(cd dist && sha256sum *.whl *.tar.gz > SHA256SUMS)
+
+# Smoke the exact artifacts being uploaded, not CI's separately built copies:
+# clean-venv install + import + CLI for both the wheel and the sdist.
+smoke_dir="$(mktemp -d)"
+python -m venv "$smoke_dir/wheel-venv"
+"$smoke_dir/wheel-venv/bin/pip" install --no-cache-dir dist/*.whl
+"$smoke_dir/wheel-venv/bin/python" -c "import wuwaterm"
+"$smoke_dir/wheel-venv/bin/wuwaterm" --help
+python -m venv "$smoke_dir/sdist-venv"
+"$smoke_dir/sdist-venv/bin/pip" install --no-cache-dir dist/*.tar.gz
+"$smoke_dir/sdist-venv/bin/python" -c "import wuwaterm"
+"$smoke_dir/sdist-venv/bin/wuwaterm" --help
+
+# Create as a DRAFT first so a failed or partial asset upload never leaves a
+# published release with missing assets; set -e cannot roll back a remote
+# mutation. Verify the draft's assets, then publish.
+gh release create "$NEXT_VERSION" --draft --target "$reviewed_main_commit" --title "$NEXT_VERSION" --notes-file "$notes_file" dist/*.whl dist/*.tar.gz dist/SHA256SUMS
+
+# Run every integrity gate while the release is still a draft: asset count,
+# re-downloaded checksums, and a repeat tag-absence check. GitHub ignores
+# target_commitish when the tag already exists, so a tag created by another
+# actor between preflight and publish would silently retarget the release.
+test "$(gh release view "$NEXT_VERSION" --json assets --jq '.assets | length')" -eq 3
+verify_dir="$(mktemp -d)"
+gh release download "$NEXT_VERSION" --dir "$verify_dir"
+(cd "$verify_dir" && sha256sum -c SHA256SUMS)
+tag_lookup_status=0
+git ls-remote --exit-code --tags origin "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
+test "$tag_lookup_status" -eq 2  # the tag must still be absent right before publish
+
+gh release edit "$NEXT_VERSION" --draft=false
 ```
+
+After publishing, verify that `refs/tags/$NEXT_VERSION` resolves to
+`$reviewed_main_commit` (see the readback block above), and re-download the
+published assets against `SHA256SUMS` before reporting the release as
+published. If a draft is left behind by a failed upload, delete the draft
+(drafts have no tag yet) and rerun the block.

@@ -3,7 +3,23 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.2.0 - 2026-07-17
+
+Production hardening release: Wuthering Waves 3.5 data pin, transactional VPS
+deployment, Telegram structural safety, and default CI packaging gates.
+
+### Upgrading From 0.1.0
+
+- The deployment target must be a clean Git checkout with an `origin` remote
+  and a `main` ref; exported non-Git source copies are intentionally not
+  deployable. Live upgrades go through `deploy/vps-update.sh`; see
+  `docs/deployment.md`.
+- Runtime state (`chat_settings.json`, `channel_replies.json`) moved from
+  `data/` to `state/`. The updater and runtime perform a validated one-time
+  migration and never overwrite existing state files.
+- The runtime image only runs the bot; data refresh/build/verify commands
+  moved to the builder image. Rebuild the terms database with the 3.5 pin via
+  the transactional updater (`docs/data-refresh.md`).
 
 ### CI And Packaging
 
