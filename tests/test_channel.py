@@ -592,6 +592,118 @@ def test_channel_multichunk_flood_wait_never_duplicates(monkeypatch, sample_db):
     assert message.attempts == 3  # chunk1 ok, chunk2 flood, chunk2 retry
 
 
+def test_budget_of_one_still_translates_short_posts(monkeypatch, sample_db):
+    calls = []
+
+    def response(locked_text, _locks):
+        return html_with_segments(locked_text, "", "Translated", "")
+
+    enable_mock_llm(monkeypatch, calls, response)
+    update, message = channel_update(
+        text=CN_TEXT, text_html="<b>这是一段需要翻译的频道文本</b>", message_id=4040
+    )
+    config = BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1)
+    context = make_context(sample_db, config=config)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(calls) == 1
+    assert message.replies == [("<b>Translated</b>", "HTML", 4040)]
+
+
+def test_budget_of_one_content_failure_skips_fallback_silently(
+    monkeypatch, sample_db, caplog
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _t, _l: "placeholders all gone")
+    update, message = channel_update(
+        text=CN_TEXT, text_html="<b>这是一段需要翻译的频道文本</b>", message_id=4041
+    )
+    config = BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1)
+    context = make_context(sample_db, config=config)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    # No fallback token was reserved: exactly one call, silent skip, no
+    # RuntimeError escaping to the error handler.
+    assert len(calls) == 1
+    assert message.replies == []
+    assert "mode=html-attempt" in caplog.text
+
+
+def test_invalid_api_response_does_not_trigger_plain_fallback(
+    monkeypatch, sample_db, caplog
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    calls = []
+
+    async def fake_call(_locked_text, _locks, html_mode=False, **_kwargs):
+        calls.append(html_mode)
+        raise LLMTranslationError(
+            "unavailable", reason="invalid_api_response"
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = channel_update(
+        text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4042
+    )
+    context = make_context(sample_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    # A gateway/schema outage would fail the plain retry identically; do not
+    # burn the second call.
+    assert calls == [True]
+    assert message.replies == []
+    assert "reason=invalid_api_response" in caplog.text
+
+
+def test_flood_retry_aborts_when_authorization_revoked_during_wait(
+    monkeypatch, sample_db, caplog
+):
+    calls = []
+
+    def response(locked_text, _locks):
+        return html_with_segments(locked_text, "", "Translated", "")
+
+    enable_mock_llm(monkeypatch, calls, response)
+    context = make_context(sample_db)
+    settings = context.application.bot_data[CHAT_SETTINGS_KEY]
+
+    class RevokingFloodMessage(FakeMessage):
+        async def reply_text(self, text: str, **kwargs):
+            if not self.replies and settings.is_allowed(-2001):
+                # First attempt: flood-wait AND the chat gets revoked while
+                # the sender sleeps it out.
+                settings.disallow(-2001)
+                raise RetryAfter(0)
+            return await super().reply_text(text, **kwargs)
+
+    message = RevokingFloodMessage(
+        message_id=4043,
+        text=CN_TEXT,
+        text_html="<b>这是一段需要翻译的频道文本</b>",
+        sender_chat=SimpleNamespace(id=-3001, type="channel"),
+        is_automatic_forward=True,
+    )
+    update = SimpleNamespace(
+        update_id=None,
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-2001, type="supergroup"),
+        effective_user=None,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == []
+    assert "flood-wait retry aborted: delivery gate closed" in caplog.text
+
+
 def test_html_content_failure_falls_back_to_plain_delivery(monkeypatch, sample_db):
     calls = []
 

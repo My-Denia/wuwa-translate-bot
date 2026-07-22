@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -51,7 +52,7 @@ LONG_OUTPUT_MODE_SUFFIX = "plain-split"
 FLOOD_RETRY_MAX_SLEEP_SECONDS = 60.0
 
 
-async def send_with_flood_retry(send_callable):
+async def send_with_flood_retry(send_callable, *, retry_gate=None):
     """Run one Telegram send/edit; on RetryAfter, wait once and retry.
 
     A 429 flood-wait guarantees the request was NOT executed, so a single
@@ -60,6 +61,13 @@ async def send_with_flood_retry(send_callable):
     ONE API call: retrying a whole multi-chunk emit would resend chunks that
     were already delivered. A second RetryAfter propagates to the caller's
     normal error handling.
+
+    ``retry_gate`` (sync or async, returning truthy to proceed) re-checks
+    volatile policy after the sleep: authorization can be revoked and posts
+    can age out during a flood-wait, and the retry would otherwise be the
+    first actual API call. A closed gate re-raises the original RetryAfter,
+    which flows into the caller's existing delivery-failure handling —
+    logged, silent, and never delivered.
     """
     try:
         return await send_callable()
@@ -78,6 +86,13 @@ async def send_with_flood_retry(send_callable):
             requested,
         )
         await asyncio.sleep(delay)
+        if retry_gate is not None:
+            allowed = retry_gate()
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+            if not allowed:
+                LOGGER.warning("flood-wait retry aborted: delivery gate closed")
+                raise
         return await send_callable()
 
 
@@ -452,14 +467,20 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # The HTML route reserves a second call so a plain-text retry after a
         # content-shape failure (broken placeholders / blank output) can run
         # without hitting "no unused call reservation"; the unused token is
-        # released when the admission exits. The plain routes need exactly
-        # one call per chunk.
+        # released when the admission exits. A per-minute budget of 1 must
+        # still translate (reserve(2) would reject everything), so the
+        # fallback token is only reserved when the budget allows it and the
+        # fallback only runs when its token was actually reserved. The plain
+        # routes need exactly one call per chunk.
         if len(plain) <= LLM_INPUT_CHAR_LIMIT:
-            required_calls = 2 if html_text else 1
+            required_calls = (
+                min(2, runtime.llm_calls_per_minute) if html_text else 1
+            )
         else:
             required_calls = len(
                 split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT)
             )
+        allow_plain_fallback = bool(html_text) and required_calls >= 2
         admission, rejection_reason = runtime.reserve(required_calls)
         if admission is None:
             _channel_event(
@@ -543,6 +564,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     html_text,
                     to_chinese=to_chinese,
                     before_llm_call=mark_channel_llm_call_started,
+                    allow_plain_fallback=allow_plain_fallback,
                 )
             except LLMTranslationError as exc:
                 reason = getattr(exc, "reason", "translation_unavailable")
@@ -772,6 +794,7 @@ async def _translate_channel_input(
     *,
     to_chinese: bool,
     before_llm_call,
+    allow_plain_fallback: bool = True,
 ) -> tuple[str, str | None, str]:
     """Translate one post; LLMTranslationError carries a ``failure_stage``
     attribute (html-attempt / plain-fallback / plain-no-html /
@@ -797,7 +820,13 @@ async def _translate_channel_input(
                 "HTML",
             )
         except LLMTranslationError as exc:
-            if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
+            if (
+                getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS
+                or not allow_plain_fallback
+            ):
+                # Either not a content failure, or no fallback token was
+                # reserved (per-minute budget of 1): running the fallback
+                # anyway would blow the call reservation with a RuntimeError.
                 exc.failure_stage = "html-attempt"
                 raise
             # The model broke the placeholder structure (or returned nothing).
@@ -1024,7 +1053,15 @@ async def _emit_unchecked(
                 chunk,
                 parse_mode=delivery_parse_mode,
                 reply_to_message_id=message.message_id,
-            )
+            ),
+            retry_gate=lambda: _passes_final_delivery_gate(
+                context,
+                message=message,
+                chat_id=chat_id,
+                is_edit=False,
+                text=chunk,
+                mode=delivery_mode,
+            ),
         )
         reply_message_id = getattr(sent_message, "message_id", None)
         if reply_message_id is not None:
@@ -1132,7 +1169,15 @@ async def _edit_reply_chunks(
                     chunk,
                     parse_mode=parse_mode,
                     reply_to_message_id=message.message_id,
-                )
+                ),
+                retry_gate=lambda: _passes_final_delivery_gate(
+                    context,
+                    message=message,
+                    chat_id=chat_id,
+                    is_edit=True,
+                    text=chunk,
+                    mode=mode,
+                ),
             )
             reply_message_id = getattr(sent_message, "message_id", None)
             if reply_message_id is not None:
@@ -1237,13 +1282,24 @@ async def _edit_existing_reply(
     mode: str,
 ) -> bool:
     try:
+        # The flood sleep here runs inside edit_delivery_lock; a newer edit
+        # queues behind it and re-checks is_latest_edit after acquiring, so
+        # only the volatile freshness/authorization gates need rechecking.
         await send_with_flood_retry(
             lambda: context.bot.edit_message_text(
                 text=text,
                 chat_id=chat_id,
                 message_id=existing_reply_id,
                 parse_mode=parse_mode,
-            )
+            ),
+            retry_gate=lambda: _passes_final_delivery_gate(
+                context,
+                message=message,
+                chat_id=chat_id,
+                is_edit=True,
+                text=text,
+                mode=mode,
+            ),
         )
     except BadRequest as exc:
         if "not modified" in str(exc).lower():

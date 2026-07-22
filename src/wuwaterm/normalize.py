@@ -19,7 +19,7 @@ VERSION_TAG_RE = re.compile(
 _SPOILER_WORDS = r"(?:spoilers|spoiler|spoliers|spolier|剧透)"
 SPOILER_RE = re.compile(
     rf"(?im)(?:[\[(（【]\s*{_SPOILER_WORDS}\s*[:：-]?\s*[\])）】])"
-    rf"|(?:#{_SPOILER_WORDS})"
+    rf"|(?:#{_SPOILER_WORDS}\s*(?:[:：]|-(?=\s))?\s*)"
     rf"|(?:^\s*{_SPOILER_WORDS}\s*[:：-]\s*)"
     rf"|(?:^[\s*_#-]*{_SPOILER_WORDS}[\s*_#:：-]*$)"
 )

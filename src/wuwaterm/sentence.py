@@ -701,8 +701,13 @@ async def _call_llm_async_with_client(
             TRANSLATION_UNAVAILABLE_NOTICE, reason="request"
         ) from exc
     except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        # Response ENVELOPE failure (malformed JSON, wrong schema): a gateway
+        # or schema outage, not model content drift. Distinct from
+        # "invalid_response" (blank output / broken placeholders) so the HTML
+        # paths do not burn a plain-retry call on an outage that would fail
+        # identically.
         raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_response"
+            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_api_response"
         ) from exc
 
 

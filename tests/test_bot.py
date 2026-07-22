@@ -1513,6 +1513,70 @@ def test_silent_tr_rejection_leaves_log_trace(caplog, sample_db):
     assert "-990011" not in caplog.text
 
 
+def test_tr_html_invalid_api_response_gets_notice_without_plain_retry(
+    monkeypatch, caplog, sample_db
+):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    calls = []
+
+    async def fake_call(*_args, **_kwargs):
+        calls.append(True)
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_api_response"
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text="这是一个需要翻译的句子。",
+        caption=None,
+        text_html="<b>这是一个需要翻译的句子。</b>",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    # Envelope/gateway outages fail identically on a retry: one call, notice.
+    assert len(calls) == 1
+    assert message.replies == [(TRANSLATION_UNAVAILABLE_NOTICE, None)]
+    assert "tr html translation failed reason=invalid_api_response" in caplog.text
+
+
+def test_tr_flood_retry_aborts_when_gate_closes_during_wait(
+    monkeypatch, caplog, sample_db
+):
+    member_statuses = ["administrator", "administrator", "member"]
+    calls = []
+
+    async def get_chat_member(chat_id, user_id):
+        calls.append((chat_id, user_id))
+        return SimpleNamespace(status=member_statuses[min(len(calls) - 1, 2)])
+
+    update, message = fake_update(
+        chat_id=-2001,
+        chat_type="supergroup",
+        user_id=42,
+        reply_raises=lambda _text, _kwargs, attempt: (
+            RetryAfter(0) if attempt == 1 else None
+        ),
+    )
+    context = fake_context(sample_db, ["声骸"])
+    context.bot.get_chat_member = get_chat_member
+
+    with pytest.raises(RetryAfter):
+        with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+            asyncio.run(term_command(update, context))
+
+    # The user was demoted during the flood wait: the retry never sends.
+    assert message.replies == []
+    assert "flood-wait retry aborted: delivery gate closed" in caplog.text
+
+
 def test_tr_html_transport_failure_logs_reason(monkeypatch, caplog, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
