@@ -274,6 +274,10 @@ def test_marker_regexes_still_strip_marker_forms(sample_db):
         ("#spoiler: 今汐", "今汐"),
         ("#剧透：今汐", "今汐"),
         ("#spoiler- 今汐", "今汐"),
+        # A line-ending hashtag marker must not swallow the newline and merge
+        # adjacent content lines.
+        ("第一行 #spoiler\n第二行", "第一行\n第二行"),
+        ("line 1 #spoiler:\nline 2", "line 1\nline 2"),
         ("【剧透】新版本", "新版本"),
         ("WW 2.4\n正文内容", "正文内容"),
         ("spoiler: hidden text", "hidden text"),
