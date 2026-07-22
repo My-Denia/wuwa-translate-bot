@@ -120,7 +120,16 @@ admin (see that section).
   through the LLM path. Tags, attributes, links, custom emoji ids, and entities
   are replaced with opaque structural placeholders before the model sees only
   visible text. Missing, duplicated, reordered, or newly injected structure
-  fails closed. Dictionary exact and fuzzy hits remain official plain text.
+  discards the HTML attempt and retries once as plain text, so the caller
+  still gets an unformatted translation instead of an error notice
+  (transport/quota errors keep the notice). Dictionary exact and fuzzy hits
+  remain official plain text.
+- Formatting typed directly in the command (`/tr <b>bold</b> sentence`, via
+  Telegram's formatting UI) is preserved the same way: the command prefix and
+  leading direction flags are cut off and the remaining tail's entities go
+  through the same HTML pipeline. Fail-safe: multiline inline text, repeated
+  spaces, mid-text direction flags, or an entity straddling the command prefix
+  fall back to today's plain-text behavior rather than guessing.
 - Group replies quote the asking message.
 - Private chat: all translate commands answer only the configured owner
   user id; everyone else gets a short bilingual reply, default
@@ -226,7 +235,10 @@ post to Chinese. No command is involved.
   entities. Every tag, attribute, link, custom emoji id, and entity is replaced
   by an opaque placeholder before the LLM sees only visible text; DB terms in
   visible text are locked separately. Placeholder count/order changes, unknown
-  tags, and raw structural injection fail closed with no delivery. If Telegram
+  tags, raw structural injection, and blank output discard the HTML attempt
+  and retry once as plain text (one extra LLM call reserved up front), so the
+  post still gets an unformatted in-thread translation; transport/quota
+  failures stay silent with no retry. If Telegram
   rejects byte-preserved, locally validated HTML at delivery time, the bot may
   retry the same translation as plain text. If the translated output exceeds Telegram's
   4096-character text message limit, the bot strips HTML formatting and sends

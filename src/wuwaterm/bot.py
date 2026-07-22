@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import time
+import traceback
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Deque
 from urllib.parse import urlparse
 
-from telegram import ChatMember, Update
+from telegram import ChatMember, Message, MessageEntity, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
@@ -60,7 +61,11 @@ from .telegram_text import (
     split_telegram_text,
     telegram_text_units,
 )
-from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
+from .translation_policy import (
+    HTML_CONTENT_FAILURE_REASONS,
+    LLM_FAILURE_NOTICES,
+    LLM_INPUT_CHAR_LIMIT,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -160,6 +165,15 @@ REVOKE_USAGE = (
     "private to remove by id."
 )
 SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
+# Inline rich text: the /command prefix and leading direction flags are cut
+# off the raw message text so the remaining tail's formatting entities can be
+# preserved. Flags mirror _parse_translation_args (lowercase only).
+COMMAND_PREFIX_RE = re.compile(r"^/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?\s*")
+# No ^ anchor: matched with .match(text, pos), where ^ would still anchor to
+# the string start and never match at pos > 0. The value is case-insensitive
+# to mirror _parse_translation_args, which lowercases it; the flag itself is
+# case-sensitive there and stays so here.
+DIRECTION_FLAG_PREFIX_RE = re.compile(r"(?:--to|-to)\s+(?i:en|zh)\s+")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
 DEFAULT_CHANNEL_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -520,11 +534,84 @@ def _translation_request(
     update: Update, inline_text: str, forced_to_chinese: bool | None = None
 ) -> TranslationRequest:
     if inline_text:
+        html = _inline_translation_html(update.effective_message, inline_text)
         return TranslationRequest(
             text=inline_text,
+            html=html,
             forced_to_chinese=forced_to_chinese,
         )
     return _replied_translation_request(update, forced_to_chinese=forced_to_chinese)
+
+
+def _inline_translation_html(message, inline_text: str) -> str | None:
+    """Telegram-HTML for formatted text typed inline after /tr or /sentence.
+
+    Preserves the sender's own formatting entities through translation. Fails
+    safe: any mismatch between the raw command tail and the parsed inline text
+    (mid-text direction flags, collapsed whitespace, multiline input joined by
+    the args tokenizer) or an entity straddling the stripped prefix returns
+    None, which keeps today's plain-text behavior.
+    """
+    text = getattr(message, "text", None)
+    entities = getattr(message, "entities", None) or ()
+    date = getattr(message, "date", None)
+    chat = getattr(message, "chat", None)
+    if not text or not inline_text or not entities or date is None or chat is None:
+        return None
+    prefix = COMMAND_PREFIX_RE.match(text)
+    if prefix is None:
+        return None
+    start = prefix.end()
+    while True:
+        flag = DIRECTION_FLAG_PREFIX_RE.match(text, start)
+        if flag is None:
+            break
+        start = flag.end()
+    tail = text[start:]
+    if tail.strip() != inline_text:
+        return None
+    # Telegram entity offsets/lengths are UTF-16 code units, not code points.
+    start_units = len(text[:start].encode("utf-16-le")) // 2
+    tail_units = len(tail.encode("utf-16-le")) // 2
+    shifted: list[MessageEntity] = []
+    for entity in entities:
+        if entity.type == MessageEntity.BOT_COMMAND:
+            continue
+        if entity.offset + entity.length <= start_units:
+            continue  # entirely inside the stripped command/flag prefix
+        if entity.offset < start_units or (
+            entity.offset + entity.length > start_units + tail_units
+        ):
+            return None  # straddles the prefix boundary; not preservable
+        shifted.append(
+            MessageEntity(
+                type=entity.type,
+                offset=entity.offset - start_units,
+                length=entity.length,
+                url=entity.url,
+                user=entity.user,
+                language=entity.language,
+                custom_emoji_id=entity.custom_emoji_id,
+            )
+        )
+    if not shifted:
+        return None
+    # A locally built Message renders entity HTML exactly like PTB does for
+    # incoming messages (text_html), so the downstream pipeline is identical
+    # to the reply-to-message path.
+    rendered = Message(
+        message_id=0,
+        date=date,
+        chat=chat,
+        text=tail,
+        entities=shifted,
+    ).text_html
+    if not isinstance(rendered, str):
+        return None
+    rendered = rendered.strip()
+    if not rendered or not _telegram_html_has_tags(rendered):
+        return None
+    return rendered
 
 
 def _replied_translation_request(
@@ -764,7 +851,28 @@ def create_application(
     app.add_handler(
         ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER)
     )
+    app.add_error_handler(_log_update_error)
     return app
+
+
+async def _log_update_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Observe otherwise-silent handler failures (e.g. transient NetworkError).
+
+    Log-only, and deliberately frames-only: exception MESSAGES can carry
+    quasi-sensitive values (a chat-id-keyed KeyError, an API echo), so only
+    the error type name and the traceback frames (code paths) are logged.
+    """
+    error = getattr(context, "error", None)
+    frames = ""
+    if error is not None and error.__traceback__ is not None:
+        frames = "".join(traceback.format_tb(error.__traceback__))
+    LOGGER.error(
+        "update processing failed error_type=%s\n%s",
+        safe_error_type(error),
+        frames,
+    )
 
 
 async def _close_translator_on_shutdown(application: Application) -> None:
@@ -1559,7 +1667,18 @@ async def translate_request_async(
                 request.html, to_chinese=to_chinese
             )
         except LLMTranslationError as exc:
-            return TranslationReply(exc.user_message)
+            if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
+                return TranslationReply(exc.user_message)
+            # The model broke the placeholder structure (or returned nothing).
+            # A plain retry drops formatting but still answers the command.
+            return TranslationReply(
+                await translate_query_async(
+                    service,
+                    translator,
+                    prepared,
+                    forced_to_chinese=request.forced_to_chinese,
+                )
+            )
         if _should_append_dict_miss(prepared, translator, translated):
             translated = f"{translated}\n\n{DICT_MISS_FLAG}"
         if _validate_telegram_html(translated):
