@@ -252,9 +252,11 @@ post to Chinese. No command is involved.
   by an opaque placeholder before the LLM sees only visible text; DB terms in
   visible text are locked separately. Placeholder count/order changes, unknown
   tags, raw structural injection, and blank output discard the HTML attempt
-  and retry once as plain text (one extra LLM call reserved up front), so the
-  post still gets an unformatted in-thread translation; transport/quota
-  failures stay silent with no retry. If Telegram
+  and retry once as plain text (one extra LLM call reserved up front when
+  `WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE` is at least 2; a budget of 1 skips
+  the retry rather than blocking all short posts), so the post still gets an
+  unformatted in-thread translation; transport/quota failures — including a
+  malformed gateway/API response envelope — stay silent with no retry. If Telegram
   rejects byte-preserved, locally validated HTML at delivery time, the bot may
   retry the same translation as plain text. If the translated output exceeds Telegram's
   4096-character text message limit, the bot strips HTML formatting and sends
@@ -262,7 +264,10 @@ post to Chinese. No command is involved.
 - Delivery reliability: a Telegram 429 flood-wait (`RetryAfter`) on any single
   send or edit is waited out once (capped at 60s) and retried — a flood-wait
   guarantees the call did not execute, so the retry cannot duplicate; retries
-  are per API call, never per multi-chunk delivery. Timeout/network errors are
+  are per API call, never per multi-chunk delivery. Before the retry actually
+  sends, the volatile delivery gates (freshness, authorization) are re-checked:
+  a post revoked or aged out during the wait is dropped, not delivered late.
+  Timeout/network errors are
   deliberately not retried (the send may have succeeded server-side).
   Admin checks retry once on a transient network error before failing closed.
   A post whose text exists but whose rendered HTML is unavailable degrades to

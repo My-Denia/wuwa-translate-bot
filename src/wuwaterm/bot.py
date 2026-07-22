@@ -662,7 +662,7 @@ def _telegram_html_has_tags(html: str) -> bool:
 
 
 async def reply_to_user(
-    update: Update, text: str, *, parse_mode: str | None = None
+    update: Update, text: str, *, parse_mode: str | None = None, retry_gate=None
 ) -> None:
     message = update.effective_message
     if not message:
@@ -679,6 +679,7 @@ async def reply_to_user(
                 chunk,
                 reply_to_message_id=reply_to_message_id,
                 parse_mode=delivery_parse_mode,
+                retry_gate=retry_gate,
             )
         except BadRequest as exc:
             if delivery_parse_mode is not None and _bad_request_is_html_parse_error(exc):
@@ -691,7 +692,9 @@ async def reply_to_user(
                     redact_id(message.message_id),
                     safe_error_type(exc),
                 )
-                await reply_to_user(update, _strip_telegram_html(text))
+                await reply_to_user(
+                    update, _strip_telegram_html(text), retry_gate=retry_gate
+                )
                 return
             if (
                 reply_to_message_id is None
@@ -711,6 +714,7 @@ async def reply_to_user(
                 chunk,
                 reply_to_message_id=None,
                 parse_mode=delivery_parse_mode,
+                retry_gate=retry_gate,
             )
         LOGGER.info(
             "bot_reply chat_type=%s incoming_message=%s reply_message=%s "
@@ -727,11 +731,20 @@ async def reply_to_user(
 
 
 async def _send_reply_chunk_with_html_fallback(
-    message, text: str, *, reply_to_message_id: int | None, parse_mode: str | None
+    message,
+    text: str,
+    *,
+    reply_to_message_id: int | None,
+    parse_mode: str | None,
+    retry_gate=None,
 ):
     try:
         sent_message = await _send_reply_chunk(
-            message, text, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode
+            message,
+            text,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode=parse_mode,
+            retry_gate=retry_gate,
         )
         return sent_message, text
     except BadRequest as exc:
@@ -739,25 +752,36 @@ async def _send_reply_chunk_with_html_fallback(
             raise
         plain = _strip_telegram_html(text)
         sent_message = await _send_reply_chunk(
-            message, plain, reply_to_message_id=reply_to_message_id, parse_mode=None
+            message,
+            plain,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode=None,
+            retry_gate=retry_gate,
         )
         return sent_message, plain
 
 
 async def _send_reply_chunk(
-    message, text: str, *, reply_to_message_id: int | None, parse_mode: str | None
+    message,
+    text: str,
+    *,
+    reply_to_message_id: int | None,
+    parse_mode: str | None,
+    retry_gate=None,
 ):
     kwargs = {}
     if parse_mode is not None:
         kwargs["parse_mode"] = parse_mode
     if reply_to_message_id is None:
         return await send_with_flood_retry(
-            lambda: message.reply_text(text, do_quote=False, **kwargs)
+            lambda: message.reply_text(text, do_quote=False, **kwargs),
+            retry_gate=retry_gate,
         )
     return await send_with_flood_retry(
         lambda: message.reply_text(
             text, reply_to_message_id=reply_to_message_id, **kwargs
-        )
+        ),
+        retry_gate=retry_gate,
     )
 
 
@@ -1086,7 +1110,14 @@ async def _translation_command(
             redact_id(getattr(message, "message_id", None)),
         )
         return
-    await reply_to_user(update, translated.text, parse_mode=translated.parse_mode)
+    await reply_to_user(
+        update,
+        translated.text,
+        parse_mode=translated.parse_mode,
+        # A flood-wait can outlive a /revoke or /public off; re-check before
+        # the retry actually delivers the translation.
+        retry_gate=lambda: _passes_delivery_gate(update, context),
+    )
 
 
 async def public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

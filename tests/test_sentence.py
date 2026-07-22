@@ -204,6 +204,31 @@ def test_lockable_sources_cache_invalidates_after_atomic_db_replacement(
     assert refreshed.restore(refreshed.locked_text) == "Upgraded Echo"
 
 
+def test_malformed_api_envelope_maps_to_invalid_api_response(sample_db):
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"unexpected": "envelope"}
+
+    class FakeClient:
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    import wuwaterm.sentence as sentence_module
+
+    with pytest.raises(LLMTranslationError) as excinfo:
+        asyncio.run(
+            sentence_module._call_llm_async_with_client(FakeClient(), "text", ())
+        )
+
+    assert excinfo.value.reason == "invalid_api_response"
+    assert excinfo.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+
 def test_sync_translate_logs_swallowed_llm_failure(monkeypatch, caplog, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
@@ -246,6 +271,13 @@ def test_marker_regexes_still_strip_marker_forms(sample_db):
         ("剧透：今汐武器", "今汐武器"),
         ("*spoilers*\n正文", "正文"),
         ("#spoiler 今汐", "今汐"),
+        ("#spoiler: 今汐", "今汐"),
+        ("#剧透：今汐", "今汐"),
+        ("#spoiler- 今汐", "今汐"),
+        # A line-ending hashtag marker must not swallow the newline and merge
+        # adjacent content lines.
+        ("第一行 #spoiler\n第二行", "第一行\n第二行"),
+        ("line 1 #spoiler:\nline 2", "line 1\nline 2"),
         ("【剧透】新版本", "新版本"),
         ("WW 2.4\n正文内容", "正文内容"),
         ("spoiler: hidden text", "hidden text"),

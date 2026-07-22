@@ -19,7 +19,9 @@ VERSION_TAG_RE = re.compile(
 _SPOILER_WORDS = r"(?:spoilers|spoiler|spoliers|spolier|剧透)"
 SPOILER_RE = re.compile(
     rf"(?im)(?:[\[(（【]\s*{_SPOILER_WORDS}\s*[:：-]?\s*[\])）】])"
-    rf"|(?:#{_SPOILER_WORDS})"
+    # Horizontal whitespace only ([^\S\n]): a plain \s* here would consume the
+    # newline after a line-ending "#spoiler" and merge adjacent content lines.
+    rf"|(?:#{_SPOILER_WORDS}[^\S\n]*(?:[:：]|-(?=\s))?[^\S\n]*)"
     rf"|(?:^\s*{_SPOILER_WORDS}\s*[:：-]\s*)"
     rf"|(?:^[\s*_#-]*{_SPOILER_WORDS}[\s*_#:：-]*$)"
 )
