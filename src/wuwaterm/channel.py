@@ -67,11 +67,16 @@ async def send_with_flood_retry(send_callable):
         raw_delay = getattr(exc, "retry_after", None)
         if hasattr(raw_delay, "total_seconds"):  # PTB >=23 returns timedelta
             raw_delay = raw_delay.total_seconds()
-        delay = min(
-            max(float(raw_delay) if raw_delay is not None else 1.0, 0.0),
-            FLOOD_RETRY_MAX_SLEEP_SECONDS,
+        requested = max(float(raw_delay) if raw_delay is not None else 1.0, 0.0)
+        # Bounded-latency trade-off: a wait beyond the cap retries early and
+        # will likely re-flood (the second RetryAfter then propagates). Log
+        # both values so a log review can tell "waited fully" from "gave up".
+        delay = min(requested, FLOOD_RETRY_MAX_SLEEP_SECONDS)
+        LOGGER.warning(
+            "telegram flood wait; retrying send in %.1fs (requested %.1fs)",
+            delay,
+            requested,
         )
-        LOGGER.warning("telegram flood wait; retrying send in %.1fs", delay)
         await asyncio.sleep(delay)
         return await send_callable()
 
