@@ -170,8 +170,10 @@ SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 # preserved. Flags mirror _parse_translation_args (lowercase only).
 COMMAND_PREFIX_RE = re.compile(r"^/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?\s*")
 # No ^ anchor: matched with .match(text, pos), where ^ would still anchor to
-# the string start and never match at pos > 0.
-DIRECTION_FLAG_PREFIX_RE = re.compile(r"(?:--to|-to)\s+(?:en|zh)\s+")
+# the string start and never match at pos > 0. The value is case-insensitive
+# to mirror _parse_translation_args, which lowercases it; the flag itself is
+# case-sensitive there and stays so here.
+DIRECTION_FLAG_PREFIX_RE = re.compile(r"(?:--to|-to)\s+(?i:en|zh)\s+")
 ADMIN_ALLOWED_STATUSES = frozenset({"creator", "administrator"})
 ADMIN_STATUS_CACHE_TTL_SECONDS = 300.0
 DEFAULT_CHANNEL_MAX_AGE_SECONDS = 24 * 60 * 60

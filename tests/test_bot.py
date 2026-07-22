@@ -2747,6 +2747,16 @@ def test_inline_html_skips_leading_direction_flag():
     assert _inline_translation_html(message, "bold words") == "<b>bold words</b>"
 
 
+def test_inline_html_skips_uppercase_direction_value():
+    # _parse_translation_args lowercases the value, so "--to EN" is a valid
+    # command; the prefix stripper must accept it too or formatting is lost.
+    message = make_inline_message(
+        "/tr --to EN bold words",
+        [MessageEntity(type=MessageEntity.BOLD, offset=12, length=10)],
+    )
+    assert _inline_translation_html(message, "bold words") == "<b>bold words</b>"
+
+
 def test_inline_html_midtext_flag_falls_back_to_plain():
     # The parser strips a mid-text flag, so the raw tail no longer matches the
     # parsed inline text; formatting is dropped rather than guessed.
