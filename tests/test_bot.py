@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from telegram import Chat, MessageEntity, Update, User
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
 from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
@@ -69,6 +69,7 @@ from wuwaterm.lookup import TermService
 from wuwaterm.channel_runtime import ChannelRuntime
 from wuwaterm.sentence import (
     BUDGET_EXHAUSTED_NOTICE,
+    LLMTranslationError,
     TRANSLATION_UNAVAILABLE_NOTICE,
     SentenceTranslator,
     _llm_error_from_response,
@@ -1415,6 +1416,172 @@ def test_create_application_wires_llm_timeout(sample_db):
     assert translator.llm_timeout_seconds == 12.5
 
 
+def test_reply_retries_once_after_flood_wait(caplog, sample_db):
+    update, message = fake_update(
+        reply_raises=lambda _text, _kwargs, attempt: (
+            RetryAfter(0) if attempt == 1 else None
+        )
+    )
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(reply_to_user(update, "hello"))
+
+    assert message.replies == [("hello", None)]
+    assert "flood wait" in caplog.text
+
+
+def test_reply_flood_wait_gives_up_after_one_retry(sample_db):
+    update, message = fake_update(
+        reply_raises=lambda _text, _kwargs, _attempt: RetryAfter(0)
+    )
+    with pytest.raises(RetryAfter):
+        asyncio.run(reply_to_user(update, "hello"))
+
+    assert message.replies == []
+    assert len(message.reply_kwargs) == 2  # one attempt + one retry
+
+
+def test_group_admin_check_retries_transient_failure(monkeypatch, caplog, sample_db):
+    calls = []
+
+    async def flaky_get_chat_member(chat_id, user_id):
+        calls.append((chat_id, user_id))
+        if len(calls) == 1:
+            raise NetworkError("blip")
+        return SimpleNamespace(status="administrator")
+
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", user_id=42)
+    context = fake_context(sample_db, ["声骸"])
+    context.bot.get_chat_member = flaky_get_chat_member
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    # attempt + retry for the actor pre-check, then the (fresh) delivery gate.
+    assert len(calls) == 3
+    assert message.replies == [("Echo", 101)]
+    assert "get_chat_member failed error_type=NetworkError; retrying once" in caplog.text
+
+
+def test_group_admin_check_fails_closed_after_retry(monkeypatch, caplog, sample_db):
+    calls = []
+
+    async def failing_get_chat_member(chat_id, user_id):
+        calls.append((chat_id, user_id))
+        raise NetworkError("blip")
+
+    update, message = fake_update(chat_id=-2001, chat_type="supergroup", user_id=42)
+    context = fake_context(sample_db, ["声骸"])
+    context.bot.get_chat_member = failing_get_chat_member
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert len(calls) == 2
+    assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 101)]
+    assert "get_chat_member retry failed error_type=NetworkError" in caplog.text
+
+
+def test_direction_usage_suppression_leaves_log_trace(monkeypatch, caplog, sample_db):
+    monkeypatch.setenv(REDACTION_SECRET_ENV, "usage-log-secret")
+    update, message = fake_update(chat_id=990022)
+    context = fake_context(sample_db, ["--to", "jp", "x"], limit=1)
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))  # consumes the reject budget
+        asyncio.run(term_command(update, context))  # suppressed -> log line
+
+    assert message.replies == [(DIRECTION_USAGE_NOTICE, None)]
+    assert "direction usage notice suppressed (reject budget) chat=id:" in caplog.text
+    assert "990022" not in caplog.text
+
+
+def test_silent_tr_rejection_leaves_log_trace(caplog, sample_db):
+    config = BotConfig(owner_user_id=11, tr_reject_silent=True)
+    update, message = fake_update(
+        chat_id=-990011, chat_type="supergroup", user_id=99
+    )
+    context = fake_context(
+        sample_db, ["声骸"], member_status="member", config=config
+    )
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == []
+    assert "tr rejected without reply chat=id:" in caplog.text
+    assert "silent_flag=True" in caplog.text
+    assert "-990011" not in caplog.text
+
+
+def test_tr_html_transport_failure_logs_reason(monkeypatch, caplog, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    replied = SimpleNamespace(
+        text="这是一个需要翻译的句子。",
+        caption=None,
+        text_html="<b>这是一个需要翻译的句子。</b>",
+        caption_html=None,
+        entities=[SimpleNamespace(type="bold")],
+    )
+    update, message = fake_update(reply_to=replied)
+    context = fake_context(sample_db, [])
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == [(TRANSLATION_UNAVAILABLE_NOTICE, None)]
+    assert "tr html translation failed reason=timeout" in caplog.text
+
+
+def test_swallowed_llm_failure_logs_reason(monkeypatch, caplog, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    async def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="upstream")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
+        result = asyncio.run(translator.translate_async("这是一个需要翻译的句子。"))
+
+    assert result == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "llm translation failed reason=upstream" in caplog.text
+
+
+def test_delivery_gate_skip_logs_redacted_ids(monkeypatch, caplog, sample_db):
+    monkeypatch.setenv(REDACTION_SECRET_ENV, "gate-log-secret")
+    calls = []
+
+    async def demoting_get_chat_member(chat_id, user_id):
+        calls.append((chat_id, user_id))
+        # Admin for the pre-check, demoted before the delivery gate.
+        status = "administrator" if len(calls) == 1 else "member"
+        return SimpleNamespace(status=status)
+
+    update, message = fake_update(
+        chat_id=-887766, chat_type="supergroup", message_id=445566, user_id=42
+    )
+    context = fake_context(sample_db, ["声骸"], allowlist=(-887766,))
+    context.bot.get_chat_member = demoting_get_chat_member
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.bot"):
+        asyncio.run(term_command(update, context))
+
+    assert message.replies == []
+    assert "authorization changed before delivery chat=id:" in caplog.text
+    assert "-887766" not in caplog.text
+    assert "445566" not in caplog.text
+
+
 def test_create_application_registers_error_handler(sample_db):
     app = create_application("123:ABC", sample_db, config=BotConfig())
 
@@ -1437,6 +1604,21 @@ def test_update_error_handler_logs_type_and_frames_only(caplog):
     assert "update processing failed error_type=KeyError" in caplog.text
     assert "-990011" not in caplog.text  # exception message never logged
     assert "test_bot.py" in caplog.text  # traceback frames are logged
+
+
+def test_update_error_handler_logs_redacted_message_id(monkeypatch, caplog):
+    monkeypatch.setenv(REDACTION_SECRET_ENV, "error-log-secret")
+    try:
+        raise ValueError("boom")
+    except ValueError as exc:
+        error = exc
+    update = SimpleNamespace(effective_message=SimpleNamespace(message_id=778899))
+
+    with caplog.at_level(logging.ERROR, logger="wuwaterm.bot"):
+        asyncio.run(_log_update_error(update, SimpleNamespace(error=error)))
+
+    assert "incoming_message=id:" in caplog.text
+    assert "778899" not in caplog.text
 
 
 def test_update_error_handler_tolerates_missing_error(caplog):
@@ -2757,11 +2939,25 @@ def test_inline_html_skips_uppercase_direction_value():
     assert _inline_translation_html(message, "bold words") == "<b>bold words</b>"
 
 
-def test_inline_html_midtext_flag_falls_back_to_plain():
-    # The parser strips a mid-text flag, so the raw tail no longer matches the
-    # parsed inline text; formatting is dropped rather than guessed.
+def test_inline_html_midtext_flag_is_literal_text():
+    # Direction flags are leading-only: a mid-text "--to zh" stays literal
+    # text, the raw tail matches the parsed text, and formatting survives.
     message = make_inline_message(
         "/tr bold --to zh words",
+        [MessageEntity(type=MessageEntity.BOLD, offset=4, length=4)],
+    )
+    assert (
+        _inline_translation_html(message, "bold --to zh words")
+        == "<b>bold</b> --to zh words"
+    )
+
+
+def test_inline_html_whitespace_mismatch_falls_back_to_plain():
+    # The args tokenizer collapses runs of whitespace, so the raw tail no
+    # longer matches the parsed text; formatting is dropped rather than
+    # guessed against a shifted offset base.
+    message = make_inline_message(
+        "/tr bold  words",
         [MessageEntity(type=MessageEntity.BOLD, offset=4, length=4)],
     )
     assert _inline_translation_html(message, "bold words") is None
@@ -2781,6 +2977,47 @@ def test_inline_html_bot_command_entity_alone_is_plain():
         [MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=3)],
     )
     assert _inline_translation_html(message, "普通文本") is None
+
+
+def test_parse_translation_args_leading_flags_only():
+    from wuwaterm.bot import _parse_translation_args
+
+    leading = _parse_translation_args(["--to", "en", "你好"])
+    assert (leading.text, leading.forced_to_chinese) == ("你好", False)
+    trailing = _parse_translation_args(["how", "--to", "convert", "files"])
+    assert trailing.direction_error is False
+    assert trailing.text == "how --to convert files"
+    assert trailing.forced_to_chinese is None
+    doubled = _parse_translation_args(["--to", "en", "--to", "zh", "声骸"])
+    assert doubled.direction_error is True
+    bad_value = _parse_translation_args(["--to", "jp", "x"])
+    assert bad_value.direction_error is True
+
+
+def test_short_english_word_is_not_hijacked_by_pinyin_fuzzy(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _t, _l: "他")
+    # "he" is a substring of pinyin "shenghai" (Echo); it must go to the LLM
+    # instead of answering with an unrelated dictionary term.
+    update, message = fake_update()
+    context = fake_context(sample_db, ["he"])
+
+    asyncio.run(term_command(update, context))
+
+    assert len(calls) == 1
+    assert message.replies
+    assert "Echo" not in message.replies[0][0]
+    assert "声骸" not in message.replies[0][0]
+
+
+def test_full_pinyin_and_abbrev_queries_still_answer_from_dictionary(sample_db):
+    service = TermService(sample_db)
+    from wuwaterm.bot import _fuzzy_dictionary_answer
+
+    assert _fuzzy_dictionary_answer(service, "shenghai", to_chinese=False) == "Echo"
+    assert _fuzzy_dictionary_answer(service, "sh", to_chinese=False) == "Echo"
+    assert _fuzzy_dictionary_answer(service, "he", to_chinese=False) is None
+    assert _fuzzy_dictionary_answer(service, "eng", to_chinese=False) is None
 
 
 def test_tr_inline_formatted_text_uses_html_pipeline(monkeypatch, sample_db):

@@ -27,9 +27,25 @@ Commands:
   `/sent --to zh Jinhsi equipped an Echo` force Chinese sentence translation
 
 The default remains auto-detected when no direction flag is supplied. The
-direction flag may be written as `--to en`, `-to en`, `--to zh`, or `-to zh`.
-For validation, invalid --to values return usage and do not call the LLM; exact
+direction flag may be written as `--to en`, `-to en`, `--to zh`, or `-to zh`,
+and is recognized only at the START of the command text: once the first
+non-flag word is seen, everything after it — including a later `--to en` —
+is translated as literal text instead of being treated as a flag (so
+"/tr how --to convert files" translates instead of erroring). A leading
+invalid `--to` value returns usage and does not call the LLM; exact
 dictionary hits do not call the LLM.
+
+Short ASCII queries may also be answered from the dictionary by pinyin:
+full pinyin (`shenghai`) and pinyin abbreviations (`sh`) answer directly;
+pinyin prefix/substring matches require a 4+ letter query so common short
+English words ("he", "an") are machine-translated instead of hijacked by an
+unrelated term.
+
+Screenshot-noise stripping only removes MARKER forms: bracketed or hashtag
+spoiler/version tags anywhere (`[spoiler]`, `【剧透】`, `#spoiler`,
+`(WW 3.4)`), a line-leading `spoiler:` / `剧透：` label, or a whole
+decorated line. Bare "spoiler"/"剧透"/"Wuthering Waves 2.1" inside prose is
+kept verbatim, and URLs like `example.com/ww2.0` are never touched.
 
 LLM configuration is documented in [Privacy And LLM](privacy-and-llm.md).
 
@@ -243,6 +259,14 @@ post to Chinese. No command is involved.
   retry the same translation as plain text. If the translated output exceeds Telegram's
   4096-character text message limit, the bot strips HTML formatting and sends
   the full translation as tracked plain-text chunks.
+- Delivery reliability: a Telegram 429 flood-wait (`RetryAfter`) on any single
+  send or edit is waited out once (capped at 60s) and retried — a flood-wait
+  guarantees the call did not execute, so the retry cannot duplicate; retries
+  are per API call, never per multi-chunk delivery. Timeout/network errors are
+  deliberately not retried (the send may have succeeded server-side).
+  Admin checks retry once on a transient network error before failing closed.
+  A post whose text exists but whose rendered HTML is unavailable degrades to
+  the plain pipeline instead of being dropped.
 - Dictionary-first still applies: a post that is exactly one official term
   gets the official string byte-for-byte (English for a Chinese term, Chinese
   for an English term), plain, without the LLM.

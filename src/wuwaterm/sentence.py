@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import re
@@ -23,6 +24,7 @@ from .telegram_html import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
 SPEAKER_PREFIX_RE = re.compile(r"^(?P<speaker>[^:：\n]{1,40})\s*[:：]\s*(?P<body>.*)$")
 # Bilingual user-facing notices: Chinese line first, then English (single "\n").
 BUDGET_EXHAUSTED_NOTICE = (
@@ -86,6 +88,29 @@ def _require_nonblank_llm_output(content: str) -> str:
     return normalized
 
 
+def _is_ascii_word_char(char: str) -> bool:
+    return char.isascii() and char.isalnum()
+
+
+def _ascii_word_boundaries_ok(text: str, start: int, end: int, source: str) -> bool:
+    """Reject a term match glued to surrounding ASCII word characters.
+
+    Without this, "New Echoes" locks the "Echo" span and restores to
+    "New 声骸es". Only the ASCII sides are guarded: CJK text has no word
+    boundaries, and cross-word CJK mis-locks (回声骸骨) need segmentation,
+    which is out of scope.
+    """
+    if _is_ascii_word_char(source[0]) and start > 0 and _is_ascii_word_char(
+        text[start - 1]
+    ):
+        return False
+    if _is_ascii_word_char(source[-1]) and end < len(text) and _is_ascii_word_char(
+        text[end]
+    ):
+        return False
+    return True
+
+
 def _new_placeholder_prefix(source_text: str) -> str:
     while True:
         prefix = f"__WUWA_TERM_{secrets.token_hex(8)}_"
@@ -134,15 +159,17 @@ class SentenceTranslator:
         for order, (source, official) in enumerate(lockable):
             start = text.find(source)
             while start != -1:
-                spans.append(
-                    _TermSpan(
-                        start=start,
-                        end=start + len(source),
-                        source=source,
-                        official=official,
-                        order=order,
+                end = start + len(source)
+                if _ascii_word_boundaries_ok(text, start, end, source):
+                    spans.append(
+                        _TermSpan(
+                            start=start,
+                            end=end,
+                            source=source,
+                            official=official,
+                            order=order,
+                        )
                     )
-                )
                 start = text.find(source, start + 1)
 
         # Select global longest non-overlapping official term spans. This
@@ -239,6 +266,10 @@ class SentenceTranslator:
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
+            LOGGER.warning(
+                "llm translation failed reason=%s",
+                getattr(exc, "reason", "translation_unavailable"),
+            )
             return exc.user_message
 
     async def translate_async(
@@ -279,6 +310,12 @@ class SentenceTranslator:
         except LLMTranslationError as exc:
             if propagate_errors:
                 raise
+            # Swallowed here by contract (caller gets the notice text), so
+            # this is the only place the failure reason can reach the logs.
+            LOGGER.warning(
+                "llm translation failed reason=%s",
+                getattr(exc, "reason", "translation_unavailable"),
+            )
             return exc.user_message
 
     def translate_html(self, html_text: str, *, to_chinese: bool = False) -> str:
