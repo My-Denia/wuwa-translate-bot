@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -201,6 +202,56 @@ def test_lockable_sources_cache_invalidates_after_atomic_db_replacement(
 
     refreshed = translator.lock_terms("声骸")
     assert refreshed.restore(refreshed.locked_text) == "Upgraded Echo"
+
+
+def test_sync_translate_logs_swallowed_llm_failure(monkeypatch, caplog, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    def fake_call(*_args, **_kwargs):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="timeout")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.sentence"):
+        result = translator.translate("这是一个需要翻译的句子。")
+
+    assert result == TRANSLATION_UNAVAILABLE_NOTICE
+    assert "llm translation failed reason=timeout" in caplog.text
+
+
+def test_marker_regexes_never_eat_prose(sample_db):
+    translator = SentenceTranslator(sample_db)
+    # Bare "spoiler(s)/剧透" and "Wuthering Waves X.Y" inside prose are real
+    # content, not markers; stripping them changed the meaning of the input.
+    prose = [
+        "Major spoilers ahead for the new quest",
+        "本帖包含剧透内容",
+        "no-spoiler policy is strict",
+        "spoilered content",
+        "The spoiler of the car improves downforce",
+        "Wuthering Waves 2.1 brings a new resonator",
+        "check example.com/ww2.0 for details",
+    ]
+    for text in prose:
+        assert translator.prepare_text(text) == text
+
+
+def test_marker_regexes_still_strip_marker_forms(sample_db):
+    translator = SentenceTranslator(sample_db)
+    cases = [
+        ("[spolier] (WW 3.4) 这是一个测试。", "这是一个测试。"),
+        ("剧透：今汐武器", "今汐武器"),
+        ("*spoilers*\n正文", "正文"),
+        ("#spoiler 今汐", "今汐"),
+        ("【剧透】新版本", "新版本"),
+        ("WW 2.4\n正文内容", "正文内容"),
+        ("spoiler: hidden text", "hidden text"),
+    ]
+    for source, expected in cases:
+        assert translator.prepare_text(source) == expected
 
 
 def test_prepare_text_strips_screenshot_noise_and_resolves_speaker(sample_db):
@@ -492,7 +543,31 @@ def test_later_starting_longer_overlapping_term_wins(sample_db):
     assert locked.restore(locked.locked_text) == "甲Long"
 
 
-def test_equal_length_overlapping_english_terms_use_stable_order(sample_db):
+def test_equal_length_overlapping_cjk_terms_use_stable_order(sample_db):
+    # CJK has no word boundaries, so overlapping CJK sources still compete;
+    # equal-length overlaps must resolve deterministically by span order.
+    add_synthetic_terms(
+        sample_db,
+        [
+            TermRecord("term", "Synthetic.json", "1", "Synthetic_1", "甲乙", "Left"),
+            TermRecord("term", "Synthetic.json", "2", "Synthetic_2", "乙丙", "Right"),
+        ],
+    )
+    translator = SentenceTranslator(sample_db)
+    outputs = []
+    for _ in range(5):
+        locked = translator.lock_terms("甲乙丙")
+        outputs.append(locked.restore(locked.locked_text))
+
+    # 乙丙 sorts before 甲乙 in the dictionary iteration order (zh_norm), so
+    # the deterministic winner is the 乙丙 span; the point is stability.
+    assert outputs == ["甲Right"] * 5
+
+
+def test_ascii_terms_do_not_lock_inside_words(sample_db):
+    # "AB"/"BC" glued inside the single word "ABC" must not lock: restoring
+    # would splice an official term into the middle of an unrelated word
+    # (the real-world shape is "New Echoes" -> "New 声骸es").
     add_synthetic_terms(
         sample_db,
         [
@@ -501,12 +576,22 @@ def test_equal_length_overlapping_english_terms_use_stable_order(sample_db):
         ],
     )
     translator = SentenceTranslator(sample_db)
-    outputs = []
-    for _ in range(5):
-        locked = translator.lock_terms("ABC")
-        outputs.append(locked.restore(locked.locked_text, to_en=False))
+    locked = translator.lock_terms("ABC")
 
-    assert outputs == ["A右项"] * 5
+    assert locked.locks == ()
+    assert locked.restore(locked.locked_text, to_en=False) == "ABC"
+
+
+def test_ascii_term_locks_with_word_boundaries(sample_db):
+    translator = SentenceTranslator(sample_db)
+
+    glued = translator.lock_terms("New Echoes drop rates")
+    assert glued.locks == ()
+    assert glued.restore(glued.locked_text, to_en=False) == "New Echoes drop rates"
+
+    bounded = translator.lock_terms("New Echo build")
+    assert len(bounded.locks) == 1
+    assert bounded.restore(bounded.locked_text, to_en=False) == "New 声骸 build"
 
 
 def test_mixed_chinese_and_english_terms_restore(sample_db):

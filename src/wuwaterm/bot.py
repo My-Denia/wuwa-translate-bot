@@ -18,7 +18,7 @@ from typing import Deque
 from urllib.parse import urlparse
 
 from telegram import ChatMember, Message, MessageEntity, Update
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -29,13 +29,13 @@ from telegram.ext import (
     filters,
 )
 
-from .channel import channel_post_handler
+from .channel import channel_post_handler, send_with_flood_retry
 from .channel_reply_index import ChannelReplyIndex
 from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_payload
 from .channel_runtime import ChannelRuntime
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
-from .normalize import has_cjk
+from .normalize import has_cjk, normalize_ascii
 from .sentence import (
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -505,8 +505,11 @@ class TranslationReply:
 
 
 def _parse_translation_args(args: list[str]) -> ParsedTranslationArgs:
+    """Parse LEADING direction flags; everything after the first non-flag
+    token is literal text. A "--to" inside prose ("/tr how --to convert
+    files") is therefore translated, not treated as a broken flag, and
+    formatting entities can be preserved for the untouched tail."""
     forced_to_chinese: bool | None = None
-    text_parts: list[str] = []
     index = 0
     while index < len(args):
         arg = args[index].strip()
@@ -522,10 +525,9 @@ def _parse_translation_args(args: list[str]) -> ParsedTranslationArgs:
                 return ParsedTranslationArgs(text="", direction_error=True)
             index += 2
             continue
-        text_parts.append(args[index])
-        index += 1
+        break
     return ParsedTranslationArgs(
-        text=" ".join(text_parts).strip(),
+        text=" ".join(args[index:]).strip(),
         forced_to_chinese=forced_to_chinese,
     )
 
@@ -749,9 +751,13 @@ async def _send_reply_chunk(
     if parse_mode is not None:
         kwargs["parse_mode"] = parse_mode
     if reply_to_message_id is None:
-        return await message.reply_text(text, do_quote=False, **kwargs)
-    return await message.reply_text(
-        text, reply_to_message_id=reply_to_message_id, **kwargs
+        return await send_with_flood_retry(
+            lambda: message.reply_text(text, do_quote=False, **kwargs)
+        )
+    return await send_with_flood_retry(
+        lambda: message.reply_text(
+            text, reply_to_message_id=reply_to_message_id, **kwargs
+        )
     )
 
 
@@ -868,9 +874,11 @@ async def _log_update_error(
     frames = ""
     if error is not None and error.__traceback__ is not None:
         frames = "".join(traceback.format_tb(error.__traceback__))
+    failed_message = getattr(update, "effective_message", None)
     LOGGER.error(
-        "update processing failed error_type=%s\n%s",
+        "update processing failed error_type=%s incoming_message=%s\n%s",
         safe_error_type(error),
+        redact_id(getattr(failed_message, "message_id", None)),
         frames,
     )
 
@@ -1071,7 +1079,12 @@ async def _translation_command(
         input_limit=_translation_input_limit(config, request, actor),
     )
     if not await _passes_delivery_gate(update, context):
-        LOGGER.info("translation reply skipped: authorization changed before delivery")
+        LOGGER.info(
+            "translation reply skipped: authorization changed before delivery "
+            "chat=%s incoming_message=%s",
+            redact_id(chat_id_for(update)),
+            redact_id(getattr(message, "message_id", None)),
+        )
         return
     await reply_to_user(update, translated.text, parse_mode=translated.parse_mode)
 
@@ -1579,10 +1592,9 @@ def translate_query(
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return official
-    if _is_ascii_fuzzy_query(prepared):
-        fuzzy = service.lookup(prepared, limit=5)
-        if fuzzy.best and fuzzy.best.score >= 80.0:
-            return fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
+    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
+    if fuzzy_answer:
+        return fuzzy_answer
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = translator.translate(prepared, to_chinese=to_chinese)
@@ -1609,10 +1621,9 @@ async def translate_query_async(
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return official
-    if _is_ascii_fuzzy_query(prepared):
-        fuzzy = service.lookup(prepared, limit=5)
-        if fuzzy.best and fuzzy.best.score >= 80.0:
-            return fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
+    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
+    if fuzzy_answer:
+        return fuzzy_answer
     if len(prepared) > LLM_INPUT_CHAR_LIMIT:
         return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
     translated = await translator.translate_async(prepared, to_chinese=to_chinese)
@@ -1639,12 +1650,9 @@ async def translate_request_async(
         official = result.best.entry.zh if to_chinese else result.best.entry.en
         if official:
             return TranslationReply(official)
-    if _is_ascii_fuzzy_query(prepared):
-        fuzzy = service.lookup(prepared, limit=5)
-        if fuzzy.best and fuzzy.best.score >= 80.0:
-            return TranslationReply(
-                fuzzy.best.entry.zh if to_chinese else fuzzy.best.entry.en
-            )
+    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
+    if fuzzy_answer:
+        return TranslationReply(fuzzy_answer)
     if len(prepared) > input_limit:
         return TranslationReply(
             f"Input is too long for translation ({input_limit} character limit)."
@@ -1667,6 +1675,10 @@ async def translate_request_async(
                 request.html, to_chinese=to_chinese
             )
         except LLMTranslationError as exc:
+            LOGGER.warning(
+                "tr html translation failed reason=%s",
+                getattr(exc, "reason", "translation_unavailable"),
+            )
             if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
                 return TranslationReply(exc.user_message)
             # The model broke the placeholder structure (or returned nothing).
@@ -1722,6 +1734,38 @@ def _is_ascii_fuzzy_query(text: str) -> bool:
     return bool(text) and text.isascii() and SHORT_QUERY_RE.match(text) is not None
 
 
+# Fuzzy pinyin answers a /tr query directly only for trustworthy match shapes.
+# Prefix/substring hits score >=80 even for 2-3 letter queries, so common
+# English words get hijacked ("he" is inside "shenghai" -> Echo); those
+# reasons additionally require a 4+ letter query. "exact" appears when an
+# exact hit had an empty requested-side official and lookup() fell through.
+_FUZZY_TRUSTED_REASONS = frozenset({"exact", "pinyin", "pinyin-abbrev"})
+_FUZZY_LENGTH_GATED_REASONS = frozenset({"pinyin-prefix", "pinyin-substring"})
+_FUZZY_MIN_GATED_QUERY_LEN = 4
+
+
+def _fuzzy_dictionary_answer(
+    service: TermService, prepared: str, *, to_chinese: bool
+) -> str | None:
+    if not _is_ascii_fuzzy_query(prepared):
+        return None
+    fuzzy = service.lookup(prepared, limit=5)
+    best = fuzzy.best
+    if best is None or best.score < 80.0:
+        return None
+    query_ascii = normalize_ascii(prepared)
+    if best.reason not in _FUZZY_TRUSTED_REASONS and not (
+        best.reason in _FUZZY_LENGTH_GATED_REASONS
+        and len(query_ascii) >= _FUZZY_MIN_GATED_QUERY_LEN
+    ):
+        # An exact abbreviation hit can be reported as "pinyin-prefix" when
+        # the abbreviation is also a prefix of the full pinyin ("sh" for
+        # "shenghai"); the abbreviation feature stays trusted either way.
+        if not (query_ascii and best.entry.pinyin_abbrev == query_ascii):
+            return None
+    return best.entry.zh if to_chinese else best.entry.en
+
+
 def _is_short_query(text: str) -> bool:
     return SHORT_QUERY_RE.match(text) is not None
 
@@ -1747,6 +1791,11 @@ async def _reply_direction_usage(
     # budget. Use the reject limiter so public chats cannot flood usage notices.
     if _consume_reject_limit(update, context):
         await reply_to_user(update, DIRECTION_USAGE_NOTICE)
+    else:
+        LOGGER.info(
+            "direction usage notice suppressed (reject budget) chat=%s",
+            redact_id(chat_id_for(update)),
+        )
 
 
 async def _translation_actor_or_reject(
@@ -1767,6 +1816,16 @@ async def _translation_actor_or_reject(
             else config.private_tr_reject_text
         )
         await reply_to_user(update, reject_text)
+    else:
+        # Suppressed rejection (silent flag or reject budget exhausted): leave
+        # a trace so rejection floods are visible in a log review.
+        chat = update.effective_chat
+        LOGGER.info(
+            "tr rejected without reply chat=%s chat_type=%s silent_flag=%s",
+            redact_id(chat_id_for(update)),
+            chat.type if chat else "unknown",
+            config.tr_reject_silent,
+        )
     return None
 
 
@@ -1887,6 +1946,22 @@ async def _is_group_admin(
             return cached
     try:
         member = await context.bot.get_chat_member(chat.id, user.id)
+    except NetworkError as exc:
+        # A transient blip must not reject a real admin (or silently discard
+        # an already-computed translation at the delivery gate): retry once,
+        # then fail closed without caching. TimedOut subclasses NetworkError.
+        LOGGER.warning(
+            "get_chat_member failed error_type=%s; retrying once",
+            safe_error_type(exc),
+        )
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+        except TelegramError as retry_exc:
+            LOGGER.warning(
+                "get_chat_member retry failed error_type=%s",
+                safe_error_type(retry_exc),
+            )
+            return False
     except TelegramError as exc:
         # Fail closed without caching; ids stay out of logs (quasi-sensitive).
         LOGGER.warning("get_chat_member failed error_type=%s", safe_error_type(exc))

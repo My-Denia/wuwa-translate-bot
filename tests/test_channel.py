@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from wuwaterm.logging_utils import REDACTION_SECRET_ENV, redact_id
 from wuwaterm.bot import (
@@ -438,19 +438,22 @@ def test_english_exact_term_post_emits_official_chinese(monkeypatch, sample_db):
     assert llm_calls == []
 
 
-def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db):
+def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db, caplog):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "   ")
     update, message = channel_update(text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4018)
     context = make_context(sample_db)
 
-    asyncio.run(channel_post_handler(update, context))
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
 
     # Blank output triggers the plain fallback call; when that is blank too,
-    # the post stays silent (both attempts are content failures).
+    # the post stays silent (both attempts are content failures). The failure
+    # event names the stage that failed.
     assert message.replies == []
     assert context.bot.edits == []
     assert len(calls) == 2
+    assert "mode=plain-fallback" in caplog.text
 
 
 def test_structurally_changed_llm_html_falls_back_to_plain(monkeypatch, sample_db):
@@ -476,6 +479,119 @@ def test_structurally_changed_llm_html_falls_back_to_plain(monkeypatch, sample_d
     ]
 
 
+class FloodingFakeMessage(FakeMessage):
+    """FakeMessage whose reply_text raises RetryAfter on chosen attempts."""
+
+    def __init__(self, *args, flood_attempts=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flood_attempts = set(flood_attempts)
+        self.attempts = 0
+
+    async def reply_text(self, text: str, **kwargs):
+        self.attempts += 1
+        if self.attempts in self.flood_attempts:
+            raise RetryAfter(0)
+        return await super().reply_text(text, **kwargs)
+
+
+def test_channel_no_html_falls_back_to_plain_pipeline(monkeypatch, sample_db, caplog):
+    calls = []
+    enable_mock_llm(
+        monkeypatch, calls, lambda _t, _l: "This channel text needs translating."
+    )
+    update, message = channel_update(text=CN_TEXT, text_html="", message_id=4025)
+    context = make_context(sample_db)
+
+    with caplog.at_level(logging.INFO, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    assert "reason=no_html_plain_fallback" in caplog.text
+    assert [html_mode for _t, _l, html_mode in calls] == [False]
+    assert message.replies == [
+        ("This channel text needs translating.", None, 4025)
+    ]
+    runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+    # Plain route reserves exactly one call token; the consumed token stays
+    # in the rolling budget window.
+    assert len(runtime._budget_tokens) == 1
+
+
+def test_channel_no_html_dictionary_hit_still_exact(monkeypatch, sample_db):
+    disable_llm(monkeypatch)
+    llm_calls = forbid_llm_call(monkeypatch)
+    update, message = channel_update(text="声骸", text_html="", message_id=4026)
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert message.replies == [("Echo", None, 4026)]
+    assert llm_calls == []
+
+
+def test_channel_send_retries_once_after_flood_wait(monkeypatch, sample_db, caplog):
+    calls = []
+
+    def response(locked_text, _locks):
+        return html_with_segments(locked_text, "", "Translated text", "")
+
+    enable_mock_llm(monkeypatch, calls, response)
+    message = FloodingFakeMessage(
+        message_id=4027,
+        text=CN_TEXT,
+        text_html="<b>这是一段需要翻译的频道文本</b>",
+        sender_chat=SimpleNamespace(id=-3001, type="channel"),
+        is_automatic_forward=True,
+        flood_attempts={1},
+    )
+    update = SimpleNamespace(
+        update_id=None,
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-2001, type="supergroup"),
+        effective_user=None,
+    )
+    context = make_context(sample_db)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
+
+    assert "flood wait" in caplog.text
+    assert message.replies == [("<b>Translated text</b>", "HTML", 4027)]
+
+
+def test_channel_multichunk_flood_wait_never_duplicates(monkeypatch, sample_db):
+    calls = []
+    long_visible = "x" * 5000
+
+    def response(locked_text, _locks):
+        return html_with_segments(locked_text, "", long_visible, "")
+
+    enable_mock_llm(monkeypatch, calls, response)
+    # Flood on the SECOND chunk send: the retry must resend only chunk 2.
+    message = FloodingFakeMessage(
+        message_id=4028,
+        text=CN_TEXT,
+        text_html="<b>这是一段需要翻译的频道文本</b>",
+        sender_chat=SimpleNamespace(id=-3001, type="channel"),
+        is_automatic_forward=True,
+        flood_attempts={2},
+    )
+    update = SimpleNamespace(
+        update_id=None,
+        effective_message=message,
+        effective_chat=SimpleNamespace(id=-2001, type="supergroup"),
+        effective_user=None,
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    # Long HTML output downgrades to plain split chunks; each chunk exactly once.
+    assert len(message.replies) == 2
+    delivered = [text for text, _mode, _reply_to in message.replies]
+    assert "".join(delivered) == long_visible
+    assert message.attempts == 3  # chunk1 ok, chunk2 flood, chunk2 retry
+
+
 def test_html_content_failure_falls_back_to_plain_delivery(monkeypatch, sample_db):
     calls = []
 
@@ -499,7 +615,9 @@ def test_html_content_failure_falls_back_to_plain_delivery(monkeypatch, sample_d
     ]
 
 
-def test_html_transport_failure_stays_silent_without_fallback(monkeypatch, sample_db):
+def test_html_transport_failure_stays_silent_without_fallback(
+    monkeypatch, sample_db, caplog
+):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
@@ -515,11 +633,13 @@ def test_html_transport_failure_stays_silent_without_fallback(monkeypatch, sampl
     )
     context = make_context(sample_db)
 
-    asyncio.run(channel_post_handler(update, context))
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.channel"):
+        asyncio.run(channel_post_handler(update, context))
 
     # Transport-shaped failures would fail again immediately; no plain retry.
     assert calls == [True]
     assert message.replies == []
+    assert "mode=html-attempt" in caplog.text
 
 
 def test_invalid_html_result_is_delivered_as_plain(monkeypatch, sample_db):

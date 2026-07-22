@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from telegram import Update
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from .channel_reply_index import ChannelReplyIndex, OriginalPostClaim
@@ -48,6 +48,32 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 LONG_OUTPUT_MODE_SUFFIX = "plain-split"
+FLOOD_RETRY_MAX_SLEEP_SECONDS = 60.0
+
+
+async def send_with_flood_retry(send_callable):
+    """Run one Telegram send/edit; on RetryAfter, wait once and retry.
+
+    A 429 flood-wait guarantees the request was NOT executed, so a single
+    retry cannot duplicate (unlike TimedOut/NetworkError, which may have
+    succeeded server-side and are deliberately not retried). Granularity is
+    ONE API call: retrying a whole multi-chunk emit would resend chunks that
+    were already delivered. A second RetryAfter propagates to the caller's
+    normal error handling.
+    """
+    try:
+        return await send_callable()
+    except RetryAfter as exc:
+        raw_delay = getattr(exc, "retry_after", None)
+        if hasattr(raw_delay, "total_seconds"):  # PTB >=23 returns timedelta
+            raw_delay = raw_delay.total_seconds()
+        delay = min(
+            max(float(raw_delay) if raw_delay is not None else 1.0, 0.0),
+            FLOOD_RETRY_MAX_SLEEP_SECONDS,
+        )
+        LOGGER.warning("telegram flood wait; retrying send in %.1fs", delay)
+        await asyncio.sleep(delay)
+        return await send_callable()
 
 
 def _channel_runtime(
@@ -312,16 +338,19 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         if not html_text:
+            # PTB renders non-empty HTML for any non-empty text; if that ever
+            # stops holding, degrade to the plain pipeline instead of dropping
+            # the post (the dictionary and LLM paths only need `plain`).
             _channel_event(
                 runtime,
-                stage="skipped",
-                reason="no_html",
+                stage="received",
+                reason="no_html_plain_fallback",
                 message=message,
                 chat_id=chat_id,
                 is_edit=is_edit,
                 text_len=safe_text_len(plain),
             )
-            return
+            html_text = None
         # Direction by script: enough Chinese -> translate to English (default);
         # no Chinese but enough Latin letters -> translate to Chinese. Anything
         # else (emoji / links / numbers only) is not worth translating -> skip.
@@ -418,12 +447,14 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # The HTML route reserves a second call so a plain-text retry after a
         # content-shape failure (broken placeholders / blank output) can run
         # without hitting "no unused call reservation"; the unused token is
-        # released when the admission exits.
-        required_calls = (
-            2
-            if len(plain) <= LLM_INPUT_CHAR_LIMIT
-            else len(split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT))
-        )
+        # released when the admission exits. The plain routes need exactly
+        # one call per chunk.
+        if len(plain) <= LLM_INPUT_CHAR_LIMIT:
+            required_calls = 2 if html_text else 1
+        else:
+            required_calls = len(
+                split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT)
+            )
         admission, rejection_reason = runtime.reserve(required_calls)
         if admission is None:
             _channel_event(
@@ -527,6 +558,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     is_edit=is_edit,
                     direction=direction,
                     text_len=safe_text_len(plain),
+                    mode=getattr(exc, "failure_stage", "none"),
                 )
                 return
             _channel_event(
@@ -731,12 +763,24 @@ def _passes_final_delivery_gate(
 async def _translate_channel_input(
     translator: SentenceTranslator,
     plain: str,
-    html_text: str,
+    html_text: str | None,
     *,
     to_chinese: bool,
     before_llm_call,
 ) -> tuple[str, str | None, str]:
+    """Translate one post; LLMTranslationError carries a ``failure_stage``
+    attribute (html-attempt / plain-fallback / plain-no-html /
+    plain-input-split) so the caller's log event can say which call failed."""
     if len(plain) <= LLM_INPUT_CHAR_LIMIT:
+        if not html_text:
+            translated = await _translate_plain_stage(
+                translator,
+                plain,
+                stage="plain-no-html",
+                to_chinese=to_chinese,
+                before_llm_call=before_llm_call,
+            )
+            return translated, None, "plain-no-html"
         try:
             return (
                 await translator.translate_html_async(
@@ -749,27 +793,50 @@ async def _translate_channel_input(
             )
         except LLMTranslationError as exc:
             if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
+                exc.failure_stage = "html-attempt"
                 raise
             # The model broke the placeholder structure (or returned nothing).
             # Retrying as plain drops formatting but keeps the reply delivered;
             # before_llm_call keeps the budget/staleness/authorization rechecks.
-            translated = await translator.translate_async(
+            translated = await _translate_plain_stage(
+                translator,
                 plain,
+                stage="plain-fallback",
                 to_chinese=to_chinese,
                 before_llm_call=before_llm_call,
-                propagate_errors=True,
             )
             return translated, None, "plain-after-html-failure"
     translated_chunks: list[str] = []
     for chunk in split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT):
-        translated = await translator.translate_async(
+        translated = await _translate_plain_stage(
+            translator,
             chunk,
+            stage="plain-input-split",
+            to_chinese=to_chinese,
+            before_llm_call=before_llm_call,
+        )
+        translated_chunks.append(translated)
+    return "\n".join(translated_chunks), None, "plain-input-split"
+
+
+async def _translate_plain_stage(
+    translator: SentenceTranslator,
+    text: str,
+    *,
+    stage: str,
+    to_chinese: bool,
+    before_llm_call,
+) -> str:
+    try:
+        return await translator.translate_async(
+            text,
             to_chinese=to_chinese,
             before_llm_call=before_llm_call,
             propagate_errors=True,
         )
-        translated_chunks.append(translated)
-    return "\n".join(translated_chunks), None, "plain-input-split"
+    except LLMTranslationError as exc:
+        exc.failure_stage = stage
+        raise
 
 
 async def _emit(
@@ -947,10 +1014,12 @@ async def _emit_unchecked(
             mode=delivery_mode,
         ):
             return "gated"
-        sent_message = await message.reply_text(
-            chunk,
-            parse_mode=delivery_parse_mode,
-            reply_to_message_id=message.message_id,
+        sent_message = await send_with_flood_retry(
+            lambda: message.reply_text(
+                chunk,
+                parse_mode=delivery_parse_mode,
+                reply_to_message_id=message.message_id,
+            )
         )
         reply_message_id = getattr(sent_message, "message_id", None)
         if reply_message_id is not None:
@@ -1053,10 +1122,12 @@ async def _edit_reply_chunks(
                 mode=mode,
             ):
                 return "gated"
-            sent_message = await message.reply_text(
-                chunk,
-                parse_mode=parse_mode,
-                reply_to_message_id=message.message_id,
+            sent_message = await send_with_flood_retry(
+                lambda: message.reply_text(
+                    chunk,
+                    parse_mode=parse_mode,
+                    reply_to_message_id=message.message_id,
+                )
             )
             reply_message_id = getattr(sent_message, "message_id", None)
             if reply_message_id is not None:
@@ -1161,11 +1232,13 @@ async def _edit_existing_reply(
     mode: str,
 ) -> bool:
     try:
-        await context.bot.edit_message_text(
-            text=text,
-            chat_id=chat_id,
-            message_id=existing_reply_id,
-            parse_mode=parse_mode,
+        await send_with_flood_retry(
+            lambda: context.bot.edit_message_text(
+                text=text,
+                chat_id=chat_id,
+                message_id=existing_reply_id,
+                parse_mode=parse_mode,
+            )
         )
     except BadRequest as exc:
         if "not modified" in str(exc).lower():

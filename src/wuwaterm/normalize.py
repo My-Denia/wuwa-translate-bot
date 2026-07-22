@@ -7,11 +7,21 @@ import unicodedata
 
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
+# Marker-form matching only. Both patterns once matched bare words anywhere,
+# which deleted real prose ("Wuthering Waves 2.1 brings..." lost its subject,
+# "Major spoilers ahead" became "Majors ahead") and mangled URLs like
+# example.com/ww2.0. Bracketed/hashtag tags still strip anywhere in a line;
+# bare word forms only as a line-leading label or a whole decorated line.
+_VERSION_TAG_CORE = r"(?:ww|wuthering\s*waves)\s*\d+(?:\.\d+){1,2}"
 VERSION_TAG_RE = re.compile(
-    r"(?i)(?:[\[(（【]\s*)?\b(?:ww|wuthering\s*waves)\s*\d+(?:\.\d+){1,2}\b(?:\s*[\])）】])?"
+    rf"(?im)(?:[\[(（【]\s*{_VERSION_TAG_CORE}\s*[\])）】])|(?:^\s*{_VERSION_TAG_CORE}\s*$)"
 )
+_SPOILER_WORDS = r"(?:spoilers|spoiler|spoliers|spolier|剧透)"
 SPOILER_RE = re.compile(
-    r"(?i)(?:[\[(（【#*_ -]*\s*(?:spoiler|spoilers|spolier|spoliers|剧透)\s*[:：-]?\s*[\])）】#*_ -]*)"
+    rf"(?im)(?:[\[(（【]\s*{_SPOILER_WORDS}\s*[:：-]?\s*[\])）】])"
+    rf"|(?:#{_SPOILER_WORDS})"
+    rf"|(?:^\s*{_SPOILER_WORDS}\s*[:：-]\s*)"
+    rf"|(?:^[\s*_#-]*{_SPOILER_WORDS}[\s*_#:：-]*$)"
 )
 QUOTE_BAR_RE = re.compile(r"(?m)^\s*(?:[>|｜│┃▌▍▏]+\s*)+")
 BLANK_LINES_RE = re.compile(r"\n{3,}")
