@@ -446,12 +446,14 @@ def test_blank_llm_html_channel_post_is_silent(monkeypatch, sample_db):
 
     asyncio.run(channel_post_handler(update, context))
 
+    # Blank output triggers the plain fallback call; when that is blank too,
+    # the post stays silent (both attempts are content failures).
     assert message.replies == []
     assert context.bot.edits == []
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
-def test_structurally_changed_llm_html_fails_closed(monkeypatch, sample_db):
+def test_structurally_changed_llm_html_falls_back_to_plain(monkeypatch, sample_db):
     calls = []
 
     def response(_locked_text, locks):
@@ -465,7 +467,84 @@ def test_structurally_changed_llm_html_fails_closed(monkeypatch, sample_db):
 
     asyncio.run(channel_post_handler(update, context))
 
+    # HTML structure was broken by the model, so the second (plain) call's
+    # output is delivered as plain text instead of dropping the post. The
+    # formatting never reaches Telegram as HTML.
+    assert len(calls) == 2
+    assert message.replies == [
+        ("<div><b>Jinhsi says Echo is strong</div>", None, 4020)
+    ]
+
+
+def test_html_content_failure_falls_back_to_plain_delivery(monkeypatch, sample_db):
+    calls = []
+
+    def response(_locked_text, _locks):
+        if len(calls) == 1:
+            # First (HTML) call loses every structural placeholder.
+            return "placeholders all gone"
+        return "This channel text needs translating."
+
+    enable_mock_llm(monkeypatch, calls, response)
+    update, message = channel_update(
+        text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4022
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert [html_mode for _text, _locks, html_mode in calls] == [True, False]
+    assert message.replies == [
+        ("This channel text needs translating.", None, 4022)
+    ]
+
+
+def test_html_transport_failure_stays_silent_without_fallback(monkeypatch, sample_db):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    calls = []
+
+    async def fake_call(_locked_text, _locks, html_mode=False, **_kwargs):
+        calls.append(html_mode)
+        raise LLMTranslationError("unavailable", reason="timeout")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    update, message = channel_update(
+        text=CN_TEXT, text_html=CN_TEXT_HTML, message_id=4023
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    # Transport-shaped failures would fail again immediately; no plain retry.
+    assert calls == [True]
     assert message.replies == []
+
+
+def test_invalid_html_result_is_delivered_as_plain(monkeypatch, sample_db):
+    calls = []
+
+    def response(locked_text, _locks):
+        return html_with_segments(locked_text, "", "Translated channel text", "")
+
+    enable_mock_llm(monkeypatch, calls, response)
+    # Force the post-restore validation to reject the (otherwise valid) HTML
+    # to exercise the belt-and-suspenders branch.
+    monkeypatch.setattr(
+        "wuwaterm.channel.validate_telegram_html", lambda _html: False
+    )
+    update, message = channel_update(
+        text=CN_TEXT,
+        text_html="<b>这是一段需要翻译的频道文本</b>",
+        message_id=4024,
+    )
+    context = make_context(sample_db)
+
+    asyncio.run(channel_post_handler(update, context))
+
+    assert len(calls) == 1
+    assert message.replies == [("Translated channel text", None, 4024)]
 
 
 def test_caption_post_uses_same_html_pipeline(monkeypatch, sample_db):

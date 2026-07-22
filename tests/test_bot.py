@@ -5,11 +5,12 @@ import logging
 import os
 import re
 import traceback
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from telegram import Update, User
+from telegram import Chat, MessageEntity, Update, User
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler
 
@@ -60,6 +61,8 @@ from wuwaterm.bot import (
     status_command,
     term_command,
     translate_query_async,
+    _inline_translation_html,
+    _log_update_error,
     _validate_llm_config_env,
 )
 from wuwaterm.lookup import TermService
@@ -1412,6 +1415,37 @@ def test_create_application_wires_llm_timeout(sample_db):
     assert translator.llm_timeout_seconds == 12.5
 
 
+def test_create_application_registers_error_handler(sample_db):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+
+    assert _log_update_error in app.error_handlers
+
+
+def test_update_error_handler_logs_type_and_frames_only(caplog):
+    # A dynamic value: frames show source lines, so a literal would leak via
+    # the raise site itself; runtime values only ever appear in the message.
+    leaked_chat_id = int("-990011")
+    try:
+        raise KeyError(leaked_chat_id)
+    except KeyError as exc:
+        error = exc
+    context = SimpleNamespace(error=error)
+
+    with caplog.at_level(logging.ERROR, logger="wuwaterm.bot"):
+        asyncio.run(_log_update_error(None, context))
+
+    assert "update processing failed error_type=KeyError" in caplog.text
+    assert "-990011" not in caplog.text  # exception message never logged
+    assert "test_bot.py" in caplog.text  # traceback frames are logged
+
+
+def test_update_error_handler_tolerates_missing_error(caplog):
+    with caplog.at_level(logging.ERROR, logger="wuwaterm.bot"):
+        asyncio.run(_log_update_error(None, SimpleNamespace()))
+
+    assert "update processing failed error_type=NoneType" in caplog.text
+
+
 def test_create_application_shutdown_closes_translator(monkeypatch, sample_db):
     app = create_application("123:ABC", sample_db, config=BotConfig())
     translator = app.bot_data[TRANSLATOR_KEY]
@@ -2635,10 +2669,11 @@ def test_formatted_reply_without_llm_uses_plain_fallback(monkeypatch, sample_db)
     assert message.reply_kwargs == [{"do_quote": False}]
 
 
-def test_formatted_reply_structural_drift_fails_closed(monkeypatch, sample_db):
+def test_formatted_reply_structural_drift_falls_back_to_plain(monkeypatch, sample_db):
     monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
     monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    modes = []
 
     async def fake_call(
         _locked_text,
@@ -2648,8 +2683,11 @@ def test_formatted_reply_structural_drift_fails_closed(monkeypatch, sample_db):
         timeout_seconds=45.0,
         transport=None,
     ):
-        assert html_mode is True
-        return "<script>translated</script>"
+        modes.append(html_mode)
+        if html_mode:
+            # Broken structure: the HTML placeholders are gone entirely.
+            return "<script>translated</script>"
+        return "This sentence needs translating."
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
     replied = SimpleNamespace(
@@ -2664,8 +2702,101 @@ def test_formatted_reply_structural_drift_fails_closed(monkeypatch, sample_db):
 
     asyncio.run(term_command(update, context))
 
-    assert message.replies == [(TRANSLATION_UNAVAILABLE_NOTICE, None)]
+    # The broken HTML attempt is followed by a plain retry whose output is
+    # delivered, instead of replying with the unavailable notice.
+    assert modes == [True, False]
+    assert message.replies == [("This sentence needs translating.", None)]
     assert message.reply_kwargs == [{"do_quote": False}]
+
+
+def make_inline_message(text: str, entities):
+    """Command message carrying its own formatting entities (inline /tr)."""
+    return SimpleNamespace(
+        text=text,
+        entities=list(entities),
+        date=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        chat=Chat(id=1, type="private"),
+    )
+
+
+def test_inline_html_renders_bold_tail():
+    message = make_inline_message(
+        "/tr 这是一个需要翻译的句子。",
+        [MessageEntity(type=MessageEntity.BOLD, offset=4, length=12)],
+    )
+    assert (
+        _inline_translation_html(message, "这是一个需要翻译的句子。")
+        == "<b>这是一个需要翻译的句子。</b>"
+    )
+
+
+def test_inline_html_shifts_utf16_offsets_after_emoji():
+    # "/tr " = 4 UTF-16 units, "👋" = 2 units, " " = 1 unit -> bold at 7.
+    message = make_inline_message(
+        "/tr 👋 加粗文字",
+        [MessageEntity(type=MessageEntity.BOLD, offset=7, length=4)],
+    )
+    assert _inline_translation_html(message, "👋 加粗文字") == "👋 <b>加粗文字</b>"
+
+
+def test_inline_html_skips_leading_direction_flag():
+    message = make_inline_message(
+        "/tr --to zh bold words",
+        [MessageEntity(type=MessageEntity.BOLD, offset=12, length=10)],
+    )
+    assert _inline_translation_html(message, "bold words") == "<b>bold words</b>"
+
+
+def test_inline_html_midtext_flag_falls_back_to_plain():
+    # The parser strips a mid-text flag, so the raw tail no longer matches the
+    # parsed inline text; formatting is dropped rather than guessed.
+    message = make_inline_message(
+        "/tr bold --to zh words",
+        [MessageEntity(type=MessageEntity.BOLD, offset=4, length=4)],
+    )
+    assert _inline_translation_html(message, "bold words") is None
+
+
+def test_inline_html_entity_straddling_prefix_falls_back_to_plain():
+    message = make_inline_message(
+        "/tr 词条文本",
+        [MessageEntity(type=MessageEntity.BOLD, offset=2, length=6)],
+    )
+    assert _inline_translation_html(message, "词条文本") is None
+
+
+def test_inline_html_bot_command_entity_alone_is_plain():
+    message = make_inline_message(
+        "/tr 普通文本",
+        [MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=3)],
+    )
+    assert _inline_translation_html(message, "普通文本") is None
+
+
+def test_tr_inline_formatted_text_uses_html_pipeline(monkeypatch, sample_db):
+    calls = []
+
+    def response(locked_text, _locks):
+        return html_with_segments(
+            locked_text, "", "This sentence needs translating.", ""
+        )
+
+    enable_mock_llm(monkeypatch, calls, response)
+    update, message = fake_update()
+    message.text = "/tr 这是一个需要翻译的句子。"
+    message.entities = [
+        MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=3),
+        MessageEntity(type=MessageEntity.BOLD, offset=4, length=12),
+    ]
+    message.date = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    message.chat = Chat(id=1, type="private")
+    context = fake_context(sample_db, ["这是一个需要翻译的句子。"])
+
+    asyncio.run(term_command(update, context))
+
+    assert message.replies == [("<b>This sentence needs translating.</b>", None)]
+    assert message.reply_kwargs == [{"do_quote": False, "parse_mode": "HTML"}]
+    assert len(calls) == 1
 
 
 def test_tr_inline_text_wins_over_replied_content(sample_db):

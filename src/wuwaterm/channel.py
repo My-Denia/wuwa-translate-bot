@@ -37,7 +37,10 @@ from .telegram_text import (
     split_telegram_text,
     telegram_text_units,
 )
-from .translation_policy import LLM_INPUT_CHAR_LIMIT
+from .translation_policy import (
+    HTML_CONTENT_FAILURE_REASONS,
+    LLM_INPUT_CHAR_LIMIT,
+)
 
 if TYPE_CHECKING:
     from .bot import BotConfig
@@ -412,8 +415,12 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
+        # The HTML route reserves a second call so a plain-text retry after a
+        # content-shape failure (broken placeholders / blank output) can run
+        # without hitting "no unused call reservation"; the unused token is
+        # released when the admission exits.
         required_calls = (
-            1
+            2
             if len(plain) <= LLM_INPUT_CHAR_LIMIT
             else len(split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT))
         )
@@ -535,6 +542,8 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
         if translated_parse_mode == "HTML" and not validate_telegram_html(translated):
+            # The translation itself succeeded; only the markup is unusable.
+            # Deliver the stripped plain text instead of dropping the reply.
             _channel_event(
                 runtime,
                 stage="llm",
@@ -545,7 +554,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 direction=direction,
                 text_len=safe_text_len(plain),
             )
-            return
+            translated = strip_telegram_html(translated)
+            translated_parse_mode = None
+            translated_mode = "plain-after-invalid-html"
         if translated_parse_mode == "HTML":
             plain_translated = strip_telegram_html(translated)
             if telegram_text_units(plain_translated) > TELEGRAM_TEXT_MESSAGE_LIMIT:
@@ -726,15 +737,29 @@ async def _translate_channel_input(
     before_llm_call,
 ) -> tuple[str, str | None, str]:
     if len(plain) <= LLM_INPUT_CHAR_LIMIT:
-        return (
-            await translator.translate_html_async(
-                html_text,
+        try:
+            return (
+                await translator.translate_html_async(
+                    html_text,
+                    to_chinese=to_chinese,
+                    before_llm_call=before_llm_call,
+                ),
+                "HTML",
+                "HTML",
+            )
+        except LLMTranslationError as exc:
+            if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
+                raise
+            # The model broke the placeholder structure (or returned nothing).
+            # Retrying as plain drops formatting but keeps the reply delivered;
+            # before_llm_call keeps the budget/staleness/authorization rechecks.
+            translated = await translator.translate_async(
+                plain,
                 to_chinese=to_chinese,
                 before_llm_call=before_llm_call,
-            ),
-            "HTML",
-            "HTML",
-        )
+                propagate_errors=True,
+            )
+            return translated, None, "plain-after-html-failure"
     translated_chunks: list[str] = []
     for chunk in split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT):
         translated = await translator.translate_async(
