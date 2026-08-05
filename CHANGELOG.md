@@ -3,6 +3,42 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## 0.2.1 - 2026-08-06
+
+Maintenance release packaging post-v0.2.0 production hardening already merged
+as PRs #41–#45. Game-data pin stays Wuthering Waves 3.5.0 / resource 3.5.5 /
+changelist 8059200 at `dae29691c04ef0f48d0810b5d244fb0b37288c60`.
+
+### Telegram Runtime (#41–#43)
+
+- Channel LLM content-shape failures (`invalid_response` / `html_integrity`)
+  now retry once as plain text instead of dropping the post, within the
+  per-minute call budget (including correct behaviour when the budget is 1).
+- Malformed API envelopes are reported as `invalid_api_response`, separate
+  from content-shape `invalid_response`.
+- Inline `/tr <text>` preserves Telegram rich-text entities; PTB error
+  handling covers NetworkError-style update failures.
+- Normalization fixes: spoiler markers and version tags no longer eat
+  mid-sentence prose or mangle URLs; term-lock / fuzzy design flaws that
+  produced wrong translations are repaired with regression tests.
+- Delivery and observability hardening for linked-channel paths.
+
+### Maintainer Architecture (#44–#45)
+
+- Formal architecture map (`docs/architecture.md`) and ADRs 0001–0008.
+- Fail-closed import-boundary guard (`scripts/check_architecture_boundaries.py`)
+  wired into local validation and CI, with Codex P2 follow-ups for nested
+  packages and TYPE_CHECKING / presentation import rules.
+- No intentional runtime behaviour change in #44–#45.
+
+### Upgrading From 0.2.0
+
+- Deploy only through `deploy/vps-update.sh` on a clean Git checkout where
+  `HEAD == origin/main` (see `docs/deployment.md`). Runtime fixes from
+  #41–#43 may already be live on long-running hosts; this release still
+  advances package version metadata and ships the architecture guard.
+- No state-directory migration and no game-data pin change from 0.2.0.
+
 ## 0.2.0 - 2026-07-17
 
 Production hardening release: Wuthering Waves 3.5 data pin, transactional VPS
