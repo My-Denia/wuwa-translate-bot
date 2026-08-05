@@ -9,6 +9,7 @@
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
+.venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python -m pytest
 uv lock --check
 ```
@@ -35,6 +36,8 @@ handler E2E still requires observing the bot's reply from Telegram.
 `check_repo_hygiene.py` and `check_non_goals.py` guard against committing
 generated data, TextMap content, SQLite DB files, runtime settings, channel
 reply indexes, tokens, API keys, and real Telegram identifiers.
+`check_architecture_boundaries.py` guards forbidden import directions between
+presentation, domain, and builder modules (see [Architecture](architecture.md)).
 
 ## Windows Reference
 
