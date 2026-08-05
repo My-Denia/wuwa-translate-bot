@@ -174,8 +174,17 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
             type_only = node in type_checking_nodes
             if node.level:
                 if module:
-                    key = _resolve_relative_import(path, node.level, module)
-                    events.append((key, type_only, node.lineno))
+                    # from ..ui import helper  → record both ``ui`` and ``ui.helper``.
+                    # Package-from syntax drops the submodule if we only keep
+                    # ``module``; _pkg_modules keys the file as ``ui.helper``.
+                    base_key = _resolve_relative_import(path, node.level, module)
+                    events.append((base_key, type_only, node.lineno))
+                    for entry in node.names:
+                        if entry.name == "*":
+                            continue
+                        sub = entry.name.split(".", 1)[0]
+                        sub_key = f"{base_key}.{sub}" if base_key else sub
+                        events.append((sub_key, type_only, node.lineno))
                 else:
                     for entry in node.names:
                         key = _resolve_relative_import(
@@ -184,9 +193,13 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
                         events.append((key, type_only, node.lineno))
             elif module.startswith("wuwaterm."):
                 # Keep full nested path: wuwaterm.domain.helper → domain.helper
-                events.append(
-                    (module[len("wuwaterm.") :], type_only, node.lineno)
-                )
+                rest = module[len("wuwaterm.") :]
+                events.append((rest, type_only, node.lineno))
+                for entry in node.names:
+                    if entry.name == "*":
+                        continue
+                    sub = entry.name.split(".", 1)[0]
+                    events.append((f"{rest}.{sub}", type_only, node.lineno))
             elif module == "wuwaterm":
                 for entry in node.names:
                     events.append(

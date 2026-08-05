@@ -257,3 +257,73 @@ def test_relative_nested_import_resolves_against_importer(tmp_path: Path, monkey
     events = cab._iter_import_events(pkg / "domain" / "service.py")
     names = {n for n, *_ in events}
     assert "ui.helper" in names
+
+
+def test_package_from_submodule_import_records_dotted_key(tmp_path: Path, monkeypatch):
+    """from ..ui import helper must surface ui.helper, not only ui."""
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "domain").mkdir(parents=True)
+    (pkg / "ui").mkdir(parents=True)
+    (pkg / "domain" / "service.py").write_text(
+        "from ..ui import helper\n",
+        encoding="utf-8",
+    )
+    (pkg / "ui" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    events = cab._iter_import_events(pkg / "domain" / "service.py")
+    names = {n for n, *_ in events}
+    assert "ui" in names
+    assert "ui.helper" in names
+
+
+def test_package_from_submodule_forbidden_edge_is_caught(tmp_path: Path, monkeypatch):
+    """Classified nested presentation via package-from must fail domain import."""
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "ui").mkdir(parents=True)
+    (pkg / "lookup.py").write_text("from .ui import helper\n", encoding="utf-8")
+    (pkg / "ui" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    for name in (
+        "bot",
+        "channel",
+        "telegram_html",
+        "telegram_text",
+        "normalize",
+        "models",
+        "cli",
+        "sentence",
+        "translation_policy",
+        "runtime_keys",
+        "constants",
+        "settings",
+        "channel_reply_index",
+        "channel_reply_schema",
+        "channel_runtime",
+        "logging_utils",
+        "db",
+        "builder",
+        "data_source",
+        "build_pinyin",
+    ):
+        path = pkg / f"{name}.py"
+        if not path.exists():
+            path.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    # Treat nested ui.helper as presentation so the edge is forbidden for lookup.
+    monkeypatch.setattr(
+        cab,
+        "PRESENTATION",
+        frozenset({"bot", "channel", "telegram_html", "telegram_text", "ui.helper"}),
+    )
+    monkeypatch.setattr(
+        cab,
+        "ALL_CLASSIFIED",
+        cab.ALL_CLASSIFIED | frozenset({"ui.helper"}),
+    )
+    failures = cab.check()
+    assert any(
+        "must not import presentation" in f and "ui.helper" in f for f in failures
+    ), failures
