@@ -86,6 +86,7 @@ Run the standard validation set:
 ```bash
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
+.venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python -m pytest
 ```
 
@@ -116,6 +117,8 @@ details.
 
 ## Guides
 
+- [Architecture](docs/architecture.md): maintainer map of modules, request
+  flows, trust boundaries, single-instance topology, and ADRs.
 - [Changelog](CHANGELOG.md): notable source changes by release.
 - [Deployment](docs/deployment.md): Docker Compose service on the VPS, `.env`
   handling, data refresh commands, and smoke checks.
@@ -176,6 +179,7 @@ For a full local validation pass, run:
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
+.venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python -m pytest
 ```
 
