@@ -208,3 +208,52 @@ def test_presentation_must_not_import_cli(monkeypatch, tmp_path: Path):
     (pkg / "bot.py").write_text("from .cli import main\n", encoding="utf-8")
     failures = cab.check()
     assert any("must not import bootstrap cli" in f for f in failures)
+
+
+def test_nested_package_init_is_discovered_and_scanned(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "domain").mkdir(parents=True)
+    (pkg / "lookup.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "domain" / "__init__.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from ..bot import BotConfig\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    modules = cab._pkg_modules()
+    assert "domain" in modules
+    assert modules["domain"].name == "__init__.py"
+    failures = cab.check()
+    assert any("unclassified modules" in f and "domain" in f for f in failures)
+
+
+def test_nested_import_keys_are_preserved(tmp_path: Path):
+    from scripts import check_architecture_boundaries as cab
+
+    assert cab._normalize_imported_name("wuwaterm.domain.helper") == "domain.helper"
+    probe = tmp_path / "importer.py"
+    # Absolute nested form
+    probe.write_text("import wuwaterm.ui.helper\n", encoding="utf-8")
+    names = {n for n, *_ in cab._iter_import_events(probe)}
+    assert "ui.helper" in names
+    assert "ui" not in names or "ui.helper" in names
+
+
+def test_relative_nested_import_resolves_against_importer(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "domain").mkdir(parents=True)
+    (pkg / "ui").mkdir(parents=True)
+    (pkg / "domain" / "service.py").write_text(
+        "from ..ui.helper import X\n",
+        encoding="utf-8",
+    )
+    (pkg / "ui" / "helper.py").write_text("X = 1\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    events = cab._iter_import_events(pkg / "domain" / "service.py")
+    names = {n for n, *_ in events}
+    assert "ui.helper" in names

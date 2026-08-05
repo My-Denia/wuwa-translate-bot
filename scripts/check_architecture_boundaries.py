@@ -88,34 +88,73 @@ TELEGRAM_SDK_PREFIXES = (
 )
 
 
+def _module_key_for_path(path: Path) -> str | None:
+    """Return classification key for a path under PACKAGE, or None to skip."""
+    rel = path.relative_to(PACKAGE)
+    if path.name == "__init__.py":
+        # Package root __init__ is not a classified "module edge" today.
+        # Nested package initializers (domain/__init__.py) MUST be scanned —
+        # otherwise forbidden imports hide in __init__ and escape every rule.
+        if len(rel.parts) == 1:
+            return None
+        return ".".join(rel.parts[:-1])
+    return ".".join(rel.with_suffix("").parts)
+
+
 def _pkg_modules() -> dict[str, Path]:
     """Map local module keys to paths for every shipped package module.
 
     Top-level files use their stem (``bot``). Nested files use dotted relative
-    keys (``domain.helper`` for ``src/wuwaterm/domain/helper.py``) so they are
-    still classified and scanned — a flat-only glob would let subpackages
-    silently escape every boundary rule.
+    keys (``domain.helper`` for ``src/wuwaterm/domain/helper.py``;
+    ``domain`` for ``src/wuwaterm/domain/__init__.py``) so subpackages cannot
+    silently escape classification or import scanning.
     """
     modules: dict[str, Path] = {}
     if not PACKAGE.is_dir():
         return modules
     for path in sorted(PACKAGE.rglob("*.py")):
-        if path.name == "__init__.py":
+        key = _module_key_for_path(path)
+        if key is None:
             continue
-        rel = path.relative_to(PACKAGE)
-        if len(rel.parts) == 1:
-            key = path.stem
-        else:
-            key = ".".join(rel.with_suffix("").parts)
         modules[key] = path
     return modules
+
+
+def _importer_package_parts(path: Path) -> tuple[str, ...]:
+    """Package parts that relative imports resolve against for ``path``."""
+    try:
+        rel = path.relative_to(PACKAGE)
+    except ValueError:
+        return ()
+    if path.name == "__init__.py":
+        return rel.parts[:-1]
+    return rel.with_suffix("").parts[:-1]
+
+
+def _resolve_relative_import(
+    importer: Path, level: int, module: str | None, name: str | None = None
+) -> str:
+    """Resolve a relative import to a package-local dotted key when possible."""
+    pkg_parts = list(_importer_package_parts(importer))
+    # PEP 328: level is the number of leading dots. level=1 → current package.
+    up = max(level - 1, 0)
+    if up > len(pkg_parts):
+        base: list[str] = []
+    else:
+        base = pkg_parts[: len(pkg_parts) - up]
+    if module:
+        return ".".join(base + module.split(".")) if base else module
+    if name:
+        return ".".join(base + [name.split(".", 1)[0]]) if base else name.split(".", 1)[0]
+    return ".".join(base)
 
 
 def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
     """Return (imported_name, type_checking_only, lineno) for local + external.
 
-    `imported_name` is either a bare wuwaterm module stem (e.g. ``bot``) or a
-    dotted external module (e.g. ``telegram.ext``).
+    Local names keep full dotted keys when nested (e.g. ``domain.helper``),
+    matching ``_pkg_modules`` keys so layer intersections stay fail-closed.
+    External names remain dotted as imported (e.g. ``telegram.ext``).
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
@@ -132,25 +171,29 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level and module:
-                # from .foo import bar  or  from . import foo
-                top = module.split(".", 1)[0]
-                events.append((top, node in type_checking_nodes, node.lineno))
-            elif node.level and not module:
-                for entry in node.names:
-                    events.append(
-                        (entry.name.split(".", 1)[0], node in type_checking_nodes, node.lineno)
-                    )
+            type_only = node in type_checking_nodes
+            if node.level:
+                if module:
+                    key = _resolve_relative_import(path, node.level, module)
+                    events.append((key, type_only, node.lineno))
+                else:
+                    for entry in node.names:
+                        key = _resolve_relative_import(
+                            path, node.level, None, name=entry.name
+                        )
+                        events.append((key, type_only, node.lineno))
             elif module.startswith("wuwaterm."):
-                rest = module[len("wuwaterm.") :].split(".", 1)[0]
-                events.append((rest, node in type_checking_nodes, node.lineno))
+                # Keep full nested path: wuwaterm.domain.helper → domain.helper
+                events.append(
+                    (module[len("wuwaterm.") :], type_only, node.lineno)
+                )
             elif module == "wuwaterm":
                 for entry in node.names:
                     events.append(
-                        (entry.name.split(".", 1)[0], node in type_checking_nodes, node.lineno)
+                        (entry.name.split(".", 1)[0], type_only, node.lineno)
                     )
             else:
-                events.append((module, node in type_checking_nodes, node.lineno))
+                events.append((module, type_only, node.lineno))
         elif isinstance(node, ast.Import):
             for entry in node.names:
                 name = _normalize_imported_name(entry.name)
@@ -159,15 +202,15 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
 
 
 def _normalize_imported_name(name: str) -> str:
-    """Map absolute package imports to local stems when possible.
+    """Map absolute package imports to local keys when possible.
 
-    ``import wuwaterm.bot`` must be treated like ``from .bot import ...`` so
-    forbidden presentation edges cannot bypass the guard via absolute style.
+    ``import wuwaterm.bot`` → ``bot``;
+    ``import wuwaterm.domain.helper`` → ``domain.helper`` (full nested key).
     """
     if name == "wuwaterm":
         return name
     if name.startswith("wuwaterm."):
-        return name[len("wuwaterm.") :].split(".", 1)[0]
+        return name[len("wuwaterm.") :]
     return name
 
 
