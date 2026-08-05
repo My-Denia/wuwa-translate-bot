@@ -116,11 +116,11 @@ def test_domain_lookup_has_no_presentation_runtime_imports():
 def test_check_reports_unclassified_modules(monkeypatch):
     from scripts import check_architecture_boundaries as cab
 
-    real_modules = cab._pkg_modules()
+    real_modules, real_collisions = cab._discover_modules()
     # Inject a fake unclassified stem without writing into src/.
     fake = dict(real_modules)
     fake["rogue_helper"] = ROOT / "src" / "wuwaterm" / "lookup.py"
-    monkeypatch.setattr(cab, "_pkg_modules", lambda: fake)
+    monkeypatch.setattr(cab, "_discover_modules", lambda: (fake, list(real_collisions)))
     failures = cab.check()
     assert any("unclassified modules" in f and "rogue_helper" in f for f in failures)
 
@@ -327,3 +327,69 @@ def test_package_from_submodule_forbidden_edge_is_caught(tmp_path: Path, monkeyp
     assert any(
         "must not import presentation" in f and "ui.helper" in f for f in failures
     ), failures
+
+
+def test_nested_from_emits_parent_package_prefix(tmp_path: Path, monkeypatch):
+    """from .ui.helper import X must also record parent package ui."""
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "domain").mkdir(parents=True)
+    (pkg / "ui").mkdir(parents=True)
+    (pkg / "domain" / "service.py").write_text(
+        "from ..ui.helper import X\n",
+        encoding="utf-8",
+    )
+    (pkg / "ui" / "helper.py").write_text("X = 1\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    names = {n for n, *_ in cab._iter_import_events(pkg / "domain" / "service.py")}
+    assert "ui.helper" in names
+    assert "ui" in names
+
+
+def test_parent_package_presentation_edge_is_caught(tmp_path: Path, monkeypatch):
+    """Importing ui.helper must fail if package ui is classified presentation."""
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "ui").mkdir(parents=True)
+    (pkg / "lookup.py").write_text("from .ui.helper import X\n", encoding="utf-8")
+    (pkg / "ui" / "__init__.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "ui" / "helper.py").write_text("X = 1\n", encoding="utf-8")
+    for name in cab.ALL_CLASSIFIED:
+        path = pkg / f"{name.replace('.', '/')}.py"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+    # lookup.py rewritten after seed
+    (pkg / "lookup.py").write_text("from .ui.helper import X\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    monkeypatch.setattr(
+        cab,
+        "PRESENTATION",
+        frozenset({"bot", "channel", "telegram_html", "telegram_text", "ui"}),
+    )
+    monkeypatch.setattr(
+        cab,
+        "ALL_CLASSIFIED",
+        cab.ALL_CLASSIFIED | frozenset({"ui", "ui.helper"}),
+    )
+    failures = cab.check()
+    assert any(
+        "must not import presentation" in f and "ui" in f for f in failures
+    ), failures
+
+
+def test_duplicate_module_keys_fail_closed(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "foo").mkdir(parents=True)
+    (pkg / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "foo" / "__init__.py").write_text("y = 2\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    modules, collisions = cab._discover_modules()
+    assert "foo" in modules
+    assert any("duplicate module key 'foo'" in c for c in collisions)
+    failures = cab.check()
+    assert any("duplicate module key" in f for f in failures)

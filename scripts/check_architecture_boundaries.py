@@ -102,22 +102,43 @@ def _module_key_for_path(path: Path) -> str | None:
 
 
 def _pkg_modules() -> dict[str, Path]:
-    """Map local module keys to paths for every shipped package module.
+    """Map local module keys to paths; see ``_discover_modules`` for collisions."""
+    modules, _collisions = _discover_modules()
+    return modules
+
+
+def _discover_modules() -> tuple[dict[str, Path], list[str]]:
+    """Discover shipped modules and report duplicate classification keys.
 
     Top-level files use their stem (``bot``). Nested files use dotted relative
     keys (``domain.helper`` for ``src/wuwaterm/domain/helper.py``;
-    ``domain`` for ``src/wuwaterm/domain/__init__.py``) so subpackages cannot
-    silently escape classification or import scanning.
+    ``domain`` for ``src/wuwaterm/domain/__init__.py``).
+
+    If both ``foo.py`` and ``foo/__init__.py`` exist they share key ``foo``;
+    Python loads the package initializer, so silent overwrite would skip the
+    actually-executed file — treat that as a failure instead.
     """
     modules: dict[str, Path] = {}
+    collisions: list[str] = []
     if not PACKAGE.is_dir():
-        return modules
+        return modules, collisions
     for path in sorted(PACKAGE.rglob("*.py")):
         key = _module_key_for_path(path)
         if key is None:
             continue
+        if key in modules:
+            prev = modules[key]
+            try:
+                prev_rel = prev.relative_to(PACKAGE).as_posix()
+                path_rel = path.relative_to(PACKAGE).as_posix()
+            except ValueError:
+                prev_rel, path_rel = prev.as_posix(), path.as_posix()
+            collisions.append(
+                f"duplicate module key {key!r}: {prev_rel} and {path_rel} "
+                f"(refuse silent overwrite; package initializer is what Python loads)"
+            )
         modules[key] = path
-    return modules
+    return modules, collisions
 
 
 def _importer_package_parts(path: Path) -> tuple[str, ...]:
@@ -149,11 +170,35 @@ def _resolve_relative_import(
     return ".".join(base)
 
 
+def _expand_local_keys(key: str) -> list[str]:
+    """Emit a local key and every parent package prefix.
+
+    ``from .ui.helper import X`` must record both ``ui.helper`` and ``ui``:
+    Python executes ``ui/__init__.py`` before loading the submodule, so a
+    forbidden edge in the package initializer is still an import-time edge.
+    """
+    if not key:
+        return []
+    parts = key.split(".")
+    return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+
+
+def _append_local_events(
+    events: list[tuple[str, bool, int]],
+    key: str,
+    type_only: bool,
+    lineno: int,
+) -> None:
+    for item in _expand_local_keys(key):
+        events.append((item, type_only, lineno))
+
+
 def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
     """Return (imported_name, type_checking_only, lineno) for local + external.
 
     Local names keep full dotted keys when nested (e.g. ``domain.helper``),
     matching ``_pkg_modules`` keys so layer intersections stay fail-closed.
+    Nested imports also emit parent package prefixes (``ui.helper`` → ``ui``).
     External names remain dotted as imported (e.g. ``telegram.ext``).
     """
     source = path.read_text(encoding="utf-8")
@@ -174,43 +219,55 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
             type_only = node in type_checking_nodes
             if node.level:
                 if module:
-                    # from ..ui import helper  → record both ``ui`` and ``ui.helper``.
-                    # Package-from syntax drops the submodule if we only keep
-                    # ``module``; _pkg_modules keys the file as ``ui.helper``.
+                    # from ..ui import helper  → ``ui`` and ``ui.helper``.
+                    # from .ui.helper import X → ``ui``, ``ui.helper`` (+ X form).
                     base_key = _resolve_relative_import(path, node.level, module)
-                    events.append((base_key, type_only, node.lineno))
+                    _append_local_events(events, base_key, type_only, node.lineno)
                     for entry in node.names:
                         if entry.name == "*":
                             continue
                         sub = entry.name.split(".", 1)[0]
                         sub_key = f"{base_key}.{sub}" if base_key else sub
-                        events.append((sub_key, type_only, node.lineno))
+                        _append_local_events(events, sub_key, type_only, node.lineno)
                 else:
                     for entry in node.names:
                         key = _resolve_relative_import(
                             path, node.level, None, name=entry.name
                         )
-                        events.append((key, type_only, node.lineno))
+                        _append_local_events(events, key, type_only, node.lineno)
             elif module.startswith("wuwaterm."):
                 # Keep full nested path: wuwaterm.domain.helper → domain.helper
                 rest = module[len("wuwaterm.") :]
-                events.append((rest, type_only, node.lineno))
+                _append_local_events(events, rest, type_only, node.lineno)
                 for entry in node.names:
                     if entry.name == "*":
                         continue
                     sub = entry.name.split(".", 1)[0]
-                    events.append((f"{rest}.{sub}", type_only, node.lineno))
+                    _append_local_events(
+                        events, f"{rest}.{sub}", type_only, node.lineno
+                    )
             elif module == "wuwaterm":
                 for entry in node.names:
-                    events.append(
-                        (entry.name.split(".", 1)[0], type_only, node.lineno)
+                    _append_local_events(
+                        events,
+                        entry.name.split(".", 1)[0],
+                        type_only,
+                        node.lineno,
                     )
             else:
                 events.append((module, type_only, node.lineno))
         elif isinstance(node, ast.Import):
             for entry in node.names:
-                name = _normalize_imported_name(entry.name)
-                events.append((name, node in type_checking_nodes, node.lineno))
+                raw = entry.name
+                name = _normalize_imported_name(raw)
+                # Only expand package-local absolute imports; leave third-party
+                # dotted names (telegram.ext, httpx) as a single external event.
+                if raw == "wuwaterm" or raw.startswith("wuwaterm."):
+                    _append_local_events(
+                        events, name, node in type_checking_nodes, node.lineno
+                    )
+                else:
+                    events.append((name, node in type_checking_nodes, node.lineno))
     return events
 
 
@@ -243,8 +300,8 @@ def _is_telegram_sdk(name: str) -> bool:
 
 
 def check() -> list[str]:
-    modules = _pkg_modules()
-    failures: list[str] = []
+    modules, collisions = _discover_modules()
+    failures: list[str] = list(collisions)
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:
