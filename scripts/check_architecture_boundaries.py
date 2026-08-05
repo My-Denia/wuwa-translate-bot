@@ -65,6 +65,19 @@ NO_BUILDER_IMPORTS = PRESENTATION | DOMAIN_CORE | DOMAIN_LLM | SHARED | LOCAL_ST
 # Who may import build_pinyin at all (including lazy imports).
 BUILD_PINYIN_ALLOWED_IMPORTERS = frozenset({"db", "builder", "build_pinyin"})
 
+# Every shipped module must be classified into exactly one layer set so new
+# files cannot silently escape every rule.
+ALL_CLASSIFIED = (
+    DOMAIN_CORE
+    | DOMAIN_LLM
+    | SHARED
+    | PRESENTATION
+    | LOCAL_STATE
+    | STORAGE
+    | BUILDER
+    | BOOTSTRAP
+)
+
 TELEGRAM_SDK_PREFIXES = (
     "telegram",
     "telegram.ext",
@@ -91,10 +104,11 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
 
     type_checking_nodes: set[ast.AST] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.If):
-            if _is_type_checking_test(node.test):
-                for child in ast.walk(node):
-                    type_checking_nodes.add(child)
+        if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            # Only the true branch is type-checking-only. Imports in `else:`
+            # execute at runtime and must still face boundary rules.
+            for child in ast.walk(ast.Module(body=list(node.body), type_ignores=[])):
+                type_checking_nodes.add(child)
 
     events: list[tuple[str, bool, int]] = []
     for node in ast.walk(tree):
@@ -121,9 +135,22 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
                 events.append((module, node in type_checking_nodes, node.lineno))
         elif isinstance(node, ast.Import):
             for entry in node.names:
-                name = entry.name
+                name = _normalize_imported_name(entry.name)
                 events.append((name, node in type_checking_nodes, node.lineno))
     return events
+
+
+def _normalize_imported_name(name: str) -> str:
+    """Map absolute package imports to local stems when possible.
+
+    ``import wuwaterm.bot`` must be treated like ``from .bot import ...`` so
+    forbidden presentation edges cannot bypass the guard via absolute style.
+    """
+    if name == "wuwaterm":
+        return name
+    if name.startswith("wuwaterm."):
+        return name[len("wuwaterm.") :].split(".", 1)[0]
+    return name
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -131,6 +158,9 @@ def _is_type_checking_test(test: ast.expr) -> bool:
         return True
     if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
         return True
+    # if TYPE_CHECKING and <other>: still type-only for the true branch.
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_is_type_checking_test(value) for value in test.values)
     return False
 
 
@@ -141,6 +171,13 @@ def _is_telegram_sdk(name: str) -> bool:
 def check() -> list[str]:
     modules = _pkg_modules()
     failures: list[str] = []
+
+    unclassified = sorted(set(modules) - ALL_CLASSIFIED)
+    if unclassified:
+        failures.append(
+            "unclassified modules (add each stem to exactly one layer set): "
+            + ", ".join(unclassified)
+        )
 
     for name, path in modules.items():
         rel = path.relative_to(ROOT).as_posix()
