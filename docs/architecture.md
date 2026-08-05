@@ -99,12 +99,12 @@ cli (bootstrap)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models` | `bot`, `channel`, `telegram*`, builder write path at module top-level in a way that forces runtime pypinyin |
-| Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock) |
-| Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK |
-| Presentation | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin` |
-| Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | `bot`, `channel` (except types via shared keys) |
-| Storage | `db` | presentation; `build_pinyin` only inside write helpers (lazy) |
+| Domain core | `lookup`, `normalize`, `models` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
+| Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Presentation | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
+| Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Storage | `db` | presentation / Telegram SDK; `build_pinyin` only inside write helpers (lazy) |
 | Builder | `builder`, `data_source`, `build_pinyin` | `bot`, `channel` |
 | Bootstrap | `cli` | may wire both runtime and builder entrypoints |
 

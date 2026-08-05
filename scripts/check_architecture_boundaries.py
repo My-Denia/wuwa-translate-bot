@@ -13,16 +13,20 @@ Intended layers (must stay aligned with docs/architecture.md):
   builder:         builder, data_source, build_pinyin
   bootstrap:       cli  (may wire runtime and builder entrypoints)
 
-Rules enforced here (all against real src/wuwaterm/*.py AST imports):
+Rules enforced here (all against real src/wuwaterm package modules, including
+nested subpackages discovered via rglob):
 
-1. Domain core and pure helpers must not import presentation or Telegram SDK.
-2. sentence must not import bot or channel.
+1. Domain core and pure helpers must not import presentation or Telegram SDK
+   even under TYPE_CHECKING (only ``channel`` may TYPE_CHECKING-import bot).
+2. sentence must not import bot or channel (runtime or type-only).
 3. Presentation must not import builder-path modules (builder, data_source,
-   build_pinyin).
+   build_pinyin) or bootstrap ``cli`` (cli pulls the builder graph).
 4. channel must not runtime-import bot (TYPE_CHECKING-only is allowed).
 5. build_pinyin may only be imported from db (lazy write path) or builder;
    never from bot, channel, lookup, sentence, settings, etc.
 6. Builder modules must not import bot or channel.
+7. Every discovered shipped module must belong to a layer set (no silent
+   unclassified files, including future nested packages).
 
 Companion gates (not duplicated here):
 - scripts/check_non_goals.py — delivery-mode and channel-listener product pins
@@ -84,20 +88,118 @@ TELEGRAM_SDK_PREFIXES = (
 )
 
 
+def _module_key_for_path(path: Path) -> str | None:
+    """Return classification key for a path under PACKAGE, or None to skip."""
+    rel = path.relative_to(PACKAGE)
+    if path.name == "__init__.py":
+        # Package root __init__ is not a classified "module edge" today.
+        # Nested package initializers (domain/__init__.py) MUST be scanned —
+        # otherwise forbidden imports hide in __init__ and escape every rule.
+        if len(rel.parts) == 1:
+            return None
+        return ".".join(rel.parts[:-1])
+    return ".".join(rel.with_suffix("").parts)
+
+
 def _pkg_modules() -> dict[str, Path]:
-    modules: dict[str, Path] = {}
-    for path in sorted(PACKAGE.glob("*.py")):
-        if path.name == "__init__.py":
-            continue
-        modules[path.stem] = path
+    """Map local module keys to paths; see ``_discover_modules`` for collisions."""
+    modules, _collisions = _discover_modules()
     return modules
+
+
+def _discover_modules() -> tuple[dict[str, Path], list[str]]:
+    """Discover shipped modules and report duplicate classification keys.
+
+    Top-level files use their stem (``bot``). Nested files use dotted relative
+    keys (``domain.helper`` for ``src/wuwaterm/domain/helper.py``;
+    ``domain`` for ``src/wuwaterm/domain/__init__.py``).
+
+    If both ``foo.py`` and ``foo/__init__.py`` exist they share key ``foo``;
+    Python loads the package initializer, so silent overwrite would skip the
+    actually-executed file — treat that as a failure instead.
+    """
+    modules: dict[str, Path] = {}
+    collisions: list[str] = []
+    if not PACKAGE.is_dir():
+        return modules, collisions
+    for path in sorted(PACKAGE.rglob("*.py")):
+        key = _module_key_for_path(path)
+        if key is None:
+            continue
+        if key in modules:
+            prev = modules[key]
+            try:
+                prev_rel = prev.relative_to(PACKAGE).as_posix()
+                path_rel = path.relative_to(PACKAGE).as_posix()
+            except ValueError:
+                prev_rel, path_rel = prev.as_posix(), path.as_posix()
+            collisions.append(
+                f"duplicate module key {key!r}: {prev_rel} and {path_rel} "
+                f"(refuse silent overwrite; package initializer is what Python loads)"
+            )
+        modules[key] = path
+    return modules, collisions
+
+
+def _importer_package_parts(path: Path) -> tuple[str, ...]:
+    """Package parts that relative imports resolve against for ``path``."""
+    try:
+        rel = path.relative_to(PACKAGE)
+    except ValueError:
+        return ()
+    if path.name == "__init__.py":
+        return rel.parts[:-1]
+    return rel.with_suffix("").parts[:-1]
+
+
+def _resolve_relative_import(
+    importer: Path, level: int, module: str | None, name: str | None = None
+) -> str:
+    """Resolve a relative import to a package-local dotted key when possible."""
+    pkg_parts = list(_importer_package_parts(importer))
+    # PEP 328: level is the number of leading dots. level=1 → current package.
+    up = max(level - 1, 0)
+    if up > len(pkg_parts):
+        base: list[str] = []
+    else:
+        base = pkg_parts[: len(pkg_parts) - up]
+    if module:
+        return ".".join(base + module.split(".")) if base else module
+    if name:
+        return ".".join(base + [name.split(".", 1)[0]]) if base else name.split(".", 1)[0]
+    return ".".join(base)
+
+
+def _expand_local_keys(key: str) -> list[str]:
+    """Emit a local key and every parent package prefix.
+
+    ``from .ui.helper import X`` must record both ``ui.helper`` and ``ui``:
+    Python executes ``ui/__init__.py`` before loading the submodule, so a
+    forbidden edge in the package initializer is still an import-time edge.
+    """
+    if not key:
+        return []
+    parts = key.split(".")
+    return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+
+
+def _append_local_events(
+    events: list[tuple[str, bool, int]],
+    key: str,
+    type_only: bool,
+    lineno: int,
+) -> None:
+    for item in _expand_local_keys(key):
+        events.append((item, type_only, lineno))
 
 
 def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
     """Return (imported_name, type_checking_only, lineno) for local + external.
 
-    `imported_name` is either a bare wuwaterm module stem (e.g. ``bot``) or a
-    dotted external module (e.g. ``telegram.ext``).
+    Local names keep full dotted keys when nested (e.g. ``domain.helper``),
+    matching ``_pkg_modules`` keys so layer intersections stay fail-closed.
+    Nested imports also emit parent package prefixes (``ui.helper`` → ``ui``).
+    External names remain dotted as imported (e.g. ``telegram.ext``).
     """
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
@@ -114,42 +216,71 @@ def _iter_import_events(path: Path) -> list[tuple[str, bool, int]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level and module:
-                # from .foo import bar  or  from . import foo
-                top = module.split(".", 1)[0]
-                events.append((top, node in type_checking_nodes, node.lineno))
-            elif node.level and not module:
-                for entry in node.names:
-                    events.append(
-                        (entry.name.split(".", 1)[0], node in type_checking_nodes, node.lineno)
-                    )
+            type_only = node in type_checking_nodes
+            if node.level:
+                if module:
+                    # from ..ui import helper  → ``ui`` and ``ui.helper``.
+                    # from .ui.helper import X → ``ui``, ``ui.helper`` (+ X form).
+                    base_key = _resolve_relative_import(path, node.level, module)
+                    _append_local_events(events, base_key, type_only, node.lineno)
+                    for entry in node.names:
+                        if entry.name == "*":
+                            continue
+                        sub = entry.name.split(".", 1)[0]
+                        sub_key = f"{base_key}.{sub}" if base_key else sub
+                        _append_local_events(events, sub_key, type_only, node.lineno)
+                else:
+                    for entry in node.names:
+                        key = _resolve_relative_import(
+                            path, node.level, None, name=entry.name
+                        )
+                        _append_local_events(events, key, type_only, node.lineno)
             elif module.startswith("wuwaterm."):
-                rest = module[len("wuwaterm.") :].split(".", 1)[0]
-                events.append((rest, node in type_checking_nodes, node.lineno))
+                # Keep full nested path: wuwaterm.domain.helper → domain.helper
+                rest = module[len("wuwaterm.") :]
+                _append_local_events(events, rest, type_only, node.lineno)
+                for entry in node.names:
+                    if entry.name == "*":
+                        continue
+                    sub = entry.name.split(".", 1)[0]
+                    _append_local_events(
+                        events, f"{rest}.{sub}", type_only, node.lineno
+                    )
             elif module == "wuwaterm":
                 for entry in node.names:
-                    events.append(
-                        (entry.name.split(".", 1)[0], node in type_checking_nodes, node.lineno)
+                    _append_local_events(
+                        events,
+                        entry.name.split(".", 1)[0],
+                        type_only,
+                        node.lineno,
                     )
             else:
-                events.append((module, node in type_checking_nodes, node.lineno))
+                events.append((module, type_only, node.lineno))
         elif isinstance(node, ast.Import):
             for entry in node.names:
-                name = _normalize_imported_name(entry.name)
-                events.append((name, node in type_checking_nodes, node.lineno))
+                raw = entry.name
+                name = _normalize_imported_name(raw)
+                # Only expand package-local absolute imports; leave third-party
+                # dotted names (telegram.ext, httpx) as a single external event.
+                if raw == "wuwaterm" or raw.startswith("wuwaterm."):
+                    _append_local_events(
+                        events, name, node in type_checking_nodes, node.lineno
+                    )
+                else:
+                    events.append((name, node in type_checking_nodes, node.lineno))
     return events
 
 
 def _normalize_imported_name(name: str) -> str:
-    """Map absolute package imports to local stems when possible.
+    """Map absolute package imports to local keys when possible.
 
-    ``import wuwaterm.bot`` must be treated like ``from .bot import ...`` so
-    forbidden presentation edges cannot bypass the guard via absolute style.
+    ``import wuwaterm.bot`` → ``bot``;
+    ``import wuwaterm.domain.helper`` → ``domain.helper`` (full nested key).
     """
     if name == "wuwaterm":
         return name
     if name.startswith("wuwaterm."):
-        return name[len("wuwaterm.") :].split(".", 1)[0]
+        return name[len("wuwaterm.") :]
     return name
 
 
@@ -169,8 +300,8 @@ def _is_telegram_sdk(name: str) -> bool:
 
 
 def check() -> list[str]:
-    modules = _pkg_modules()
-    failures: list[str] = []
+    modules, collisions = _discover_modules()
+    failures: list[str] = list(collisions)
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:
@@ -180,7 +311,11 @@ def check() -> list[str]:
         )
 
     for name, path in modules.items():
-        rel = path.relative_to(ROOT).as_posix()
+        try:
+            rel = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            # Tests may point PACKAGE at a temp tree outside the repo root.
+            rel = path.as_posix()
         events = _iter_import_events(path)
         local_runtime = {
             imported
@@ -190,27 +325,28 @@ def check() -> list[str]:
         local_all = {
             imported for imported, _type_only, _ in events if imported in modules
         }
-        external_runtime = {
-            imported
-            for imported, type_only, _ in events
-            if imported not in modules and not type_only
+        external_all = {
+            imported for imported, _type_only, _ in events if imported not in modules
         }
 
         if name in NO_TELEGRAM_PRESENTATION:
-            bad_pres = sorted(local_runtime & PRESENTATION)
+            # Fail closed on type-only edges too: only channel has a documented
+            # TYPE_CHECKING exception for BotConfig (handled below separately).
+            bad_pres = sorted(local_all & PRESENTATION)
             if bad_pres:
                 failures.append(
                     f"{rel}: domain/infra/builder module must not import "
-                    f"presentation {bad_pres}"
+                    f"presentation {bad_pres} (TYPE_CHECKING not exempt)"
                 )
-            sdk = sorted(n for n in external_runtime if _is_telegram_sdk(n))
+            sdk = sorted(n for n in external_all if _is_telegram_sdk(n))
             if sdk:
                 failures.append(
-                    f"{rel}: must not import Telegram SDK {sdk}"
+                    f"{rel}: must not import Telegram SDK {sdk} "
+                    f"(TYPE_CHECKING not exempt)"
                 )
 
         if name in DOMAIN_LLM:
-            bad = sorted(local_runtime & {"bot", "channel"})
+            bad = sorted(local_all & {"bot", "channel"})
             if bad:
                 failures.append(
                     f"{rel}: sentence must not import presentation cores {bad}"
@@ -225,6 +361,15 @@ def check() -> list[str]:
                     f"{rel}: must not import builder-path modules {bad_builder}"
                 )
 
+        if name in PRESENTATION:
+            # cli is bootstrap and imports builder at module load; presentation
+            # must not reverse that edge even under TYPE_CHECKING.
+            if "cli" in local_all:
+                failures.append(
+                    f"{rel}: presentation must not import bootstrap cli "
+                    f"(cli pulls builder path)"
+                )
+
         if name == "channel":
             # Runtime import of bot is forbidden; TYPE_CHECKING is the documented
             # exception for BotConfig annotations.
@@ -235,7 +380,7 @@ def check() -> list[str]:
                 )
 
         if name in BUILDER:
-            bad = sorted(local_runtime & {"bot", "channel"})
+            bad = sorted(local_all & {"bot", "channel"})
             if bad:
                 failures.append(
                     f"{rel}: builder module must not import presentation {bad}"
