@@ -123,3 +123,88 @@ def test_check_reports_unclassified_modules(monkeypatch):
     monkeypatch.setattr(cab, "_pkg_modules", lambda: fake)
     failures = cab.check()
     assert any("unclassified modules" in f and "rogue_helper" in f for f in failures)
+
+
+def test_nested_package_module_is_discovered(tmp_path: Path, monkeypatch):
+    """Subpackages must not escape scanning via flat-only discovery."""
+    from scripts import check_architecture_boundaries as cab
+
+    # Point PACKAGE at a temp tree with a nested module.
+    pkg = tmp_path / "wuwaterm"
+    (pkg / "domain").mkdir(parents=True)
+    (pkg / "lookup.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "domain" / "helper.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from ..bot import BotConfig\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    modules = cab._pkg_modules()
+    assert "lookup" in modules
+    assert "domain.helper" in modules
+    # Nested module is unclassified relative to real layer sets → check fails.
+    failures = cab.check()
+    assert any("unclassified modules" in f and "domain.helper" in f for f in failures)
+
+
+def test_type_only_presentation_import_from_domain_is_rejected(monkeypatch, tmp_path: Path):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    pkg.mkdir()
+    (pkg / "lookup.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from .bot import BotConfig\n",
+        encoding="utf-8",
+    )
+    (pkg / "bot.py").write_text("class BotConfig: pass\n", encoding="utf-8")
+    (pkg / "channel.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "telegram_html.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "telegram_text.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    # Minimal classification so only the presentation edge is under test.
+    monkeypatch.setattr(
+        cab,
+        "ALL_CLASSIFIED",
+        frozenset({"lookup", "bot", "channel", "telegram_html", "telegram_text"}),
+    )
+    monkeypatch.setattr(cab, "DOMAIN_CORE", frozenset({"lookup"}))
+    monkeypatch.setattr(cab, "NO_TELEGRAM_PRESENTATION", frozenset({"lookup"}))
+    monkeypatch.setattr(
+        cab,
+        "PRESENTATION",
+        frozenset({"bot", "channel", "telegram_html", "telegram_text"}),
+    )
+    failures = cab.check()
+    assert any("must not import presentation" in f and "bot" in f for f in failures)
+
+
+def test_presentation_must_not_import_cli(monkeypatch, tmp_path: Path):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm"
+    pkg.mkdir()
+    for name in (
+        "bot",
+        "channel",
+        "telegram_html",
+        "telegram_text",
+        "cli",
+        "lookup",
+        "normalize",
+        "models",
+    ):
+        (pkg / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "bot.py").write_text("from .cli import main\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "PACKAGE", pkg)
+    # Use real layer sets; ensure required stems exist as empty modules.
+    for name in cab.ALL_CLASSIFIED:
+        path = pkg / f"{name.replace('.', '/')}.py"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+    (pkg / "bot.py").write_text("from .cli import main\n", encoding="utf-8")
+    failures = cab.check()
+    assert any("must not import bootstrap cli" in f for f in failures)

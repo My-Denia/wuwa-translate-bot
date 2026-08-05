@@ -13,16 +13,20 @@ Intended layers (must stay aligned with docs/architecture.md):
   builder:         builder, data_source, build_pinyin
   bootstrap:       cli  (may wire runtime and builder entrypoints)
 
-Rules enforced here (all against real src/wuwaterm/*.py AST imports):
+Rules enforced here (all against real src/wuwaterm package modules, including
+nested subpackages discovered via rglob):
 
-1. Domain core and pure helpers must not import presentation or Telegram SDK.
-2. sentence must not import bot or channel.
+1. Domain core and pure helpers must not import presentation or Telegram SDK
+   even under TYPE_CHECKING (only ``channel`` may TYPE_CHECKING-import bot).
+2. sentence must not import bot or channel (runtime or type-only).
 3. Presentation must not import builder-path modules (builder, data_source,
-   build_pinyin).
+   build_pinyin) or bootstrap ``cli`` (cli pulls the builder graph).
 4. channel must not runtime-import bot (TYPE_CHECKING-only is allowed).
 5. build_pinyin may only be imported from db (lazy write path) or builder;
    never from bot, channel, lookup, sentence, settings, etc.
 6. Builder modules must not import bot or channel.
+7. Every discovered shipped module must belong to a layer set (no silent
+   unclassified files, including future nested packages).
 
 Companion gates (not duplicated here):
 - scripts/check_non_goals.py — delivery-mode and channel-listener product pins
@@ -85,11 +89,25 @@ TELEGRAM_SDK_PREFIXES = (
 
 
 def _pkg_modules() -> dict[str, Path]:
+    """Map local module keys to paths for every shipped package module.
+
+    Top-level files use their stem (``bot``). Nested files use dotted relative
+    keys (``domain.helper`` for ``src/wuwaterm/domain/helper.py``) so they are
+    still classified and scanned — a flat-only glob would let subpackages
+    silently escape every boundary rule.
+    """
     modules: dict[str, Path] = {}
-    for path in sorted(PACKAGE.glob("*.py")):
+    if not PACKAGE.is_dir():
+        return modules
+    for path in sorted(PACKAGE.rglob("*.py")):
         if path.name == "__init__.py":
             continue
-        modules[path.stem] = path
+        rel = path.relative_to(PACKAGE)
+        if len(rel.parts) == 1:
+            key = path.stem
+        else:
+            key = ".".join(rel.with_suffix("").parts)
+        modules[key] = path
     return modules
 
 
@@ -180,7 +198,11 @@ def check() -> list[str]:
         )
 
     for name, path in modules.items():
-        rel = path.relative_to(ROOT).as_posix()
+        try:
+            rel = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            # Tests may point PACKAGE at a temp tree outside the repo root.
+            rel = path.as_posix()
         events = _iter_import_events(path)
         local_runtime = {
             imported
@@ -190,27 +212,28 @@ def check() -> list[str]:
         local_all = {
             imported for imported, _type_only, _ in events if imported in modules
         }
-        external_runtime = {
-            imported
-            for imported, type_only, _ in events
-            if imported not in modules and not type_only
+        external_all = {
+            imported for imported, _type_only, _ in events if imported not in modules
         }
 
         if name in NO_TELEGRAM_PRESENTATION:
-            bad_pres = sorted(local_runtime & PRESENTATION)
+            # Fail closed on type-only edges too: only channel has a documented
+            # TYPE_CHECKING exception for BotConfig (handled below separately).
+            bad_pres = sorted(local_all & PRESENTATION)
             if bad_pres:
                 failures.append(
                     f"{rel}: domain/infra/builder module must not import "
-                    f"presentation {bad_pres}"
+                    f"presentation {bad_pres} (TYPE_CHECKING not exempt)"
                 )
-            sdk = sorted(n for n in external_runtime if _is_telegram_sdk(n))
+            sdk = sorted(n for n in external_all if _is_telegram_sdk(n))
             if sdk:
                 failures.append(
-                    f"{rel}: must not import Telegram SDK {sdk}"
+                    f"{rel}: must not import Telegram SDK {sdk} "
+                    f"(TYPE_CHECKING not exempt)"
                 )
 
         if name in DOMAIN_LLM:
-            bad = sorted(local_runtime & {"bot", "channel"})
+            bad = sorted(local_all & {"bot", "channel"})
             if bad:
                 failures.append(
                     f"{rel}: sentence must not import presentation cores {bad}"
@@ -225,6 +248,15 @@ def check() -> list[str]:
                     f"{rel}: must not import builder-path modules {bad_builder}"
                 )
 
+        if name in PRESENTATION:
+            # cli is bootstrap and imports builder at module load; presentation
+            # must not reverse that edge even under TYPE_CHECKING.
+            if "cli" in local_all:
+                failures.append(
+                    f"{rel}: presentation must not import bootstrap cli "
+                    f"(cli pulls builder path)"
+                )
+
         if name == "channel":
             # Runtime import of bot is forbidden; TYPE_CHECKING is the documented
             # exception for BotConfig annotations.
@@ -235,7 +267,7 @@ def check() -> list[str]:
                 )
 
         if name in BUILDER:
-            bad = sorted(local_runtime & {"bot", "channel"})
+            bad = sorted(local_all & {"bot", "channel"})
             if bad:
                 failures.append(
                     f"{rel}: builder module must not import presentation {bad}"
