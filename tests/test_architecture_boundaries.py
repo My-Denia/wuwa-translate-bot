@@ -51,7 +51,7 @@ def test_absolute_import_wuwaterm_bot_is_detected_as_local_bot(tmp_path: Path):
     assert "wuwaterm.bot" not in names
 
 
-def test_type_checking_else_import_is_runtime():
+def test_type_checking_else_import_is_runtime(tmp_path: Path):
     from scripts import check_architecture_boundaries as cab
 
     source = textwrap.dedent(
@@ -63,19 +63,12 @@ def test_type_checking_else_import_is_runtime():
             from .bot import BotConfig
         """
     )
-    path = Path(cab.PACKAGE / "_probe_type_checking_else.py")
-    # Parse via a temp path outside package so we do not require a real file
-    # under src/; write to a disposable file under the test process cwd.
-    probe = ROOT / ".architecture_boundary_probe.py"
-    try:
-        probe.write_text(source, encoding="utf-8")
-        events = cab._iter_import_events(probe)
-        by_name = {name: type_only for name, type_only, _ in events}
-        assert by_name.get("models") is True
-        assert by_name.get("bot") is False
-    finally:
-        if probe.exists():
-            probe.unlink()
+    probe = tmp_path / "type_checking_else_probe.py"
+    probe.write_text(source, encoding="utf-8")
+    events = cab._iter_import_events(probe)
+    by_name = {name: type_only for name, type_only, _ in events}
+    assert by_name.get("models") is True
+    assert by_name.get("bot") is False
 
 
 def test_channel_bot_import_is_type_checking_only():
