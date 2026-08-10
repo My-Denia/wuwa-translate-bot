@@ -78,8 +78,14 @@ port the updater gates on. Compose and shell syntax are checked separately:
 
 ```bash
 sh -n deploy/*.sh
-cp .env.example .env && docker compose -f deploy/docker-compose.yml config -q && rm .env
+docker compose --env-file .env.example -f deploy/docker-compose.yml config -q
 ```
+
+The Compose check reads the example file directly with `--env-file`. It must
+never be written as `cp .env.example .env && … && rm .env`: on a host that has a
+real `.env` — which is every host where this is worth running — the copy
+overwrites the operator's secrets and the cleanup then deletes the replacement,
+so the original is gone whether or not Compose succeeds.
 
 The desktop client has its own test suite and its own virtual environment. It
 targets Python 3.12, but nothing pins it: `client/pyproject.toml` declares a
@@ -101,10 +107,13 @@ off-screen start-up rehearsal that builds the `QApplication`, installs the
 qasync event loop and constructs the `MainWindow`, then exits without showing a
 window, requesting a credential or sending a request. That covers the failures
 that made this gate necessary — a frozen build that cannot import its own
-package, or is missing a Qt plugin, or ships an SSL library its interpreter
-cannot load. It stops short of the credential flow: `--self-check` returns
-before `ensure_credential()`, so a first-run dialog that failed to construct
-would still pass the rehearsal and surface at the owner's first launch.
+package, or ships an SSL library its interpreter cannot load — and it proves the
+Qt libraries are bundled and loadable. Two gaps are worth knowing, both of the
+same shape. `build.ps1` runs the rehearsal with `QT_QPA_PLATFORM=offscreen`, so
+it exercises the offscreen platform plugin and not `qwindows`: a build missing
+the plugin the owner's launch actually uses would pass. And `--self-check`
+returns before `ensure_credential()`, so a first-run dialog that failed to
+construct would pass too. Both would surface at the owner's first launch.
 
 ## Live Telegram Smoke
 
@@ -150,9 +159,13 @@ matters when something goes wrong:
   the updater path sends no diagnostic message). A failure aborts the deployment
   and triggers the transactional rollback. Note what the record actually is:
   `.deployments/<commit>.json` carries image and database provenance and has no
-  readiness or smoke field, but it is written only after those steps have
-  passed — so a manifest existing for a commit is the evidence that they did,
-  and a failed deployment leaves no manifest rather than a failing one.
+  readiness or smoke field. It is written after the readiness wait, the bot
+  smoke and the image-id comparison, so its existence is evidence that **those**
+  passed — but it is written *before* the manifest verification, the pointer
+  publication and the `.deploy_commit` readback, and rollback does not remove
+  it. A deployment that fails at one of those later steps therefore leaves a
+  manifest behind. Read it as a record of the checks that precede it, not as
+  proof the whole deployment succeeded; `.deploy_commit` is what says that.
 - **Manual operator validation, not recorded anywhere by the updater**: the
   device issue/revoke round trip and a real client request over the SSH tunnel.
   Nothing automates them and nothing fails if they are skipped; they are how an

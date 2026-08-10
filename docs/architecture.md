@@ -291,14 +291,19 @@ Evidence: `bot.py` `create_application`, `_translation_command`,
 
 1. `run_bot` → `create_application` → `app.run_polling()` ([ADR 0003](adr/0003-long-polling-not-webhook.md)).
 2. `CommandHandler` for `tr`/`term` or `sentence`/`sent` → `_translation_command`.
-3. **Auth**: owner private chat, or group admin (or public mode) + allowlist
+3. Parse args / optional `--to` / replied text. Parsing happens **first**, but a
+   bad `--to` is not answered yet.
+4. **Auth**: owner private chat, or group admin (or public mode) + allowlist
    (`_translation_actor_or_reject`, `ChatSettings`).
-4. **Rate limit**: per-chat `PerChatRateLimiter` (the shared
-   `application.SlidingWindowRateLimiter` keyed by chat id).
-5. Parse args / optional `--to` / replied text; invalid `--to` → usage, **no LLM**.
-6. `application.translate_request_async` with the Telegram markup translator and
+5. An invalid `--to` is answered here, after auth and **before** the rate limit
+   — a usage reply, **no LLM**, and deliberately no charge against the chat's
+   translation budget.
+6. **Rate limit**: per-chat `PerChatRateLimiter` (the shared
+   `application.SlidingWindowRateLimiter` keyed by chat id), consumed only for
+   an actor that is rate-limited at all — the owner is not.
+7. `application.translate_request_async` with the Telegram markup translator and
    UTF-16 splitter injected.
-7. `reply_to_user` (HTML with plain fallback; flood retry via channel helper).
+8. `reply_to_user` (HTML with plain fallback; flood retry via channel helper).
 
 ### Linked-channel auto-translation
 
@@ -384,8 +389,12 @@ the surface an ingress decision would expose.
 
 One more thing a client should know: the router's trailing-slash redirect is the
 documented exception to the error envelope. `GET /healthz/` answers `307` with a
-`Location` header and an empty body rather than the JSON envelope, because that
-response never reaches an exception handler ([ADR 0009](adr/0009-http-api-adapter.md)).
+`Location` header and an empty body rather than the JSON envelope — not because
+it skips the exception handlers (the middleware-produced `413`, `400` and `504`
+skip those too and still carry the envelope) but because the router answers it
+before this application produces a response at all. The middlewares do still
+run, so that `307` carries its `X-Request-Id` like everything else
+([ADR 0009](adr/0009-http-api-adapter.md)).
 
 ### Request-id coverage
 
@@ -586,11 +595,14 @@ Dictionary-before-LLM: [ADR 0006](adr/0006-dictionary-first-before-llm.md).
 contract and nothing more**:
 
 - It contains no translation logic: no dictionary lookup, no direction
-  detection, no term locking, no chunking. Every value it displays comes from a
-  response documented in `docs/api/openapi.json`
-  (`client/src/wuwaterm_client/api.py`); it formats and labels those values for
-  the screen — a rounded score, a yes/no for `llm_configured`, a label for
-  `kind` — but computes none of them.
+  detection, no term locking, no chunking. Every **result** field it shows — a
+  translation, a term match, service metadata — comes from a response documented
+  in `docs/api/openapi.json` (`client/src/wuwaterm_client/api.py`); it formats
+  and labels those values for the screen — a rounded score, a yes/no for
+  `llm_configured`, a label for `kind` — but computes none of them. The screens
+  also show purely local facts the server never sees: the credential backend
+  name and whether a token is stored (Status), and the base URL and timeouts
+  (Settings).
 - It contains no Telegram concepts. User-facing text is meant to live in
   `client/src/wuwaterm_client/strings.py`, and
   `client/tests/test_ui_strings_source.py` enforces the common case statically:

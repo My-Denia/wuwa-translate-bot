@@ -115,12 +115,16 @@ Build `client/` as a separate project in this repository, with its own
   at that boundary. A request reports it as an unusable credential; the
   first-run and Settings paths say the token was not stored, or that it may
   still be stored when forgetting fails. One place deliberately does not
-  propagate it: `has_token()` answers `False` when the vault cannot be read,
-  because the question it is asked ("should the first-run dialog open?") has the
-  same answer either way. The cost is that a vault which is failing rather than
-  empty prompts the owner to enter a credential again, and the underlying
-  failure is not shown at that moment - it surfaces on the next store or
-  request instead.
+  propagate it: `has_token()` answers `False` when the vault cannot be read.
+  That is defensible where it is asked "should the first-run dialog open?"
+  (`main_window.py`), because the answer is the same either way. It has three
+  call sites, though, and the other two pay for it: Settings shows the
+  enter/forget state for a credential it cannot see, and — worse — the Status
+  tab, the application's own diagnostic pane, reports confidently that no
+  credential is stored while naming the backend it just failed to read. So a
+  failing vault presents as an empty one: the owner is prompted to enter the
+  token again, and the pane they would check to understand why agrees with the
+  wrong story. The real failure surfaces on the next store or request instead.
 - **Environment proxies are not trusted.** The supported address is loopback,
   and httpx would otherwise route the bearer credential through an
   `HTTP_PROXY` that no `NO_PROXY` entry covers.
@@ -167,10 +171,12 @@ separation, the packaging entry point, and widget construction smoke tests.
   showing a window, requesting a credential or sending a request. It exists
   because the first real launch of a successfully built artifact failed on an
   entry point that could not import its own package, and then on an OpenSSL pair
-  its own `_ssl` could not load — both of which this catches. It returns before
-  `ensure_credential()`, so the first-run path is **not** rehearsed; a failure
-  confined to that dialog would still reach the owner first. A produced file is
-  not a working program, and CI now says so about the part it can see.
+  its own `_ssl` could not load — both of which this catches. Two things it does
+  not: it returns before `ensure_credential()`, so the first-run path is not
+  rehearsed, and `build.ps1` runs it under `QT_QPA_PLATFORM=offscreen`, so the
+  `qwindows` platform plugin the owner's launch uses is never loaded. A failure
+  confined to either would still reach the owner first. A produced file is not a
+  working program, and CI now says so about the part it can see.
 
 ## Evidence
 
