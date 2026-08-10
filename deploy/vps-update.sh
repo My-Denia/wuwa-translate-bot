@@ -185,6 +185,19 @@ rollback_on_failure() {
   echo "deployment failed; restoring previous database, image and pointer" >&2
   rollback_failed=0
   db_binding_restored=1
+
+  # Nothing may serve while the binding is being restored. If the replacement
+  # containers were started, they are running NEW code against a database that
+  # is about to be rolled back, which is the mixed binding this rollback exists
+  # to prevent. Both surfaces therefore go down before the database is touched;
+  # only what was running before the deployment comes back afterwards.
+  if [ "$runtime_stopped" -eq 1 ]; then
+    if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
+      echo "warning: replacement containers could not be stopped before rollback" >&2
+      rollback_failed=1
+    fi
+  fi
+
   if [ "$db_promoted" -eq 1 ]; then
     if [ "$old_db_present" -eq 1 ]; then
       restore_tmp="$db_path.rollback.$deployment_id"
@@ -232,44 +245,30 @@ rollback_on_failure() {
     fi
   fi
 
-  if [ "$runtime_stopped" -eq 1 ]; then
-    if [ -n "$old_image_id" ]; then
-      if [ "$db_binding_restored" -eq 1 ]; then
-        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
-          compose up -d --no-build --force-recreate wuwaterm; then
-          echo "warning: old runtime image could not be restarted" >&2
-          rollback_failed=1
-        fi
-        # Only bring the api surface back if this host was actually RUNNING
-        # it when the deployment started. On a first upgrade there is nothing
-        # to restore, and a container that existed but was stopped (an earlier
-        # failed upgrade, or an operator decision) must not be started here:
-        # in both cases the replacement may already be running, so it is
-        # stopped rather than left behind serving from a rolled-back database.
-        if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
-          if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
-            compose up -d --no-build --force-recreate wuwaterm-api; then
-            echo "warning: old api image could not be restarted" >&2
-            rollback_failed=1
-          fi
-        else
-          if ! compose stop wuwaterm-api >/dev/null 2>&1; then
-            echo "warning: api container that was not running could not be stopped" >&2
-            rollback_failed=1
-          fi
-        fi
-      else
-        echo "warning: refusing to restart old runtime without its database" >&2
+  # Everything the deployment started is already stopped by this point, so this
+  # section only decides what may come BACK. Anything not started here stays
+  # down, which is the correct outcome for a host that was not running it.
+  if [ "$runtime_stopped" -eq 1 ] && [ -n "$old_image_id" ]; then
+    if [ "$db_binding_restored" -eq 1 ]; then
+      if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+        compose up -d --no-build --force-recreate wuwaterm; then
+        echo "warning: old runtime image could not be restarted" >&2
         rollback_failed=1
-        if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
-          echo "warning: replacement runtime could not be stopped" >&2
+      fi
+      # Only bring the api surface back if this host was actually RUNNING it
+      # when the deployment started. On a first upgrade there is nothing to
+      # restore, and a container that existed but was stopped (an earlier
+      # failed upgrade, or an operator decision) must not be started here.
+      if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
+        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+          compose up -d --no-build --force-recreate wuwaterm-api; then
+          echo "warning: old api image could not be restarted" >&2
+          rollback_failed=1
         fi
       fi
     else
-      if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
-        echo "warning: replacement runtime could not be stopped" >&2
-        rollback_failed=1
-      fi
+      echo "warning: refusing to restart old runtime without its database" >&2
+      rollback_failed=1
     fi
   fi
 

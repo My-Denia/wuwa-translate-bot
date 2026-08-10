@@ -603,6 +603,9 @@ def deploy_harness(tmp_path):
         "set -eu\n"
         ": \"${FAKE_DEPLOY_ROOT:?}\"\n"
         "echo \"${WUWATERM_RUNTIME_IMAGE:-unset}|$*\" >> \"$FAKE_DEPLOY_ROOT/docker.log\"\n"
+        # One ordered stream across both fakes, so a test can assert that a
+        # container stop happens BEFORE the database is touched.
+        "echo \"docker $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.
@@ -663,6 +666,8 @@ def deploy_harness(tmp_path):
     python_script.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
+        ": \"${FAKE_DEPLOY_ROOT:?}\"\n"
+        "echo \"python3 $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         f"real_python={shlex.quote(sys.executable)}\n"
         "case \"$*\" in\n"
         "  *'deployment_manifest.py durable-replace --source data/terms.db.backup.'*)\n"
@@ -1103,7 +1108,14 @@ def test_vps_update_manages_both_surfaces_together():
     assert "{{.State.Running}}" in text
     assert 'if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then' in text
     assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
-    assert "api container that was not running could not be stopped" in text
+    # Rollback takes both surfaces down before it touches the database, so no
+    # replacement container can serve new code against a database that is being
+    # rolled back underneath it. Only the restart is conditional.
+    assert "replacement containers could not be stopped before rollback" in text
+    rollback_body = text.split("rollback_on_failure() {", 1)[1]
+    stop_at = rollback_body.index("compose stop wuwaterm wuwaterm-api")
+    restore_at = rollback_body.index("durable-replace")
+    assert stop_at < restore_at
 
 
 def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
@@ -1138,10 +1150,48 @@ def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
     assert rollback_ups, docker_lines
     # The bot comes back; the api does not.
     assert not any("wuwaterm-api" in line for line in rollback_ups), rollback_ups
-    assert any(
-        line.endswith("compose -f deploy/docker-compose.yml stop wuwaterm-api")
-        for line in docker_lines
-    ), docker_lines
+
+
+def test_vps_update_stops_both_surfaces_before_restoring_the_database(
+    deploy_harness,
+):
+    """A replacement container must not serve while the database rolls back.
+
+    The deployment starts both surfaces from the new image before the smoke
+    runs. If that smoke fails, the database goes back to its previous content
+    underneath containers that are still running new code, which is exactly the
+    mixed binding the transactional updater exists to prevent.
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
+    restore_at = next(
+        index
+        for index, line in enumerate(actions)
+        if "durable-replace --source data/terms.db.rollback." in line
+    )
+    stops_before_restore = [
+        index
+        for index, line in enumerate(actions[:restore_at])
+        if "stop wuwaterm wuwaterm-api" in line
+    ]
+    # Two: the planned stop before promotion, and the rollback's own stop.
+    assert len(stops_before_restore) == 2, actions[: restore_at + 1]
+    # Nothing is started between that stop and the restored database.
+    between = actions[stops_before_restore[-1] : restore_at]
+    assert not [line for line in between if "up -d" in line], between
 
 
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
