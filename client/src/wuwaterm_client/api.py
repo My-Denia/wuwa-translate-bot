@@ -1,0 +1,356 @@
+"""Async HTTP client for the wuwaterm API.
+
+This module only calls the API and parses what comes back. It never
+re-implements dictionary lookup, direction detection, or any other
+translation pipeline step; every field below is a direct pass-through of the
+service's response (docs/api/openapi.json).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import httpx
+
+from .config import ClientConfig
+from .credentials import CredentialStoreUnavailable, read_token
+from .errors import (
+    ERROR_CANCELLED,
+    ERROR_OFFLINE,
+    ERROR_TIMEOUT,
+    ERROR_UNAUTHORIZED,
+    ERROR_UNKNOWN,
+    ClientError,
+)
+
+TokenProvider = Callable[[], "str | None"]
+
+_BEARER_PREFIX = "Bearer "
+
+
+def default_token_provider() -> str | None:
+    return read_token()
+
+
+# -- Wire-type checks ------------------------------------------------------
+#
+# Annotations are not runtime validation. A 2xx body can carry every required
+# key with the wrong primitive underneath - `"text": []` - and the failure then
+# surfaces inside a Qt call rather than as the client's own error state. These
+# raise ValueError, which the parse wrapper turns into a ClientError.
+
+
+def _as_str(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} is not a string")
+    return value
+
+
+def _as_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} is not a boolean")
+    return value
+
+
+def _as_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} is not an integer")
+    return value
+
+
+def _as_float(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} is not a number")
+    return float(value)
+
+
+def _as_optional_str(value: Any, field: str) -> "str | None":
+    if value is None:
+        return None
+    return _as_str(value, field)
+
+
+# -- Response models (direct pass-through of the wire schema) --------------
+
+
+@dataclass(frozen=True)
+class TranslationResult:
+    kind: str
+    text: str
+    direction: str
+    dictionary_miss: bool
+    request_id: str
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "TranslationResult":
+        return cls(
+            kind=_as_str(data["kind"], "kind"),
+            text=_as_str(data["text"], "text"),
+            direction=_as_str(data["direction"], "direction"),
+            dictionary_miss=_as_bool(data["dictionary_miss"], "dictionary_miss"),
+            request_id=_as_str(data["request_id"], "request_id"),
+        )
+
+
+@dataclass(frozen=True)
+class TermMatch:
+    zh: str
+    en: str
+    category: str
+    score: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class TermsResult:
+    query: str
+    matches: tuple[TermMatch, ...]
+    request_id: str
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "TermsResult":
+        # A string or an object is iterable too, and would produce nonsense
+        # matches instead of an error.
+        if not isinstance(data["matches"], list):
+            raise ValueError("matches is not a list")
+        return cls(
+            query=_as_str(data["query"], "query"),
+            matches=tuple(
+                TermMatch(
+                    zh=_as_str(match["zh"], "zh"),
+                    en=_as_str(match["en"], "en"),
+                    category=_as_str(match["category"], "category"),
+                    score=_as_float(match["score"], "score"),
+                    reason=_as_str(match["reason"], "reason"),
+                )
+                for match in data["matches"]
+            ),
+            request_id=_as_str(data["request_id"], "request_id"),
+        )
+
+
+@dataclass(frozen=True)
+class MetaResult:
+    service_version: str
+    api_version: str
+    schema_version: str | None
+    source_profile: str | None
+    source_commit: str | None
+    term_count: int
+    llm_configured: bool
+    request_id: str
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "MetaResult":
+        return cls(
+            service_version=_as_str(data["service_version"], "service_version"),
+            api_version=_as_str(data["api_version"], "api_version"),
+            # Nullable, but REQUIRED by the contract: a body that omits them
+            # is not this service's, and .get() would have made it look like
+            # one with unknown provenance.
+            schema_version=_as_optional_str(data["schema_version"], "schema_version"),
+            source_profile=_as_optional_str(data["source_profile"], "source_profile"),
+            source_commit=_as_optional_str(data["source_commit"], "source_commit"),
+            term_count=_as_int(data["term_count"], "term_count"),
+            llm_configured=_as_bool(data["llm_configured"], "llm_configured"),
+            request_id=_as_str(data["request_id"], "request_id"),
+        )
+
+
+class ApiClient:
+    """Bearer-authenticated async client for the wuwaterm HTTP API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token_provider: TokenProvider = default_token_provider,
+        timeout: float = 10.0,
+        translate_timeout: float | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._token_provider = token_provider
+        self._timeout = timeout
+        self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=timeout,
+            transport=transport,
+            # The supported address is a loopback port on this machine, the
+            # local end of an SSH tunnel. httpx trusts HTTP_PROXY by default,
+            # so a machine with a corporate proxy configured and no NO_PROXY
+            # entry for 127.0.0.1 would send every request - bearer credential
+            # included - to that proxy instead of into the tunnel.
+            trust_env=False,
+        )
+
+    @classmethod
+    def from_config(cls, config: ClientConfig) -> "ApiClient":
+        return cls(
+            config.base_url,
+            timeout=config.request_timeout_seconds,
+            translate_timeout=config.translate_timeout_seconds,
+        )
+
+    def update_base_url(self, base_url: str) -> None:
+        self._client.base_url = httpx.URL(base_url)
+
+    def update_timeouts(self, timeout: float, translate_timeout: float) -> None:
+        """Apply edited timeouts to the live client.
+
+        Both are captured per call rather than held only on the underlying
+        httpx client, so a value changed in Settings has to be pushed here or
+        the saved configuration and the running client silently disagree until
+        the next launch.
+        """
+        self._timeout = timeout
+        self._translate_timeout = translate_timeout
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    def _headers(self) -> dict[str, str]:
+        try:
+            token = self._token_provider()
+        except CredentialStoreUnavailable:
+            # Reported like any other unusable credential rather than escaping
+            # into whichever view happens to be running, which would leave its
+            # status line saying the work is still in progress.
+            raise ClientError(ERROR_UNAUTHORIZED) from None
+        if not token:
+            return {}
+        try:
+            token.encode("ascii")
+        except UnicodeEncodeError:
+            # A pasted credential can carry a character that cannot go in a
+            # header at all, and httpx would raise from inside whichever
+            # coroutine happened to be running. The service refuses such a
+            # secret at registration, so a stored one is a paste error: report
+            # it as the credential being unusable, which is also the message
+            # that tells the owner where to fix it.
+            raise ClientError(ERROR_UNAUTHORIZED) from None
+        return {"Authorization": f"{_BEARER_PREFIX}{token}"}
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        try:
+            response = await self._client.request(
+                method,
+                url,
+                headers=self._headers(),
+                timeout=timeout if timeout is not None else self._timeout,
+                **kwargs,
+            )
+        except asyncio.CancelledError:
+            # A caller cancelled the in-flight task (e.g. the Cancel button).
+            # Report it as a distinct, non-alarming state rather than a
+            # generic transport failure.
+            #
+            # NOTE for future callers: the cancellation is CONSUMED here, not
+            # re-raised. A task awaiting this method therefore completes with
+            # a ClientError instead of being cancelled, so wrapping these
+            # calls in asyncio.wait_for or gather(...) will not see normal
+            # cancel semantics. That is deliberate - the UI needs a rendered
+            # outcome - but it has to be known before it is relied on.
+            raise ClientError(ERROR_CANCELLED) from None
+        except httpx.TimeoutException as exc:
+            raise ClientError(ERROR_TIMEOUT) from exc
+        except httpx.TransportError as exc:
+            # Includes connect-refused and every other network-level failure.
+            raise ClientError(ERROR_OFFLINE) from exc
+        except httpx.HTTPError as exc:
+            # Everything else httpx can raise, notably a body this client
+            # cannot decode because the service or something in front of it
+            # produced a malformed compressed response. It is not a transport
+            # failure and not a timeout; it is simply unusable.
+            raise ClientError(ERROR_UNKNOWN) from exc
+        if response.status_code >= 400:
+            raise self._error_from_response(response)
+        return response
+
+    def _error_from_response(self, response: httpx.Response) -> ClientError:
+        try:
+            payload = response.json()
+            code = payload["error"]["code"]
+            request_id = payload.get("request_id")
+        except (ValueError, KeyError, TypeError):
+            return ClientError(
+                self._code_for_status(response.status_code, ERROR_UNKNOWN),
+                status_code=response.status_code,
+            )
+        if not isinstance(code, str):
+            return ClientError(
+                self._code_for_status(response.status_code, ERROR_UNKNOWN),
+                status_code=response.status_code,
+            )
+        return ClientError(
+            self._code_for_status(response.status_code, code),
+            request_id=request_id if isinstance(request_id, str) else None,
+            status_code=response.status_code,
+        )
+
+    @staticmethod
+    def _code_for_status(status_code: int, code: str) -> str:
+        """The service reports its own deadline as 504 with code `internal`.
+
+        The contract says so deliberately: the status is what distinguishes a
+        server-side timeout from a genuine failure, and reusing `internal`
+        keeps the code enumeration closed. Rendering "something went wrong on
+        the server" for a timeout would misdescribe it to the one person who
+        can act on it, so the status wins here.
+        """
+        if status_code == 504:
+            return ERROR_TIMEOUT
+        return code
+
+    @staticmethod
+    def _parsed(build, payload):
+        """Build a result from a body that is only supposed to be ours.
+
+        A 2xx from an unrelated local service - a proxy, another app on the
+        port - parses as JSON or not at all, and either way it must arrive as
+        the client's own error state rather than as a KeyError from inside a
+        view's coroutine.
+        """
+        try:
+            return build(payload)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ClientError(ERROR_UNKNOWN) from exc
+
+    @staticmethod
+    def _json(response: httpx.Response):
+        try:
+            return response.json()
+        except (ValueError, httpx.HTTPError) as exc:
+            raise ClientError(ERROR_UNKNOWN) from exc
+
+    async def translate(
+        self, text: str, *, to: str | None = None
+    ) -> TranslationResult:
+        body: dict[str, Any] = {"text": text}
+        if to is not None:
+            body["to"] = to
+        response = await self._request(
+            "POST",
+            "/v1/translations",
+            json=body,
+            timeout=self._translate_timeout,
+        )
+        return self._parsed(TranslationResult.from_json, self._json(response))
+
+    async def lookup_terms(self, query: str) -> TermsResult:
+        response = await self._request("GET", "/v1/terms", params={"q": query})
+        return self._parsed(TermsResult.from_json, self._json(response))
+
+    async def get_meta(self) -> MetaResult:
+        response = await self._request("GET", "/v1/meta")
+        return self._parsed(MetaResult.from_json, self._json(response))
+

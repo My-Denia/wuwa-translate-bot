@@ -1,0 +1,84 @@
+<#
+.SYNOPSIS
+    Reproducible one-folder PyInstaller build for the WuwaTerm desktop client.
+
+.DESCRIPTION
+    Builds client/dist/WuwaTerm/WuwaTerm.exe from client/WuwaTerm.spec using
+    the client's own virtual environment (client/.venv). Fails loudly if the
+    venv, PySide6, or pyinstaller are missing, rather than falling back to a
+    system Python or a different GUI toolkit. No code signing is performed.
+#>
+
+$ErrorActionPreference = "Stop"
+
+$ClientRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VenvPython = Join-Path $ClientRoot ".venv\Scripts\python.exe"
+$SpecFile = Join-Path $ClientRoot "WuwaTerm.spec"
+
+if (-not (Test-Path $VenvPython)) {
+    Write-Error @"
+Client virtual environment not found at: $VenvPython
+Create it first, from the client directory:
+  py "-V:Astral\CPython3.12.13" -m venv .venv
+  .venv\Scripts\python.exe -m pip install -e ".[dev,build]"
+"@
+    exit 1
+}
+
+if (-not (Test-Path $SpecFile)) {
+    Write-Error "Spec file not found at: $SpecFile"
+    exit 1
+}
+
+& $VenvPython -c "import PySide6" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "PySide6 is not importable in $VenvPython. Run: $VenvPython -m pip install -e `"$ClientRoot[dev]`""
+    exit 1
+}
+
+& $VenvPython -c "import PyInstaller" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "pyinstaller is not importable in $VenvPython. Run: $VenvPython -m pip install -e `"$ClientRoot[build]`""
+    exit 1
+}
+
+# The dependency scan walks PATH to resolve the DLLs an extension module
+# needs, so the interpreter's own runtime directory goes first: otherwise any
+# other OpenSSL installed on the build machine wins and the artifact ships a
+# libssl/libcrypto pair that its own _ssl.pyd cannot load.
+$InterpreterDllDir = & $VenvPython -c "import sys, pathlib; print(pathlib.Path(sys.base_prefix) / 'DLLs')"
+$OriginalPath = $env:PATH
+$env:PATH = "$InterpreterDllDir;$env:PATH"
+
+Push-Location $ClientRoot
+try {
+    & $VenvPython -m PyInstaller --noconfirm --clean $SpecFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller build failed with exit code $LASTEXITCODE."
+    }
+}
+finally {
+    Pop-Location
+    $env:PATH = $OriginalPath
+}
+
+$ExePath = Join-Path $ClientRoot "dist\WuwaTerm\WuwaTerm.exe"
+if (-not (Test-Path $ExePath)) {
+    Write-Error "Build finished but the expected artifact was not found at: $ExePath"
+    exit 1
+}
+
+# A produced file is not a working program. This runs the artifact's own
+# start-up rehearsal: it imports and constructs everything a normal start
+# does, off-screen, and exits without showing a window, asking for a
+# credential or sending a request. A build whose entry script cannot import
+# its own package fails here instead of at the owner's desk.
+$env:QT_QPA_PLATFORM = "offscreen"
+$SelfCheck = Start-Process -FilePath $ExePath -ArgumentList "--self-check" -Wait -PassThru
+Remove-Item Env:\QT_QPA_PLATFORM
+if ($SelfCheck.ExitCode -ne 0) {
+    Write-Error "The built artifact failed its start-up self-check (exit code $($SelfCheck.ExitCode)): $ExePath"
+    exit 1
+}
+
+Write-Host "Build succeeded and passed its start-up self-check: $ExePath"
