@@ -202,7 +202,7 @@ docker inspect --format '{{.Image}}' wuwaterm-bot
 docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api \
-  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=10).status)"
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8787/readyz', timeout=10).status)"
 ```
 
 The pointer must equal the intended source SHA exactly; BOTH running image IDs

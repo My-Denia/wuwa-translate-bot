@@ -60,6 +60,13 @@ services:
       TELEGRAM_BOT_TOKEN: ""
       TELEGRAM_TEST_CHAT_ID: ""
       OWNER_USER_ID: ""
+      # Keys the bot's log redaction, and only the bot's. An environment dump
+      # here would otherwise hand over the key that hashes its chat ids.
+      WUWATERM_REDACTION_SECRET: ""
+      # Pin the credential store to the mounted volume: this override would
+      # otherwise win over WUWATERM_API_STATE_DIR and let a one-off container
+      # write a store the serving container never sees.
+      WUWATERM_API_DEVICE_DB_PATH: ""
     volumes:
       - ../data:/app/data:ro
       - ../state-api:/app/state-api

@@ -1030,7 +1030,16 @@ def test_compose_api_service_is_loopback_only_with_separate_state():
     assert "${WUWATERM_API_BIND" not in text
     assert "ports:" not in text
     # The bot's credentials are not this process' business.
-    for blanked in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_TEST_CHAT_ID", "OWNER_USER_ID"):
+    for blanked in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TEST_CHAT_ID",
+        "OWNER_USER_ID",
+        # Keys the bot's log redaction, and only the bot's.
+        "WUWATERM_REDACTION_SECRET",
+        # Would otherwise win over the state dir and point the credential
+        # store at a path the serving container never sees.
+        "WUWATERM_API_DEVICE_DB_PATH",
+    ):
         assert f'{blanked}: ""' in api_section, blanked
     # It must not be able to write the chat state the bot owns.
     assert "/app/state\n" not in api_section
@@ -1124,3 +1133,23 @@ def test_api_state_directory_is_not_inside_the_bot_state_tree():
     assert "WUWATERM_API_STATE_DIR=state-api" in env_example
     # Runtime state, generated on the host, must never be committable.
     assert "state-api/" in ignored
+
+
+def test_docker_context_excludes_the_api_state_and_sqlite_sidecars():
+    """Sidecars carry credential rows and do not match the *.db pattern."""
+    lines = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    }
+
+    for pattern in ("state", "state-api", "*.db", "*.db-wal", "*.db-shm"):
+        assert pattern in lines, pattern
+
+
+def test_documented_readback_uses_the_same_endpoint_the_updater_gates_on():
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    assert "/readyz" in text
+    # Liveness answers even with no terminology database mounted, so it must
+    # not be what an operator is told to read back.
+    assert "/healthz', timeout" not in text
