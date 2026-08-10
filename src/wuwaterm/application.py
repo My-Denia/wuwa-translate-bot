@@ -184,6 +184,12 @@ TextSplitter = Callable[[str, int], Sequence[str]]
 # Called (synchronously) immediately before each LLM request, after the
 # concurrency slot is held. Raise LLMTranslationError to refuse the call.
 LlmCallGuard = Callable[[], None]
+# How an adapter runs the pipeline's BLOCKING stage. The dictionary stage opens
+# SQLite and, for short ASCII queries, scores every term row; an adapter with a
+# shared event loop (the HTTP server) passes ``asyncio.to_thread`` so that work
+# cannot stall unrelated requests. The Telegram adapter leaves it unset because
+# its single loop already serialises handler work.
+Offload = Callable[..., Awaitable[object]]
 
 
 # --------------------------------------------------------------------------
@@ -425,9 +431,15 @@ async def translate_request_async(
     markup_translator: MarkupTranslator | None = None,
     splitter: TextSplitter | None = None,
     before_llm_call: LlmCallGuard | None = None,
+    offload: Offload | None = None,
 ) -> TranslationOutcome:
     """Run the shared dictionary-first pipeline for one job."""
-    stage = _dictionary_stage(service, translator, request, input_limit)
+    if offload is None:
+        stage = _dictionary_stage(service, translator, request, input_limit)
+    else:
+        stage = await offload(
+            _dictionary_stage, service, translator, request, input_limit
+        )
     if stage.outcome is not None:
         return stage.outcome
     prepared, to_chinese = stage.prepared, stage.to_chinese

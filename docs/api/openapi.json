@@ -5,6 +5,17 @@
         "properties": {
           "code": {
             "description": "Enumerated, stable failure classification.",
+            "enum": [
+              "unauthorized",
+              "forbidden",
+              "rate_limited",
+              "payload_too_large",
+              "invalid_request",
+              "input_too_long",
+              "llm_unavailable",
+              "llm_budget_exhausted",
+              "internal"
+            ],
             "title": "Code",
             "type": "string"
           },
@@ -260,6 +271,13 @@
         "title": "TranslationResponseBody",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "description": "Device token.",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -327,24 +345,6 @@
       "get": {
         "description": "Service and data provenance. No paths, no secrets, no chat ids.",
         "operationId": "read_meta_v1_meta_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "content": {
@@ -435,8 +435,23 @@
               }
             },
             "description": "Translation unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Read Meta",
         "tags": [
           "dictionary"
@@ -449,29 +464,14 @@
         "operationId": "read_terms_v1_terms_get",
         "parameters": [
           {
+            "description": "Term to look up.",
             "in": "query",
             "name": "q",
-            "required": false,
+            "required": true,
             "schema": {
-              "default": "",
+              "description": "Term to look up.",
               "title": "Q",
               "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
             }
           }
         ],
@@ -565,8 +565,23 @@
               }
             },
             "description": "Translation unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Read Terms",
         "tags": [
           "dictionary"
@@ -577,24 +592,6 @@
       "post": {
         "description": "Translate plain text through the shared dictionary-first pipeline.",
         "operationId": "create_translation_v1_translations_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -695,8 +692,23 @@
               }
             },
             "description": "Translation unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Create Translation",
         "tags": [
           "translation"

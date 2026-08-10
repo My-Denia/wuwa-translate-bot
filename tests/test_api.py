@@ -735,3 +735,188 @@ def test_settings_defaults_bind_to_loopback(monkeypatch):
     # the SUM of the per-process budgets, never a shared global one.
     assert settings.llm_max_concurrency == 2
     assert settings.llm_calls_per_minute == 30
+
+
+# --------------------------------------------------------------------------
+# Review follow-ups: streaming cap, routing shape, credential-store writes,
+# refusing a pretend model answer, and contract completeness
+# --------------------------------------------------------------------------
+
+
+def test_body_cap_holds_without_a_content_length_header(tmp_path, sample_db):
+    """A chunked caller must not be able to make the process buffer freely."""
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=256)
+    _, token = store.issue("owner desktop")
+
+    async def chunked():
+        yield b'{"text": "'
+        for _ in range(50):
+            yield b"x" * 64
+        yield b'"}'
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            content=chunked(),
+            headers={**bearer(token), "Content-Type": "application/json"},
+        )
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+
+
+def test_negative_content_length_is_an_invalid_request(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = store.issue("owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            content=b'{"text": "hi"}',
+            headers={
+                **bearer(token),
+                "Content-Type": "application/json",
+                "Content-Length": "-1",
+            },
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("GET", "/v2/meta", 404),
+        ("GET", "/nope", 404),
+        ("DELETE", "/healthz", 405),
+    ],
+)
+def test_routing_failures_use_the_stable_envelope(
+    tmp_path, sample_db, method, path, status
+):
+    app, _ = build_client_app(tmp_path, sample_db)
+
+    response = run(call(app, method, path))
+
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"error", "request_id"}
+    assert body["error"]["code"] == "invalid_request"
+    assert "detail" not in body
+
+
+def test_fresh_credential_store_answers_401_not_an_error(tmp_path, sample_db):
+    """A first install has no devices.db; that is a rejection, not a crash."""
+    settings = build_settings(tmp_path, sample_db)
+    app = create_app(settings, device_store=DeviceStore(settings.device_db_path))
+    assert not settings.device_db_path.exists()
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.deadbeef.secret"),
+        )
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_rate_limited_requests_do_not_write_to_the_credential_store(
+    tmp_path, sample_db
+):
+    app, store = build_client_app(tmp_path, sample_db, rate_limit_per_minute=1)
+    device, token = store.issue("owner desktop")
+
+    run(call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token)))
+    admitted = store.list_devices()[0].last_used_at
+    assert admitted is not None
+
+    for _ in range(5):
+        blocked = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+        assert blocked.status_code == 429
+
+    assert store.list_devices()[0].last_used_at == admitted
+
+
+def test_unauthenticated_requests_never_touch_the_credential_store(
+    tmp_path, sample_db
+):
+    app, store = build_client_app(tmp_path, sample_db)
+    device, _token = store.issue("owner desktop")
+
+    run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.%s.wrong" % device.device_id),
+        )
+    )
+
+    assert store.list_devices()[0].last_used_at is None
+
+
+def test_model_path_is_refused_when_no_model_is_configured(
+    monkeypatch, tmp_path, sample_db
+):
+    """Without a model the pipeline returns source text; HTTP must not lie."""
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = store.issue("owner desktop")
+    disable_llm(monkeypatch)
+
+    refused = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "需要翻译的一个句子"},
+            headers=bearer(token),
+        )
+    )
+    # A dictionary hit still answers, because it needs no model at all.
+    dictionary = run(
+        call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
+    )
+
+    assert refused.status_code == 503
+    assert refused.json()["error"]["code"] == "llm_unavailable"
+    assert dictionary.status_code == 200
+    assert dictionary.json()["kind"] == "exact"
+
+
+def test_openapi_declares_the_credential_scheme_and_every_failure_shape():
+    document = json.loads(
+        (ROOT / "docs" / "api" / "openapi.json").read_text(encoding="utf-8")
+    )
+
+    schemes = document["components"]["securitySchemes"]
+    assert any(
+        item.get("type") == "http" and item.get("scheme") == "bearer"
+        for item in schemes.values()
+    ), schemes
+    translations = document["paths"]["/v1/translations"]["post"]
+    assert translations["security"]
+    assert "504" in translations["responses"]
+    code = document["components"]["schemas"]["ErrorDetailBody"]["properties"]["code"]
+    assert set(code["enum"]) == set(STATUS_BY_CODE)
+    assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["required"] is True

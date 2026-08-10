@@ -196,16 +196,24 @@ class DeviceStore:
     # -- request path ------------------------------------------------------
 
     def authenticate(self, token: str) -> Device | None:
-        """Return the live device for ``token``, or None.
+        """Return the live device for ``token``, or None. READ ONLY.
 
         None covers every rejection reason on purpose: unknown device, wrong
         secret, malformed token and revoked device are indistinguishable to the
-        caller, so the endpoint cannot be used to enumerate device ids.
+        caller, so the endpoint cannot be used to enumerate device ids. A store
+        that does not exist yet is one more indistinguishable rejection rather
+        than a database error, so a fresh install answers 401 like any other
+        unknown credential.
+
+        Usage is deliberately NOT recorded here: a caller that is about to be
+        refused by a rate limit must not be able to drive an unbounded stream
+        of writes. Call :meth:`record_use` once the request is admitted.
         """
         parsed = parse_token(token)
         if parsed is None:
             return None
         device_id, secret = parsed
+        self.initialize()
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
@@ -219,14 +227,16 @@ class DeviceStore:
                 return None
             if row["revoked_at"] is not None:
                 return None
-            conn.execute(
-                "UPDATE devices SET last_used_at = ? WHERE device_id = ?",
-                (_now(), device_id),
-            )
-            row = conn.execute(
-                "SELECT * FROM devices WHERE device_id = ?", (device_id,)
-            ).fetchone()
         return _row_to_device(row)
+
+    def record_use(self, device_id: str, *, now: str | None = None) -> None:
+        """Stamp last_used_at for an ADMITTED request."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE devices SET last_used_at = ? WHERE device_id = ?"
+                " AND revoked_at IS NULL",
+                (now or _now(), device_id),
+            )
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:

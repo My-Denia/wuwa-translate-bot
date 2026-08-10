@@ -23,20 +23,24 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Request, Response
+from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from wuwaterm.application import (
     ERROR_FORBIDDEN,
+    ERROR_LLM_UNAVAILABLE,
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
     ERROR_PAYLOAD_TOO_LARGE,
     ERROR_RATE_LIMITED,
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
+    KIND_LLM,
     LlmCallBudget,
     SlidingWindowRateLimiter,
     TranslationJob,
@@ -52,7 +56,18 @@ from wuwaterm.logging_utils import redact_id
 
 from . import API_VERSION
 from .auth import SCOPE_META, SCOPE_TRANSLATE, Device, DeviceStore
-from .errors import ApiError, error_body
+from .errors import MESSAGE_BY_CODE, ApiError, error_body
+
+# Framework-raised routing failures mapped onto the published vocabulary.
+_ROUTING_ERROR_CODES = {
+    400: ERROR_INVALID_REQUEST,
+    401: ERROR_UNAUTHORIZED,
+    403: ERROR_FORBIDDEN,
+    404: ERROR_INVALID_REQUEST,
+    405: ERROR_INVALID_REQUEST,
+    413: ERROR_PAYLOAD_TOO_LARGE,
+    429: ERROR_RATE_LIMITED,
+}
 
 LOGGER = logging.getLogger("wuwaterm_api")
 
@@ -133,8 +148,26 @@ class HealthResponseBody(BaseModel):
     status: Literal["ok", "ready"]
 
 
+# The wire vocabulary, spelled out so a generated client can model every
+# branch exhaustively and so the contract gate notices a code being added or
+# removed. It must stay equal to the application layer's set.
+ErrorCode = Literal[
+    "unauthorized",
+    "forbidden",
+    "rate_limited",
+    "payload_too_large",
+    "invalid_request",
+    "input_too_long",
+    "llm_unavailable",
+    "llm_budget_exhausted",
+    "internal",
+]
+
+
 class ErrorDetailBody(BaseModel):
-    code: str = Field(description="Enumerated, stable failure classification.")
+    code: ErrorCode = Field(
+        description="Enumerated, stable failure classification."
+    )
     message: str = Field(description="Short operator-facing text.")
 
 
@@ -152,7 +185,16 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     429: {"model": ErrorResponseBody, "description": "Rate limited"},
     500: {"model": ErrorResponseBody, "description": "Internal error"},
     503: {"model": ErrorResponseBody, "description": "Translation unavailable"},
+    504: {
+        "model": ErrorResponseBody,
+        "description": "Request exceeded the server time budget",
+    },
 }
+
+# The bearer scheme is declared so a generated client can configure the
+# credential. auto_error is off because this API answers with its own envelope
+# instead of the framework's default body.
+BEARER_SCHEME = HTTPBearer(auto_error=False, description="Device token.")
 
 
 # --------------------------------------------------------------------------
@@ -206,11 +248,25 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
                     ApiError(ERROR_INVALID_REQUEST, "content-length is not a number"),
                     request,
                 )
+            if declared_length < 0:
+                return _error_response(
+                    ApiError(ERROR_INVALID_REQUEST, "content-length is negative"),
+                    request,
+                )
             if declared_length > self.max_body_bytes:
                 return _error_response(ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
-        body = await request.body()
-        if len(body) > self.max_body_bytes:
-            return _error_response(ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
+        # A caller can omit content-length or use chunked encoding, so the
+        # header is a hint, not the enforcement point. Read incrementally and
+        # abort at the cap, so an unauthenticated caller can never make this
+        # process hold more than max_body_bytes of request payload.
+        received = bytearray()
+        async for chunk in request.stream():
+            received.extend(chunk)
+            if len(received) > self.max_body_bytes:
+                return _error_response(ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
+        # Hand the bytes we consumed back to the cached request so the route
+        # still sees its own body.
+        request._body = bytes(received)
         return await call_next(request)
 
 
@@ -251,13 +307,14 @@ def _request_id(request: Request) -> str:
 
 async def authenticated_device(
     request: Request,
-    authorization: Annotated[str | None, Header()] = None,
+    presented: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(BEARER_SCHEME)
+    ] = None,
 ) -> Device:
-    if not authorization or not authorization.lower().startswith(_BEARER_PREFIX):
+    if presented is None or presented.scheme.lower() != "bearer":
         raise ApiError(ERROR_UNAUTHORIZED)
-    token = authorization[len(_BEARER_PREFIX) :].strip()
     store: DeviceStore = request.app.state.device_store
-    device = await asyncio.to_thread(store.authenticate, token)
+    device = await asyncio.to_thread(store.authenticate, presented.credentials.strip())
     if device is None:
         LOGGER.info(
             "auth rejected path=%s request_id=%s",
@@ -272,7 +329,10 @@ async def authenticated_device(
             redact_id(device.device_id),
             _request_id(request),
         )
+        # Deliberately BEFORE record_use: a refused request must not be able to
+        # drive an unbounded stream of writes into the credential store.
         raise ApiError(ERROR_RATE_LIMITED)
+    await asyncio.to_thread(store.record_use, device.device_id)
     request.state.device = device
     return device
 
@@ -381,6 +441,20 @@ def _register_error_handlers(app: FastAPI) -> None:
             ),
         )
 
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        # Unknown paths and unsupported methods are routing failures raised by
+        # the framework, not by this application. Without this handler they
+        # would answer with the framework's default body and break the one
+        # documented non-2xx shape.
+        code = _ROUTING_ERROR_CODES.get(exc.status_code, ERROR_INTERNAL)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(
+                code, MESSAGE_BY_CODE.get(code, "internal error"), _request_id(request)
+            ),
+        )
+
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> Response:
         LOGGER.exception(
@@ -434,6 +508,11 @@ def _register_routes(app: FastAPI) -> None:
             state.translator,
             TranslationJob(text=body.text, forced_to_chinese=forced_to_chinese),
             before_llm_call=state.llm_budget,
+            # The dictionary stage opens SQLite and can score every term row.
+            # This process serves many requests on one loop, so that work runs
+            # on a worker thread instead of blocking every other request (and
+            # the request time budget) while it runs.
+            offload=asyncio.to_thread,
         )
         LOGGER.info(
             "translation device=%s kind=%s direction=%s request_id=%s",
@@ -444,6 +523,18 @@ def _register_routes(app: FastAPI) -> None:
         )
         if outcome.kind == KIND_ERROR:
             raise ApiError(outcome.error_code or ERROR_INTERNAL)
+        if outcome.kind == KIND_LLM and not llm_configured():
+            # With no model configured the pipeline returns the source text
+            # with official terms substituted. That is a reasonable chat
+            # fallback, but over HTTP it would look like a successful
+            # translation, so this surface refuses instead of pretending.
+            LOGGER.info(
+                "translation refused: no model configured request_id=%s",
+                _request_id(request),
+            )
+            raise ApiError(
+                ERROR_LLM_UNAVAILABLE, "no translation model is configured"
+            )
         return TranslationResponseBody(
             kind=outcome.kind,
             text=outcome.text,
@@ -461,7 +552,7 @@ def _register_routes(app: FastAPI) -> None:
     async def read_terms(
         request: Request,
         device: Annotated[Device, Depends(require_scope(SCOPE_META))],
-        q: str = "",
+        q: str = Query(description="Term to look up."),
     ) -> TermsResponseBody:
         """Exact dictionary candidates for a query. Official strings only."""
         query = q.strip()

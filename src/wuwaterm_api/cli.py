@@ -48,7 +48,12 @@ def _device_issue(args: argparse.Namespace) -> int:
     print(f"scopes: {','.join(device.scopes)}")
     print(f"created_at: {device.created_at}")
     print("token (shown once, store it in the OS credential manager):")
-    print(token)
+    # Written straight to the terminal rather than through a logging-shaped
+    # call: the operator has to see the secret exactly once, and it must not
+    # travel through anything that could be captured, formatted or persisted.
+    sys.stdout.write(token)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     return 0
 
 

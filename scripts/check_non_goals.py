@@ -79,13 +79,24 @@ def check_single_channel_listener() -> list[str]:
     return failures
 
 
+# Directory names that never contain product source, at any depth. Nested
+# virtual environments (the desktop client keeps its own) and build outputs
+# would otherwise drown the report in third-party matches and make the gate
+# fail on files this repository does not author.
+SKIPPED_DIR_NAMES = frozenset(
+    {".venv", "venv", "site-packages", "node_modules", "dist", "build", ".git"}
+)
+
+
 def iter_files() -> list[Path]:
     files: list[Path] = []
     for path in ROOT.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(ROOT).as_posix()
-        if rel.startswith((".venv/", "data/", "goal-runs/")):
+        if rel.startswith(("data/", "goal-runs/")):
+            continue
+        if SKIPPED_DIR_NAMES.intersection(path.relative_to(ROOT).parts[:-1]):
             continue
         if path.suffix in TEXT_SUFFIXES or path.name in {"Dockerfile"}:
             files.append(path)
