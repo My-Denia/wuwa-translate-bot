@@ -288,19 +288,31 @@ def test_get_meta_round_trip() -> None:
     assert result.request_id == "req-meta"
 
 
-def test_health_round_trip_sends_no_auth_header_when_no_token() -> None:
+def test_a_request_without_a_stored_credential_sends_no_auth_header() -> None:
+    """No credential must mean no header, not an empty or literal one."""
     captured: dict[str, str | None] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured["authorization"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(
+            200,
+            json={
+                "service_version": "0.2.1",
+                "api_version": "v1",
+                "schema_version": "2",
+                "source_profile": "p",
+                "source_commit": "c",
+                "term_count": 1,
+                "llm_configured": False,
+                "request_id": "req-meta",
+            },
+        )
 
     client = _client(handler, token_provider=lambda: None)
 
-    async def scenario() -> bool:
-        ok = await client.health()
+    async def scenario() -> None:
+        await client.get_meta()
         await client.aclose()
-        return ok
 
-    assert asyncio.run(scenario()) is True
+    asyncio.run(scenario())
     assert captured["authorization"] is None

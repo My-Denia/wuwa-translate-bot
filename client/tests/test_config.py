@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from wuwaterm_client.config import ClientConfig, config_path
+from wuwaterm_client.config import (
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+    ClientConfig,
+    config_path,
+)
 
 
 def test_config_file_never_contains_the_credential(tmp_path: Path) -> None:
@@ -63,3 +69,37 @@ def test_config_load_ignores_unrecognized_keys(tmp_path: Path) -> None:
     )
     loaded = ClientConfig.load(base_dir=tmp_path)
     assert loaded.base_url == "http://x:1"
+
+
+def test_a_hand_edited_timeout_is_clamped_rather_than_trusted(tmp_path) -> None:
+    """`load` never raises, which must not mean it never checks.
+
+    The Settings dialog cannot produce these values; a hand-edited config file
+    can, and a zero or negative timeout would go straight into the HTTP
+    client.
+    """
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "http://127.0.0.1:8787",
+                "request_timeout_seconds": 0,
+                "translate_timeout_seconds": 100000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = ClientConfig.load(tmp_path)
+
+    assert config.request_timeout_seconds == MIN_TIMEOUT_SECONDS
+    assert config.translate_timeout_seconds == MAX_TIMEOUT_SECONDS
+
+
+def test_a_non_numeric_timeout_falls_back_to_the_default(tmp_path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"request_timeout_seconds": "soon"}), encoding="utf-8"
+    )
+
+    config = ClientConfig.load(tmp_path)
+
+    assert config.request_timeout_seconds == DEFAULT_REQUEST_TIMEOUT_SECONDS

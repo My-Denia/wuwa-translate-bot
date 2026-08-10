@@ -57,6 +57,12 @@ class MainWindow(QMainWindow):
             self.config = dialog.result_config()
             self.config.save()
             self.api_client.update_base_url(self.config.base_url)
+            # Timeouts too, or the saved settings and the running client
+            # disagree until the next launch.
+            self.api_client.update_timeouts(
+                self.config.request_timeout_seconds,
+                self.config.translate_timeout_seconds,
+            )
 
     def _on_about_clicked(self) -> None:
         QMessageBox.information(self, strings.MENU_ABOUT, strings.ABOUT_TEXT)

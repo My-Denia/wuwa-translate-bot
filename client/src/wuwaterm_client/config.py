@@ -19,6 +19,11 @@ CONFIG_FILE_NAME = "config.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
 DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 60.0
+# The same bounds the Settings dialog enforces. A hand-edited config file is
+# the only way a value outside them can arrive, and "never raises" must not
+# mean "passes a zero or a string straight into the HTTP client".
+MIN_TIMEOUT_SECONDS = 1.0
+MAX_TIMEOUT_SECONDS = 600.0
 
 
 def app_data_dir() -> Path:
@@ -31,6 +36,13 @@ def app_data_dir() -> Path:
 
 def config_path(base_dir: Path | None = None) -> Path:
     return (base_dir if base_dir is not None else app_data_dir()) / CONFIG_FILE_NAME
+
+
+def _sane_timeout(value: object, fallback: float) -> float:
+    """A timeout from disk, clamped, or the default if it is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return fallback
+    return float(min(max(float(value), MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +66,13 @@ class ClientConfig:
             return cls()
         known_fields = {field.name for field in dataclasses.fields(cls)}
         filtered = {key: value for key, value in raw.items() if key in known_fields}
+        defaults = cls()
+        for name, fallback in (
+            ("request_timeout_seconds", defaults.request_timeout_seconds),
+            ("translate_timeout_seconds", defaults.translate_timeout_seconds),
+        ):
+            if name in filtered:
+                filtered[name] = _sane_timeout(filtered[name], fallback)
         try:
             return cls(**filtered)
         except TypeError:

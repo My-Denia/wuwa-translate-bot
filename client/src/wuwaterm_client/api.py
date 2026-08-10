@@ -143,6 +143,17 @@ class ApiClient:
     def update_base_url(self, base_url: str) -> None:
         self._client.base_url = httpx.URL(base_url)
 
+    def update_timeouts(self, timeout: float, translate_timeout: float) -> None:
+        """Apply edited timeouts to the live client.
+
+        Both are captured per call rather than held only on the underlying
+        httpx client, so a value changed in Settings has to be pushed here or
+        the saved configuration and the running client silently disagree until
+        the next launch.
+        """
+        self._timeout = timeout
+        self._translate_timeout = translate_timeout
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -172,6 +183,13 @@ class ApiClient:
             # A caller cancelled the in-flight task (e.g. the Cancel button).
             # Report it as a distinct, non-alarming state rather than a
             # generic transport failure.
+            #
+            # NOTE for future callers: the cancellation is CONSUMED here, not
+            # re-raised. A task awaiting this method therefore completes with
+            # a ClientError instead of being cancelled, so wrapping these
+            # calls in asyncio.wait_for or gather(...) will not see normal
+            # cancel semantics. That is deliberate - the UI needs a rendered
+            # outcome - but it has to be known before it is relied on.
             raise ClientError(ERROR_CANCELLED) from None
         except httpx.TimeoutException as exc:
             raise ClientError(ERROR_TIMEOUT) from exc
@@ -219,6 +237,3 @@ class ApiClient:
         response = await self._request("GET", "/v1/meta")
         return MetaResult.from_json(response.json())
 
-    async def health(self) -> bool:
-        response = await self._request("GET", "/healthz")
-        return response.json().get("status") == "ok"

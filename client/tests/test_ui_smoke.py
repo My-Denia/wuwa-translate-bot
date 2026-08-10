@@ -64,3 +64,44 @@ def test_main_window_constructs(qapp, tmp_path, monkeypatch) -> None:
     window = MainWindow(config=ClientConfig())
     assert window.windowTitle()
     assert window.tabs.count() == 3
+
+
+def test_settings_push_the_new_timeouts_into_the_live_client(qapp, tmp_path, monkeypatch) -> None:
+    """A saved timeout that only takes effect next launch is a silent lie.
+
+    The settings dialog writes the value and the window pushes it; without the
+    push the running client keeps the old timeout while the file says
+    otherwise.
+    """
+    from wuwaterm_client import config as config_module
+    from wuwaterm_client.config import ClientConfig
+    from wuwaterm_client.ui import main_window as main_window_module
+
+    monkeypatch.setattr(config_module, "app_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(main_window_module, "has_token", lambda: True)
+
+    window = MainWindow(ClientConfig(base_url="http://test", request_timeout_seconds=5.0))
+    changed = ClientConfig(
+        base_url="http://elsewhere",
+        request_timeout_seconds=42.0,
+        translate_timeout_seconds=99.0,
+    )
+
+    class _AcceptedDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+        def result_config(self):
+            return changed
+
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _AcceptedDialog)
+    window._on_settings_clicked()
+
+    assert window.api_client._timeout == 42.0
+    assert window.api_client._translate_timeout == 99.0
+    assert str(window.api_client._client.base_url).startswith("http://elsewhere")
