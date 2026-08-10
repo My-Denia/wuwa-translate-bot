@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -60,7 +61,11 @@ TEST_SECRET_BASE = "unguessable-material-for-tests-0123456789abcdef"
 
 
 def issue_device(store, name: str, scopes=None, secret: str | None = None):
-    material = secret if secret is not None else f"{TEST_SECRET_BASE}-{name}"
+    material = (
+        secret
+        if secret is not None
+        else f"{TEST_SECRET_BASE}-{name.replace(' ', '-')}"
+    )
     device = store.issue(name, scopes, secret=material)
     return device, f"{TOKEN_SCHEME}.{device.device_id}.{material}"
 
@@ -1125,3 +1130,43 @@ def test_an_unusable_store_is_one_more_uniform_rejection(tmp_path, sample_db):
     # The operator still gets the real reason where it has an audience.
     with pytest.raises(DeviceStoreError):
         DeviceStore(settings.device_db_path).initialize()
+
+
+def test_a_secret_that_cannot_be_sent_in_a_header_is_refused(tmp_path):
+    """Registering an unusable credential is the worst kind of failure."""
+    store = DeviceStore(tmp_path / "devices.db")
+    body = "x" * MIN_SECRET_LENGTH
+
+    for candidate in (
+        f"{body} with space",
+        f"{body}\nnewline",
+        f"{body}\ttab",
+        f"{body}\x7fdel",
+        f"{body}密码",
+    ):
+        with pytest.raises(DeviceStoreError):
+            store.issue("owner desktop", None, secret=candidate)
+    assert store.list_devices() == []
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX permission bits; the deployment target is Linux and CI checks it",
+)
+def test_every_file_carrying_verifier_material_is_restricted(tmp_path):
+    """The write-ahead log holds the same rows as the database."""
+    import stat
+
+    store = DeviceStore(tmp_path / "state" / "devices.db")
+    issue_device(store, "owner desktop")
+    store.authenticate("wtd1.nope.%s" % ("x" * 40))
+
+    paths = [store.path.parent, store.path]
+    paths += [
+        store.path.with_name(store.path.name + suffix) for suffix in ("-wal", "-shm")
+    ]
+    for path in paths:
+        if not path.exists():
+            continue
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert not mode & 0o077, (path, oct(mode))

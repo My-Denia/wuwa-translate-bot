@@ -15,9 +15,10 @@ output, out of terminal scrollback and out of anything that could capture,
 format or persist it — a property worth more than the small convenience of
 having the server mint the value for you.
 
-The secret's character set is unconstrained (it may contain dots, which the
-token parser accounts for); only surrounding whitespace is refused, because a
-presented token is stripped as a whole.
+The secret may contain dots, which the token parser accounts for, but it has
+to survive the transport it will be presented over: an HTTP header value. It is
+therefore required to be printable ASCII with no spaces or control characters,
+so a registered credential can never be one that cannot be sent.
 
 Because the operator chooses the secret, this store cannot assume the entropy
 a machine-generated value would have had. It therefore refuses anything shorter
@@ -105,6 +106,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _is_presentable(secret: str) -> bool:
+    """Whether ``secret`` can survive being sent in an HTTP header value."""
+    if not secret:
+        return False
+    return all("!" <= char <= "~" for char in secret)
+
+
 def _derive(secret: str, salt: bytes) -> bytes:
     """Derive the stored verifier for an operator-chosen secret."""
     return hashlib.scrypt(
@@ -176,10 +184,25 @@ class DeviceStore:
                     f"missing {sorted(missing)}; remove the file and register "
                     f"the devices again"
                 )
-        if not existed:
-            # Credential material, even hashed, is not world-readable.
+        self._restrict_permissions()
+
+    def _restrict_permissions(self) -> None:
+        """Keep verifier material off the world-readable path.
+
+        SQLite's write-ahead log and shared-memory sidecars carry the same rows
+        as the main file, so all three plus the directory are restricted, not
+        just the database the caller named.
+        """
+        targets = [
+            (self.path.parent, 0o700),
+            (self.path, 0o600),
+            (self.path.with_name(self.path.name + "-wal"), 0o600),
+            (self.path.with_name(self.path.name + "-shm"), 0o600),
+        ]
+        for target, mode in targets:
             try:
-                self.path.chmod(0o600)
+                if target.exists():
+                    target.chmod(mode)
             except OSError:  # pragma: no cover - filesystem without POSIX modes
                 pass
 
@@ -203,14 +226,14 @@ class DeviceStore:
         name = (device_name or "").strip()
         if not name:
             raise DeviceStoreError("device_name must not be empty")
-        # Taken verbatim: the secret's character set is deliberately
-        # unconstrained. Surrounding whitespace is refused rather than trimmed,
-        # because a presented token is stripped as a whole and a silently
-        # trimmed secret would register fine and then never authenticate.
+        # Taken verbatim, but it must be presentable in an HTTP header:
+        # anything else would register cleanly and then be impossible to send,
+        # which is the worst kind of failure for a credential.
         material = secret or ""
-        if material != material.strip():
+        if not _is_presentable(material):
             raise DeviceStoreError(
-                "the supplied secret must not begin or end with whitespace"
+                "the supplied secret must be printable ASCII without spaces or "
+                "control characters, so it can be presented in a request header"
             )
         if len(material) < MIN_SECRET_LENGTH:
             raise DeviceStoreError(
