@@ -73,20 +73,19 @@ SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".to
 #     boundary re-opened the same false-positive class from the other side:
 #     `chown -R deploy:deploy`, `cp -R`, `curl -L https://…` and
 #     `-oLogLevel=ERROR` all carry an uppercase L/D/R that forwards nothing;
-#   * quoted segments blanked before the FLAG patterns run, because
-#     `ssh <vps> '…'` carries a remote command whose flags are not ssh's;
+#   * the flag scan bounded at the first quote, because `ssh <vps> '…'`
+#     carries a remote command whose flags are not ssh's - while a quoted
+#     forward SPEC still has to be caught;
 #   * both spellings of the prose, since "a forwarded port" and "port
 #     forwarding" are the same instruction written two ways.
-# `-L`/`-R` take `[bind:]port:host:hostport` - a colon-separated list ending in
-# a port - so their argument always contains a colon with a digit after it.
-# `chmod -R 755`, `cp -R state state.backup` and `chown -R deploy:deploy` do
-# not, and the shape is written loosely enough (`\S`) to cover the documented
-# bind spellings `*:8787:…` and `/run/x.sock:…` as well as bracketed IPv6.
-# `-D` takes a bare port and cannot be told apart from an ordinary flag by its
-# argument at all; what keeps it honest is where it is allowed to appear - see
-# the quote stripping below.
-_SPEC_LR = r"(?=\s*\S*:\S*\d)"
-_SPEC_D = r"(?=\s*\d)"
+# `-L`/`-R` take a colon-separated forward spec - `[bind:]port:host:hostport`,
+# `*:8787:…`, `/tmp/local.sock:/tmp/remote.sock`, `[::1]:8787:…` - so a colon
+# is the shape, not a digit: a socket-to-socket forward has no port in it at
+# all. `-D` takes `[bind:]port`, which always carries a digit. Both are read
+# only inside SSH's OWN option section (see the flag source below), which is
+# what keeps `chmod -R 755` and friends out without needing a tighter shape.
+_SPEC_LR = r"(?=\s*\S*:)"
+_SPEC_D = r"(?=\s*\S*\d)"
 
 # Wording that is a forwarding instruction wherever it appears, quoted or not.
 _RECIPE_PROSE_SOURCE = r"""
@@ -96,15 +95,17 @@ _RECIPE_PROSE_SOURCE = r"""
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
 """
 
-# Flag forms. These are matched against the line with quoted segments removed,
-# because `ssh <vps> '…'` carries a REMOTE COMMAND inside those quotes and its
-# flags are not ssh's: `chmod -R 755`, `kill -USR1 1234` and
-# `curl -L 127.0.0.1:8787/readyz` are ordinary work that both reviewers
-# (correctly) refused to let this gate reject.
+# Flag forms, read only inside SSH's OWN option section: `[^'"\n]*` stops the
+# scan at the first quote, which is where the options end and a REMOTE COMMAND
+# begins. That one boundary does both jobs - `ssh <vps> 'chmod -R 755 /opt'`
+# runs chmod's flags on the far side and is none of this gate's business, while
+# `ssh -L "8787:127.0.0.1:8787" <vps>` quotes the FORWARD SPEC itself and must
+# still be caught. Blanking quoted text instead (the previous attempt) got the
+# first right and the second wrong.
 _RECIPE_FLAG_SOURCE = rf"""
     (?-i:-N\s+-L)
-    | \bssh\b[^\n]*\s-\w*(?-i:[LR]){_SPEC_LR}
-    | \bssh\b[^\n]*\s-\w*(?-i:D){_SPEC_D}
+    | \bssh\b[^'"\n]*\s-\w*(?-i:[LR]){_SPEC_LR}
+    | \bssh\b[^'"\n]*\s-\w*(?-i:D){_SPEC_D}
 """
 
 # The OPERATOR RUNBOOK legitimately names the administration channel - the
@@ -121,24 +122,11 @@ RECIPE_FLAGS = re.compile(_RECIPE_FLAG_SOURCE, re.IGNORECASE | re.VERBOSE)
 # name.
 CLIENT_SURFACE_ONLY = re.compile(r"\bssh\b | \bsshd\b", re.IGNORECASE | re.VERBOSE)
 
-_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-
-
-def _without_remote_commands(line: str) -> str:
-    """The line with quoted segments blanked.
-
-    `ssh <vps> 'chown -R deploy:deploy /opt'` runs chown's flags on the far
-    side; they are not ssh options and a forwarding scan has no business
-    reading them. Prose is matched against the ORIGINAL line, so a sentence
-    that happens to be quoted still counts.
-    """
-    return _QUOTED.sub("''", line)
-
-
 def _forwarding_hit(line: str, *, strict: bool) -> bool:
+    """Prose anywhere on the line; flags only in SSH's own option section."""
     if RECIPE_PROSE.search(line):
         return True
-    if RECIPE_FLAGS.search(_without_remote_commands(line)):
+    if RECIPE_FLAGS.search(line):
         return True
     return bool(strict and CLIENT_SURFACE_ONLY.search(line))
 
@@ -307,6 +295,10 @@ RECIPE_SPELLINGS = [
     "RemoteForward 8787 127.0.0.1:8787",
     "ssh -L *:8787:127.0.0.1:8787 <vps>",          # documented bind spelling
     "ssh -L /run/wuwaterm.sock:127.0.0.1:8787 <vps>",  # socket-path forward
+    'ssh -L "8787:127.0.0.1:8787" <vps>',              # quoted forward spec
+    "ssh -L /tmp/local.sock:/tmp/remote.sock <vps>",   # socket to socket, no port
+    "ssh -D localhost:1080 <vps>",                     # dynamic, named bind
+    "ssh -D [::1]:1080 <vps>",                         # dynamic, IPv6 bind
     "set up a port-forward from this computer",
     "the desktop reaches the service through a forwarded port",
     "try forwarding the port instead",
@@ -383,6 +375,10 @@ def test_the_runbook_may_still_describe_operator_access() -> None:
         "With the tunnel open, set the client's server address",
         "ssh -L *:8787:127.0.0.1:8787 <vps>",          # documented bind spelling
     "ssh -L /run/wuwaterm.sock:127.0.0.1:8787 <vps>",  # socket-path forward
+    'ssh -L "8787:127.0.0.1:8787" <vps>',              # quoted forward spec
+    "ssh -L /tmp/local.sock:/tmp/remote.sock <vps>",   # socket to socket, no port
+    "ssh -D localhost:1080 <vps>",                     # dynamic, named bind
+    "ssh -D [::1]:1080 <vps>",                         # dynamic, IPv6 bind
     "set up a port-forward from this computer",
         "LocalForward 8787 127.0.0.1:8787",
     ],
