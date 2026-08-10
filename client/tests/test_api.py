@@ -499,3 +499,28 @@ def test_metadata_the_contract_requires_must_be_present() -> None:
         raise AssertionError("expected a ClientError")
 
     assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_a_body_that_cannot_be_decoded_becomes_a_client_error() -> None:
+    """A malformed compressed body is neither a transport failure nor a
+    timeout; it is simply unusable, and must arrive as such."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            content=b"this is not gzip at all",
+        )
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN

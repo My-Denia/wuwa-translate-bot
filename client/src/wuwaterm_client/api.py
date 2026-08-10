@@ -260,6 +260,12 @@ class ApiClient:
         except httpx.TransportError as exc:
             # Includes connect-refused and every other network-level failure.
             raise ClientError(ERROR_OFFLINE) from exc
+        except httpx.HTTPError as exc:
+            # Everything else httpx can raise, notably a body this client
+            # cannot decode because the service or something in front of it
+            # produced a malformed compressed response. It is not a transport
+            # failure and not a timeout; it is simply unusable.
+            raise ClientError(ERROR_UNKNOWN) from exc
         if response.status_code >= 400:
             raise self._error_from_response(response)
         return response
@@ -317,7 +323,7 @@ class ApiClient:
     def _json(response: httpx.Response):
         try:
             return response.json()
-        except ValueError as exc:
+        except (ValueError, httpx.HTTPError) as exc:
             raise ClientError(ERROR_UNKNOWN) from exc
 
     async def translate(

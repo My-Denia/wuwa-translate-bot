@@ -101,6 +101,12 @@ def usable_base_url(value: object) -> bool:
     # what it says.
     if parsed.query or parsed.fragment:
         return False
+    # Credentials do not belong in a stored address. This client authenticates
+    # with a device token held in the credential store, and a username or
+    # password embedded here would be written to a plain JSON file and sent as
+    # a second, unmanaged credential.
+    if parsed.username is not None or parsed.password is not None:
+        return False
     return True
 
 

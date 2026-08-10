@@ -168,3 +168,9 @@ def test_a_base_address_may_not_carry_a_query_or_fragment() -> None:
     assert usable_base_url("https://api.example.invalid/prefix")
     assert not usable_base_url("https://api.example.invalid/?x=1")
     assert not usable_base_url("https://api.example.invalid/#part")
+
+
+def test_an_address_may_not_carry_credentials() -> None:
+    """The device token lives in the credential store, not in a JSON file."""
+    assert not usable_base_url("https://user:pass@api.example.invalid")
+    assert not usable_base_url("https://user@api.example.invalid")
