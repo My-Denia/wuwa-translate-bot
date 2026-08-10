@@ -69,15 +69,22 @@ SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".to
 #     IGNORECASE and `-l` (login name), `-d` and `-r` are ordinary flags that
 #     an operator command may carry - `ssh vps 'docker compose … up -d'` must
 #     not be a CI failure;
+#   * a FORWARD-SPEC lookahead after the flag letter, because dropping the
+#     boundary re-opened the same false-positive class from the other side:
+#     `ssh vps 'chown -R deploy:deploy /opt'`, `cp -R`, `curl -L https://…`
+#     and `-oLogLevel=ERROR` all carry an uppercase L/D/R that forwards
+#     nothing. A real forward is always followed by a port: `-L8787:`,
+#     `-L 8787:host:port`, `-D 1080`;
 #   * both spellings of the prose, since "a forwarded port" and "port
 #     forwarding" are the same instruction written two ways.
-_FORWARDING_RECIPE_SOURCE = r"""
+_FORWARD_SPEC = r"(?=\d|\s*\d|\s*[\w.-]+:\d)"
+_FORWARDING_RECIPE_SOURCE = rf"""
     \btunnel\w* | \bautossh\b
     | \bport[-\s]?forward\w*
     | \bLocalForward\b | \bRemoteForward\b
     | (?-i:-N\s+-L)
-    | \bssh\s+-\w*(?-i:[LDR])
-    | \bssh\b[^\n]*\s-\w*(?-i:[LDR])
+    | \bssh\s+-\w*(?-i:[LDR]){_FORWARD_SPEC}
+    | \bssh\b[^\n]*\s-\w*(?-i:[LDR]){_FORWARD_SPEC}
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
 """
 
@@ -122,7 +129,7 @@ ALLOWED_OPERATIONS_NOTES: dict[str, tuple[str, ...]] = {
     # document, so reflowing the paragraph around it cannot turn a pin into
     # what looks like a policy violation.
     "docs/deployment.md": (
-        "> inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.",
+        "Inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.",
     ),
 }
 
@@ -273,10 +280,18 @@ RECIPE_SPELLINGS = [
 
 ORDINARY_OPERATOR_COMMANDS = [
     "SSH access to the host is required to run these deployment commands.",
+    # Lowercase flags: the IGNORECASE half of the false-positive class.
     "ssh -l deploy <vps>",
     "ssh <vps> 'cd /opt/wuwaterm/current && docker compose up -d'",
     "ssh -p 2222 -i ~/.ssh/deploy_key <vps>",
     "ssh -o StrictHostKeyChecking=yes <vps>",
+    # Uppercase flags that forward nothing: the half that dropping the word
+    # boundary re-opened. `chown -R` is ordinary deployment work.
+    "ssh <vps> 'chown -R deploy:deploy /opt/wuwaterm'",
+    "ssh <vps> 'cp -R current previous'",
+    "ssh <vps> 'curl -L https://example.com/readyz'",
+    "ssh -oLogLevel=ERROR <vps>",
+    "ssh <vps> 'kill -TERM 1234'",
 ]
 
 

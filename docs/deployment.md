@@ -85,9 +85,9 @@ service reachable only from the host itself (loopback) — deliberately, because
 the transport a desktop client will use has not been selected. Until it is,
 the supported uses are the on-host readbacks below and a client running on the
 same machine as a development service. A desktop on another machine has no
-address to configure, and
+address to configure.
 
-> inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.
+Inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.
 
 When it is selected, a client will reach the service at
 **the configured secure endpoint**: one stable base address, served over TLS,
