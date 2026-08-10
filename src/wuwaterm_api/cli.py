@@ -5,10 +5,17 @@
     wuwaterm-api device list
     wuwaterm-api device revoke --device-id <id>
 
-There is deliberately no self-service registration route: device tokens are
-created by an operator with shell access (over SSH, typically as
-``docker compose run --rm wuwaterm-api device issue --name ...``) and shown
-exactly once.
+There is deliberately no self-service registration route: devices are
+registered by an operator with shell access, typically over SSH as
+``docker compose run --rm -T wuwaterm-api device issue --name ...``.
+
+``device issue`` reads the secret from standard input and never prints it.
+Nothing in this service emits a credential, so no credential can reach a log,
+a terminal recording or a captured command output through it. The operator
+generates the secret where it will be stored, pastes or pipes it in, and keeps
+it in the OS credential manager on the client machine. The command prints the
+device id, which is not a secret, and the token is simply
+``wtd1.<device_id>.<that secret>``.
 """
 
 from __future__ import annotations
@@ -39,21 +46,27 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_secret(stream) -> str:
+    """Read the operator-supplied secret without ever echoing it."""
+    if stream.isatty():
+        import getpass
+
+        return getpass.getpass("device secret (input hidden): ")
+    return stream.readline().rstrip("\r\n")
+
+
 def _device_issue(args: argparse.Namespace) -> int:
     settings = ApiSettings.from_env()
     store = DeviceStore(settings.device_db_path)
-    device, token = store.issue(args.name, args.scopes)
+    device = store.issue(args.name, args.scopes, secret=_read_secret(sys.stdin))
     print(f"device_id: {device.device_id}")
     print(f"device_name: {device.device_name}")
     print(f"scopes: {','.join(device.scopes)}")
     print(f"created_at: {device.created_at}")
-    print("token (shown once, store it in the OS credential manager):")
-    # Written straight to the terminal rather than through a logging-shaped
-    # call: the operator has to see the secret exactly once, and it must not
-    # travel through anything that could be captured, formatted or persisted.
-    sys.stdout.write(token)
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    print(
+        "registered. The token is wtd1.<device_id>.<the secret you supplied>;"
+        " this service never prints it."
+    )
     return 0
 
 
@@ -97,7 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
     device = sub.add_parser("device", help="manage device credentials")
     device_sub = device.add_subparsers(dest="device_command", required=True)
 
-    issue = device_sub.add_parser("issue", help="create a device and print its token")
+    issue = device_sub.add_parser(
+        "issue",
+        help="register a device for a secret read from standard input",
+    )
     issue.add_argument("--name", required=True, help="human label for the device")
     issue.add_argument(
         "--scopes",
@@ -106,7 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     issue.set_defaults(func=_device_issue)
 
-    listing = device_sub.add_parser("list", help="list devices (never prints tokens)")
+    listing = device_sub.add_parser(
+        "list", help="list devices (no credential material is ever printed)"
+    )
     listing.set_defaults(func=_device_list)
 
     revoke = device_sub.add_parser("revoke", help="revoke a device by id")

@@ -73,7 +73,6 @@ LOGGER = logging.getLogger("wuwaterm_api")
 
 REQUEST_ID_HEADER = "X-Request-Id"
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_BEARER_PREFIX = "bearer "
 
 TERM_QUERY_MAX_LENGTH = 200
 
@@ -187,7 +186,11 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     503: {"model": ErrorResponseBody, "description": "Translation unavailable"},
     504: {
         "model": ErrorResponseBody,
-        "description": "Request exceeded the server time budget",
+        "description": (
+            "Request exceeded the server time budget. Classified as `internal`:"
+            " the enumerated code set is closed, so the HTTP status is what"
+            " distinguishes a timeout from a genuine 500."
+        ),
     },
 }
 
@@ -232,11 +235,18 @@ def _error_response(exc: ApiError, request: Request) -> JSONResponse:
 
 
 class BodyLimitMiddleware(BaseHTTPMiddleware):
-    """Refuse oversized bodies before they are parsed."""
+    """Bound both the size and the arrival time of a request body.
 
-    def __init__(self, app, max_body_bytes: int):
+    Size alone is not enough: a caller can stay under the cap and still hold a
+    request open by trickling bytes. The read therefore carries its own
+    deadline, because the body arrives before the handler timeout can apply to
+    it.
+    """
+
+    def __init__(self, app, max_body_bytes: int, read_timeout_seconds: float):
         super().__init__(app)
         self.max_body_bytes = max_body_bytes
+        self.read_timeout_seconds = read_timeout_seconds
 
     async def dispatch(self, request: Request, call_next):
         declared = request.headers.get("content-length")
@@ -260,10 +270,28 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
         # abort at the cap, so an unauthenticated caller can never make this
         # process hold more than max_body_bytes of request payload.
         received = bytearray()
-        async for chunk in request.stream():
-            received.extend(chunk)
-            if len(received) > self.max_body_bytes:
-                return _error_response(ApiError(ERROR_PAYLOAD_TOO_LARGE), request)
+        try:
+            async with asyncio.timeout(self.read_timeout_seconds):
+                async for chunk in request.stream():
+                    received.extend(chunk)
+                    if len(received) > self.max_body_bytes:
+                        return _error_response(
+                            ApiError(ERROR_PAYLOAD_TOO_LARGE), request
+                        )
+        except (asyncio.TimeoutError, TimeoutError):
+            LOGGER.warning(
+                "request body read timed out path=%s request_id=%s",
+                request.url.path,
+                _request_id(request),
+            )
+            return _error_response(
+                ApiError(
+                    ERROR_INTERNAL,
+                    "request body did not arrive within the server time budget",
+                    status_code=504,
+                ),
+                request,
+            )
         # Hand the bytes we consumed back to the cached request so the route
         # still sees its own body.
         request._body = bytes(received)
@@ -407,10 +435,16 @@ def create_app(
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
 
-    # Added last == outermost: every response, including one produced by an
-    # inner middleware failure, carries the request id.
+    # Added last == outermost: the request id wraps everything, so even a
+    # failure produced by an inner middleware carries it. The body read and the
+    # handler each carry the same time budget, applied where each of them
+    # actually runs.
     app.add_middleware(TimeoutMiddleware, timeout_seconds=resolved.request_timeout_seconds)
-    app.add_middleware(BodyLimitMiddleware, max_body_bytes=resolved.max_body_bytes)
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_body_bytes=resolved.max_body_bytes,
+        read_timeout_seconds=resolved.request_timeout_seconds,
+    )
     app.add_middleware(RequestIdMiddleware)
 
     _register_error_handlers(app)
@@ -480,7 +514,15 @@ def _register_routes(app: FastAPI) -> None:
         "/readyz",
         response_model=HealthResponseBody,
         tags=["health"],
-        responses={503: ERROR_RESPONSES[503]},
+        responses={
+            503: {
+                "model": ErrorResponseBody,
+                "description": (
+                    "The terminology database is not readable. Classified as"
+                    " `internal`; the 503 status is what distinguishes it."
+                ),
+            }
+        },
     )
     async def readyz(request: Request) -> HealthResponseBody:
         """Readiness: the terminology database is readable right now. No auth."""

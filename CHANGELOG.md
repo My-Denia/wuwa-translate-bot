@@ -20,8 +20,11 @@ does not distribute generated game data or generated SQLite databases.
   (`POST /v1/translations`, `GET /v1/terms`, `GET /v1/meta`, `GET /healthz`,
   `GET /readyz`) served by the same dictionary-first pipeline as the bot.
 - Revocable device credentials in their own store (`state/api/devices.db`),
-  issued and withdrawn by an operator through the new `wuwaterm-api device`
-  commands. Only a hash of each secret is stored.
+  registered and withdrawn by an operator through the new `wuwaterm-api device`
+  commands. The operator supplies the secret on standard input and only its
+  hash is stored: the service never produces or prints credential material, so
+  none can reach a log, a terminal recording or a captured command output
+  through it.
 - Stable error envelope with enumerated codes, request ids, per-device request
   limits, a body-size cap and a per-request time budget.
 - Committed contract snapshot `docs/api/openapi.json` with a drift gate

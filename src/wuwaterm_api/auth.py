@@ -4,14 +4,21 @@ Identity here is completely separate from Telegram: a device is its own
 principal with its own store (``state/api/devices.db``), so revoking API access
 cannot touch the bot's allowlist and vice versa.
 
-Token format (shown exactly once, at issue time)::
+Token format::
 
     wtd1.<device_id>.<secret>
 
-Only ``sha256(secret)`` is stored. The secret is 32 random bytes from
-``secrets.token_urlsafe``, so it is already high-entropy and uniformly
-distributed: a password KDF would add cost without adding resistance to a
-search over that space. Comparison is constant time.
+**This service never produces or emits a secret.** The operator supplies the
+secret on standard input when issuing a device, and only ``sha256(secret)`` is
+stored. That keeps every credential-bearing byte out of the server process'
+output, out of terminal scrollback and out of anything that could capture,
+format or persist it — a property worth more than the small convenience of
+having the server mint the value for you.
+
+Because the store keeps only a hash, the secret must carry its own entropy: a
+supplied value shorter than ``MIN_SECRET_LENGTH`` is refused. A hash-only store
+needs no password KDF at that size, since there is nothing to slow down that a
+search over ~190 bits would not already defeat. Comparison is constant time.
 
 Revocation sets ``revoked_at`` and keeps the row, so an operator can still see
 that a device existed and when it was withdrawn.
@@ -34,7 +41,9 @@ from pathlib import Path
 
 TOKEN_SCHEME = "wtd1"
 TOKEN_PARTS = 3
-SECRET_BYTES = 32
+# A supplied secret must have at least this much material. 32 URL-safe
+# characters is roughly 190 bits, far past what a hash-only store needs.
+MIN_SECRET_LENGTH = 32
 
 SCOPE_TRANSLATE = "translate"
 SCOPE_META = "meta"
@@ -133,14 +142,25 @@ class DeviceStore:
 
     # -- operator commands -------------------------------------------------
 
-    def issue(self, device_name: str, scopes: object = None) -> tuple[Device, str]:
-        """Create a device and return it together with its one-time token."""
+    def issue(
+        self, device_name: str, scopes: object = None, *, secret: str
+    ) -> Device:
+        """Register a device for an operator-supplied secret.
+
+        Returns the device only. The secret is never echoed back, so no caller
+        of this method can accidentally route it to output.
+        """
         name = (device_name or "").strip()
         if not name:
             raise DeviceStoreError("device_name must not be empty")
+        material = (secret or "").strip()
+        if len(material) < MIN_SECRET_LENGTH:
+            raise DeviceStoreError(
+                f"the supplied secret must be at least {MIN_SECRET_LENGTH}"
+                " characters of unguessable material"
+            )
         resolved = normalize_scopes(scopes)
         device_id = secrets.token_hex(8)
-        secret = secrets.token_urlsafe(SECRET_BYTES)
         created_at = _now()
         self.initialize()
         with self._connect() as conn:
@@ -151,12 +171,12 @@ class DeviceStore:
                 (
                     device_id,
                     name,
-                    _hash_secret(secret),
+                    _hash_secret(material),
                     ",".join(resolved),
                     created_at,
                 ),
             )
-        device = Device(
+        return Device(
             device_id=device_id,
             device_name=name,
             scopes=resolved,
@@ -164,7 +184,6 @@ class DeviceStore:
             revoked_at=None,
             last_used_at=None,
         )
-        return device, f"{TOKEN_SCHEME}.{device_id}.{secret}"
 
     def list_devices(self) -> list[Device]:
         self.initialize()

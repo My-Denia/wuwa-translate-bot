@@ -17,8 +17,10 @@ import pytest
 
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import (
+    MIN_SECRET_LENGTH,
     SCOPE_META,
     SCOPE_TRANSLATE,
+    TOKEN_SCHEME,
     DeviceStore,
     DeviceStoreError,
     parse_token,
@@ -49,6 +51,18 @@ def build_client_app(tmp_path: Path, db_path: Path, **overrides):
     store.initialize()
     app = create_app(settings, device_store=store)
     return app, store
+
+
+
+# The service never mints a secret; the operator supplies one. Tests do the
+# same, so what they exercise is the real registration path.
+TEST_SECRET_BASE = "unguessable-material-for-tests-0123456789abcdef"
+
+
+def issue_device(store, name: str, scopes=None, secret: str | None = None):
+    material = secret if secret is not None else f"{TEST_SECRET_BASE}-{name}"
+    device = store.issue(name, scopes, secret=material)
+    return device, f"{TOKEN_SCHEME}.{device.device_id}.{material}"
 
 
 def run(coro):
@@ -151,7 +165,7 @@ def test_translation_requires_a_credential(tmp_path, sample_db):
 )
 def test_bad_credentials_are_indistinguishable(tmp_path, sample_db, header):
     app, store = build_client_app(tmp_path, sample_db)
-    store.issue("owner desktop")
+    issue_device(store, "owner desktop")
 
     response = run(
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=header)
@@ -163,7 +177,7 @@ def test_bad_credentials_are_indistinguishable(tmp_path, sample_db, header):
 
 def test_revoked_device_is_rejected(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    device, token = store.issue("owner desktop")
+    device, token = issue_device(store, "owner desktop")
 
     before = run(
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
@@ -180,8 +194,8 @@ def test_revoked_device_is_rejected(tmp_path, sample_db):
 
 def test_scope_is_enforced(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, meta_only = store.issue("reader", [SCOPE_META])
-    _, translate_only = store.issue("translator", [SCOPE_TRANSLATE])
+    _, meta_only = issue_device(store, "reader", [SCOPE_META])
+    _, translate_only = issue_device(store, "translator", [SCOPE_TRANSLATE])
 
     forbidden = run(
         call(
@@ -201,9 +215,9 @@ def test_scope_is_enforced(tmp_path, sample_db):
     assert allowed.status_code == 200
 
 
-def test_token_is_shown_once_and_stored_hashed(tmp_path):
+def test_only_a_hash_of_the_secret_is_stored(tmp_path):
     store = DeviceStore(tmp_path / "devices.db")
-    device, token = store.issue("owner desktop")
+    device, token = issue_device(store, "owner desktop")
     parsed = parse_token(token)
 
     assert parsed is not None
@@ -212,17 +226,37 @@ def test_token_is_shown_once_and_stored_hashed(tmp_path):
     on_disk = (tmp_path / "devices.db").read_bytes()
     assert raw_secret.encode("utf-8") not in on_disk
     assert token.encode("utf-8") not in on_disk
-    # listing never reveals a token
+    # listing never reveals credential material
     listed = store.list_devices()
     assert [item.device_id for item in listed] == [device.device_id]
     assert raw_secret not in json.dumps([item.__dict__ for item in listed], default=str)
+
+
+def test_the_store_never_returns_credential_material(tmp_path):
+    """issue() hands back a Device and nothing else, by construction."""
+    store = DeviceStore(tmp_path / "devices.db")
+
+    result = store.issue("owner desktop", None, secret="x" * MIN_SECRET_LENGTH)
+
+    assert not isinstance(result, tuple)
+    assert "x" * MIN_SECRET_LENGTH not in json.dumps(result.__dict__, default=str)
+
+
+def test_a_weak_supplied_secret_is_refused(tmp_path):
+    store = DeviceStore(tmp_path / "devices.db")
+
+    with pytest.raises(DeviceStoreError):
+        store.issue("owner desktop", None, secret="short")
+    with pytest.raises(DeviceStoreError):
+        store.issue("owner desktop", None, secret="   ")
+    assert store.list_devices() == []
 
 
 def test_unknown_scope_is_refused(tmp_path):
     store = DeviceStore(tmp_path / "devices.db")
 
     with pytest.raises(DeviceStoreError):
-        store.issue("owner desktop", ["translate", "root"])
+        issue_device(store, "owner desktop", ["translate", "root"])
 
 
 def test_revoking_an_unknown_device_fails(tmp_path):
@@ -239,7 +273,7 @@ def test_revoking_an_unknown_device_fails(tmp_path):
 
 def test_rate_limit_returns_the_stable_code(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db, rate_limit_per_minute=2)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     statuses = [
         run(
@@ -260,8 +294,8 @@ def test_rate_limit_returns_the_stable_code(tmp_path, sample_db):
 
 def test_rate_limit_is_per_device(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db, rate_limit_per_minute=1)
-    _, first = store.issue("device one")
-    _, second = store.issue("device two")
+    _, first = issue_device(store, "device one")
+    _, second = issue_device(store, "device two")
 
     run(call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(first)))
     blocked = run(
@@ -277,7 +311,7 @@ def test_rate_limit_is_per_device(tmp_path, sample_db):
 
 def test_oversized_body_is_refused_before_parsing(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db, max_body_bytes=256)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     response = run(
         call(
@@ -297,7 +331,7 @@ def test_input_over_translation_limit_returns_input_too_long(
     monkeypatch, tmp_path, sample_db
 ):
     app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     disable_llm(monkeypatch)
 
     response = run(
@@ -318,7 +352,7 @@ def test_request_timeout_returns_the_envelope(monkeypatch, tmp_path, sample_db):
     app, store = build_client_app(
         tmp_path, sample_db, request_timeout_seconds=0.05, llm_max_concurrency=1
     )
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
 
     async def slow(locked_text, locks):
@@ -343,7 +377,7 @@ def test_request_timeout_returns_the_envelope(monkeypatch, tmp_path, sample_db):
 
 def test_invalid_payload_returns_invalid_request(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     missing_text = run(
         call(app, "POST", "/v1/translations", json={}, headers=bearer(token))
@@ -373,7 +407,7 @@ def test_invalid_payload_returns_invalid_request(tmp_path, sample_db):
 
 def test_exact_dictionary_hit_uses_no_model_call(monkeypatch, tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
 
     async def unused(locked_text, locks):  # pragma: no cover - must not run
@@ -397,7 +431,7 @@ def test_exact_dictionary_hit_uses_no_model_call(monkeypatch, tmp_path, sample_d
 
 def test_forced_direction_is_honored(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     response = run(
         call(
@@ -416,7 +450,7 @@ def test_forced_direction_is_honored(tmp_path, sample_db):
 
 def test_fuzzy_hit_is_reported_as_fuzzy(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     response = run(
         call(
@@ -433,7 +467,7 @@ def test_fuzzy_hit_is_reported_as_fuzzy(tmp_path, sample_db):
 
 def test_model_path_reports_kind_and_dictionary_miss(monkeypatch, tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
 
     async def answer(locked_text, locks):
@@ -461,7 +495,7 @@ def test_model_failure_maps_to_llm_unavailable(monkeypatch, tmp_path, sample_db)
     )
 
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
 
     async def boom(locked_text, locks):
@@ -488,7 +522,7 @@ def test_model_failure_maps_to_llm_unavailable(monkeypatch, tmp_path, sample_db)
 
 def test_response_carries_and_echoes_a_request_id(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     generated = run(
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
@@ -524,7 +558,7 @@ def test_response_carries_and_echoes_a_request_id(tmp_path, sample_db):
 
 def test_terms_returns_official_strings(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     hit = run(call(app, "GET", "/v1/terms", params={"q": "声骸"}, headers=bearer(token)))
     miss = run(
@@ -543,7 +577,7 @@ def test_meta_exposes_provenance_without_paths_or_secrets(
     monkeypatch, tmp_path, sample_db
 ):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     disable_llm(monkeypatch)
 
     response = run(call(app, "GET", "/v1/meta", headers=bearer(token)))
@@ -577,7 +611,7 @@ def test_model_concurrency_never_exceeds_the_configured_cap(
         llm_calls_per_minute=100,
         request_timeout_seconds=30.0,
     )
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
     state = {"in_flight": 0, "peak": 0}
 
@@ -625,7 +659,7 @@ def test_per_minute_model_budget_overflow_returns_the_stable_code(
         llm_calls_per_minute=budget,
         rate_limit_per_minute=100,
     )
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
 
     async def answer(locked_text, locks):
@@ -746,7 +780,7 @@ def test_settings_defaults_bind_to_loopback(monkeypatch):
 def test_body_cap_holds_without_a_content_length_header(tmp_path, sample_db):
     """A chunked caller must not be able to make the process buffer freely."""
     app, store = build_client_app(tmp_path, sample_db, max_body_bytes=256)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     async def chunked():
         yield b'{"text": "'
@@ -770,7 +804,7 @@ def test_body_cap_holds_without_a_content_length_header(tmp_path, sample_db):
 
 def test_negative_content_length_is_an_invalid_request(tmp_path, sample_db):
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
 
     response = run(
         call(
@@ -836,7 +870,7 @@ def test_rate_limited_requests_do_not_write_to_the_credential_store(
     tmp_path, sample_db
 ):
     app, store = build_client_app(tmp_path, sample_db, rate_limit_per_minute=1)
-    device, token = store.issue("owner desktop")
+    device, token = issue_device(store, "owner desktop")
 
     run(call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token)))
     admitted = store.list_devices()[0].last_used_at
@@ -861,7 +895,7 @@ def test_unauthenticated_requests_never_touch_the_credential_store(
     tmp_path, sample_db
 ):
     app, store = build_client_app(tmp_path, sample_db)
-    device, _token = store.issue("owner desktop")
+    device, _token = issue_device(store, "owner desktop")
 
     run(
         call(
@@ -881,7 +915,7 @@ def test_model_path_is_refused_when_no_model_is_configured(
 ):
     """Without a model the pipeline returns source text; HTTP must not lie."""
     app, store = build_client_app(tmp_path, sample_db)
-    _, token = store.issue("owner desktop")
+    _, token = issue_device(store, "owner desktop")
     disable_llm(monkeypatch)
 
     refused = run(
@@ -920,3 +954,31 @@ def test_openapi_declares_the_credential_scheme_and_every_failure_shape():
     code = document["components"]["schemas"]["ErrorDetailBody"]["properties"]["code"]
     assert set(code["enum"]) == set(STATUS_BY_CODE)
     assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["required"] is True
+
+
+def test_a_slow_body_is_bounded_by_the_request_time_budget(tmp_path, sample_db):
+    """The time budget wraps the body read, not the other way round."""
+    app, store = build_client_app(
+        tmp_path, sample_db, request_timeout_seconds=0.2, max_body_bytes=4096
+    )
+    _, token = issue_device(store, "owner desktop")
+
+    async def drip():
+        yield b'{"text": "'
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            yield b"x"
+        yield b'"}'
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            content=drip(),
+            headers={**bearer(token), "Content-Type": "application/json"},
+        )
+    )
+
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "internal"

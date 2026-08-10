@@ -332,7 +332,7 @@
                 }
               }
             },
-            "description": "Translation unavailable"
+            "description": "The terminology database is not readable. Classified as `internal`; the 503 status is what distinguishes it."
           }
         },
         "summary": "Readyz",
@@ -444,7 +444,7 @@
                 }
               }
             },
-            "description": "Request exceeded the server time budget"
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
           }
         },
         "security": [
@@ -574,7 +574,7 @@
                 }
               }
             },
-            "description": "Request exceeded the server time budget"
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
           }
         },
         "security": [
@@ -701,7 +701,7 @@
                 }
               }
             },
-            "description": "Request exceeded the server time budget"
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
           }
         },
         "security": [
