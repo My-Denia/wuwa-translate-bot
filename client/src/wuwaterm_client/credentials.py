@@ -26,17 +26,24 @@ class CredentialStoreUnavailable(RuntimeError):
     """
 
 
+# The backend is a native OS component, and it does not confine itself to
+# keyring's own exception type: WinVaultKeyring re-raises `pywintypes.error`
+# for a CredDelete that fails for any reason other than "not found", and that
+# is not a KeyringError. This module is the only boundary to that component,
+# and every failure of it means one thing to this application - the store
+# could not be used - so every failure is normalized here rather than left to
+# surprise a Qt callback.
 def store_token(token: str) -> None:
     try:
         keyring.set_password(SERVICE_NAME, CREDENTIAL_USERNAME, token)
-    except keyring.errors.KeyringError as exc:
+    except Exception as exc:
         raise CredentialStoreUnavailable(str(exc)) from exc
 
 
 def read_token() -> str | None:
     try:
         return keyring.get_password(SERVICE_NAME, CREDENTIAL_USERNAME)
-    except keyring.errors.KeyringError as exc:
+    except Exception as exc:
         raise CredentialStoreUnavailable(str(exc)) from exc
 
 
@@ -56,7 +63,7 @@ def delete_token() -> None:
         # There was nothing to delete. Forgetting a credential that is not
         # there is what the caller wanted anyway.
         pass
-    except keyring.errors.KeyringError as exc:
+    except Exception as exc:
         # The vault itself is unavailable, which is a different thing: the
         # credential may still be there and the caller has to be told.
         raise CredentialStoreUnavailable(str(exc)) from exc

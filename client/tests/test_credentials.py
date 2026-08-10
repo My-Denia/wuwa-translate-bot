@@ -138,3 +138,33 @@ def test_forgetting_reports_a_vault_that_is_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(keyring, "delete_password", unavailable)
     with pytest.raises(credentials.CredentialStoreUnavailable):
         credentials.delete_token()
+
+
+def test_a_native_backend_failure_is_normalized_too(monkeypatch) -> None:
+    """WinVaultKeyring re-raises pywintypes.error, which is not a KeyringError.
+
+    This module is the only boundary to that native component, and every
+    failure of it means the same thing here.
+    """
+    import keyring
+
+    from wuwaterm_client import credentials
+
+    class _NativeError(Exception):
+        """Stands in for pywintypes.error, which is not a KeyringError."""
+
+    def explode(*args, **kwargs):
+        raise _NativeError("(5, 'CredDelete', 'Access is denied.')")
+
+    monkeypatch.setattr(keyring, "delete_password", explode)
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.delete_token()
+
+    monkeypatch.setattr(keyring, "get_password", explode)
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.read_token()
+    assert credentials.has_token() is False
+
+    monkeypatch.setattr(keyring, "set_password", explode)
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.store_token("wtd1.device.secret")
