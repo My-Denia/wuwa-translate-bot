@@ -34,7 +34,7 @@ def _view(handler) -> TranslateView:
     return TranslateView(
         ApiClient(
             "https://test",
-            transport=httpx.MockTransport(handler),
+            _test_transport=httpx.MockTransport(handler),
             token_provider=lambda: "wtd1.device.secret",
         )
     )

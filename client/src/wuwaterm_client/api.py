@@ -162,7 +162,7 @@ class MetaResult:
 
 
 def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -> None:
-    """A caller-supplied transport may not bring weakened TLS with it.
+    """The private test seam may not bring weakened TLS with it.
 
     `verify=True` below configures the transport this client BUILDS. When one
     is passed in instead, that argument is ignored by httpx and the injected
@@ -172,8 +172,8 @@ def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -
 
     Only two kinds are accepted, by EXACT type:
 
-    * `httpx.MockTransport`, which sends nothing over a network and is the
-      reason this parameter exists at all; and
+    * `httpx.MockTransport`, whose handler is a callable supplied by the same
+      test that constructs it; and
     * `httpx.AsyncHTTPTransport`, whose SSL context this function can read -
       and which must require a certificate and check the host name.
 
@@ -183,6 +183,16 @@ def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -
     the request down a connection that verifies nothing. Reading a decoy is
     worse than reading nothing, so an implementation this function cannot
     reason about is refused rather than inspected.
+
+    What this does NOT claim: a `MockTransport` handler is arbitrary in-process
+    code and could itself hand the request to something unverified. That is not
+    a hole this function can close, and it is not one worth pretending to -
+    in-process code can already replace anything here. It is bounded instead by
+    scope: the parameter is named `_test_transport`, is not part of this
+    client's interface, is passed by nothing the application ships (grep it),
+    and reaches no configuration file, environment variable or dialog. The
+    guarantee is about what an owner or a configuration can do, not about what
+    code running inside the process can do.
     """
     if transport is None or type(transport) is httpx.MockTransport:
         return
@@ -229,17 +239,17 @@ class ApiClient:
         token_provider: TokenProvider = default_token_provider,
         timeout: float = 10.0,
         translate_timeout: float | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        _test_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         _require_confidential_endpoint(base_url)
-        _require_verifying_transport(transport)
+        _require_verifying_transport(_test_transport)
         self._token_provider = token_provider
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
-            transport=transport,
+            transport=_test_transport,
             # Server certificates are always verified. This is httpx's own
             # default and is stated here so that removing verification would
             # have to be a deliberate edit to this line rather than the

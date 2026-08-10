@@ -31,7 +31,7 @@ def _dummy_client() -> ApiClient:
     async def handler(request):  # pragma: no cover - never invoked here
         raise AssertionError("no network calls expected in a construction smoke test")
 
-    return ApiClient("https://test", transport=httpx.MockTransport(handler))
+    return ApiClient("https://test", _test_transport=httpx.MockTransport(handler))
 
 
 def test_translate_view_constructs(qapp) -> None:

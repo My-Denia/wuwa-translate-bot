@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from pathlib import Path
 
 import httpx
 import pytest
@@ -201,16 +202,29 @@ def test_the_client_exposes_no_way_to_turn_verification_off() -> None:
     parameters = inspect.signature(ApiClient.__init__).parameters
     for suspicious in ("verify", "insecure", "allow_insecure", "ssl_verify", "no_verify"):
         assert suspicious not in parameters, suspicious
+    # The transport seam is private and is named so, because a MockTransport
+    # handler is arbitrary in-process code: the guarantee is about what an
+    # owner or a configuration can do, and the name says where that boundary
+    # is. Nothing the application ships passes it.
+    assert "transport" not in parameters
+    assert "_test_transport" in parameters
+    package_dir = Path(inspect.getfile(ApiClient)).parent
+    callers = sorted(
+        path.name
+        for path in package_dir.rglob("*.py")
+        if path.name != "api.py" and "_test_transport" in path.read_text(encoding="utf-8")
+    )
+    assert callers == [], f"the test seam is used by shipped code: {callers}"
 
 
 def test_an_injected_transport_may_not_bring_weakened_tls() -> None:
-    """The one remaining way in: `transport=` is honoured by httpx INSTEAD of
+    """The one remaining way in: `_test_transport=` is honoured by httpx INSTEAD of
     `verify=True`, so a transport built with verification off would have made
     the guarantee false through an argument that does not mention TLS."""
     unverified = httpx.AsyncHTTPTransport(verify=False)
     try:
         with pytest.raises(ClientError) as raised:
-            ApiClient("https://api.example.com", transport=unverified)
+            ApiClient("https://api.example.com", _test_transport=unverified)
         assert raised.value.code == ERROR_INSECURE_ENDPOINT
     finally:
         asyncio.run(unverified.aclose())
@@ -220,7 +234,7 @@ def test_a_verifying_transport_is_still_accepted() -> None:
     """The check must discriminate, not ban the parameter: a real transport
     that does verify is exactly what production would build."""
     verifying = httpx.AsyncHTTPTransport(verify=True)
-    client = ApiClient("https://api.example.com", transport=verifying,
+    client = ApiClient("https://api.example.com", _test_transport=verifying,
                        token_provider=lambda: None)
     _close(client)
 
@@ -234,7 +248,7 @@ def test_a_transport_whose_configuration_cannot_be_read_is_refused() -> None:
             raise AssertionError("never reached")
 
     with pytest.raises(ClientError) as raised:
-        ApiClient("https://api.example.com", transport=_Opaque())
+        ApiClient("https://api.example.com", _test_transport=_Opaque())
     assert raised.value.code == ERROR_INSECURE_ENDPOINT
 
 
@@ -264,7 +278,7 @@ def test_a_transport_that_shows_a_verifying_context_but_uses_another_is_refused(
         # The decoy really would pass an attribute-only inspection.
         assert decoy._pool._ssl_context.verify_mode is ssl.CERT_REQUIRED
         with pytest.raises(ClientError) as raised:
-            ApiClient("https://api.example.com", transport=decoy)
+            ApiClient("https://api.example.com", _test_transport=decoy)
         assert raised.value.code == ERROR_INSECURE_ENDPOINT
 
         class _Subclass(httpx.AsyncHTTPTransport):
@@ -273,7 +287,7 @@ def test_a_transport_that_shows_a_verifying_context_but_uses_another_is_refused(
         subclass = _Subclass(verify=True)
         try:
             with pytest.raises(ClientError):
-                ApiClient("https://api.example.com", transport=subclass)
+                ApiClient("https://api.example.com", _test_transport=subclass)
         finally:
             asyncio.run(subclass.aclose())
     finally:

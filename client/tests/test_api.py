@@ -22,7 +22,7 @@ def _client(handler, **kwargs) -> ApiClient:
     return ApiClient(
         "https://test",
         token_provider=token_provider,
-        transport=transport,
+        _test_transport=transport,
         **kwargs,
     )
 
