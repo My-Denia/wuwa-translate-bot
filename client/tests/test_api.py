@@ -524,3 +524,27 @@ def test_a_body_that_cannot_be_decoded_becomes_a_client_error() -> None:
         raise AssertionError("expected a ClientError")
 
     assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_a_credential_store_failure_becomes_a_client_error() -> None:
+    """It must not escape into whichever view happens to be running."""
+    from wuwaterm_client.credentials import CredentialStoreUnavailable
+
+    def unavailable():
+        raise CredentialStoreUnavailable("vault unavailable")
+
+    async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be attempted")
+
+    client = _client(handler, token_provider=unavailable)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == errors.ERROR_UNAUTHORIZED

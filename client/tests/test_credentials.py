@@ -79,3 +79,41 @@ def test_active_backend_name_reflects_current_backend(fake_keyring) -> None:
 
 def test_service_name_is_stable() -> None:
     assert SERVICE_NAME == "WuwaTerm"
+
+
+def test_a_store_that_cannot_be_read_is_reported_not_raised(monkeypatch) -> None:
+    """The vault can be temporarily unavailable.
+
+    A raw backend exception escaped into whichever caller was running: during
+    start-up, before a window existed, or from inside a request, where it
+    bypassed every view's error handling.
+    """
+    import keyring
+    import keyring.errors
+
+    from wuwaterm_client import credentials
+
+    def explode(*args, **kwargs):
+        raise keyring.errors.KeyringError("vault unavailable")
+
+    monkeypatch.setattr(keyring, "get_password", explode)
+
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.read_token()
+    # The question "is one stored" still has an answer.
+    assert credentials.has_token() is False
+
+
+def test_a_store_that_cannot_be_written_is_reported_not_raised(monkeypatch) -> None:
+    import keyring
+    import keyring.errors
+
+    from wuwaterm_client import credentials
+
+    def explode(*args, **kwargs):
+        raise keyring.errors.PasswordSetError("vault unavailable")
+
+    monkeypatch.setattr(keyring, "set_password", explode)
+
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.store_token("wtd1.device.secret")

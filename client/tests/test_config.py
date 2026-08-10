@@ -174,3 +174,13 @@ def test_an_address_may_not_carry_credentials() -> None:
     """The device token lives in the credential store, not in a JSON file."""
     assert not usable_base_url("https://user:pass@api.example.invalid")
     assert not usable_base_url("https://user@api.example.invalid")
+
+
+def test_an_address_the_client_itself_cannot_parse_is_refused() -> None:
+    """urlsplit drops an embedded control character; httpx refuses it.
+
+    Saving one produced an address that prevented the application from
+    starting until the file was repaired by hand.
+    """
+    assert not usable_base_url("https://\texample.invalid")
+    assert not usable_base_url("https://exa\nmple.invalid")

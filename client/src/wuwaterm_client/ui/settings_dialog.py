@@ -17,7 +17,13 @@ from PySide6.QtWidgets import (
 
 from .. import strings
 from ..config import DEFAULT_BASE_URL, ClientConfig, usable_base_url
-from ..credentials import active_backend_name, delete_token, has_token, store_token
+from ..credentials import (
+    CredentialStoreUnavailable,
+    active_backend_name,
+    delete_token,
+    has_token,
+    store_token,
+)
 from .token_dialog import TokenDialog
 
 
@@ -85,7 +91,15 @@ class SettingsDialog(QDialog):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             token = dialog.token()
             if token:
-                store_token(token)
+                try:
+                    store_token(token)
+                except CredentialStoreUnavailable:
+                    QMessageBox.critical(
+                        self,
+                        strings.CREDENTIAL_STORE_ERROR_TITLE,
+                        strings.CREDENTIAL_STORE_ERROR_MESSAGE,
+                    )
+                    return
                 self._refresh_credential_status()
 
     def _on_forget_token_clicked(self) -> None:

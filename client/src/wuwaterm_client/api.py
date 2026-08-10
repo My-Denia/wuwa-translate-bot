@@ -15,7 +15,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import ClientConfig
-from .credentials import read_token
+from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
     ERROR_OFFLINE,
@@ -212,7 +212,13 @@ class ApiClient:
         await self._client.aclose()
 
     def _headers(self) -> dict[str, str]:
-        token = self._token_provider()
+        try:
+            token = self._token_provider()
+        except CredentialStoreUnavailable:
+            # Reported like any other unusable credential rather than escaping
+            # into whichever view happens to be running, which would leave its
+            # status line saying the work is still in progress.
+            raise ClientError(ERROR_UNAUTHORIZED) from None
         if not token:
             return {}
         try:

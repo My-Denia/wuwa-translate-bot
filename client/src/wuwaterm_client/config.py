@@ -16,6 +16,8 @@ import os
 import urllib.parse
 from pathlib import Path
 
+import httpx
+
 APP_DIR_NAME = "WuwaTerm"
 CONFIG_FILE_NAME = "config.json"
 
@@ -106,6 +108,14 @@ def usable_base_url(value: object) -> bool:
     # password embedded here would be written to a plain JSON file and sent as
     # a second, unmanaged credential.
     if parsed.username is not None or parsed.password is not None:
+        return False
+    # Last: hand it to the parser the client actually uses. urlsplit discards
+    # an embedded control character silently, and httpx then refuses the same
+    # string - which would have meant a saved address that prevents the
+    # application from starting until the file is repaired by hand.
+    try:
+        httpx.URL(candidate)
+    except (httpx.InvalidURL, ValueError, UnicodeError):
         return False
     return True
 

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox, QTabWidget, QWi
 from .. import strings
 from ..api import ApiClient
 from ..config import ClientConfig
-from ..credentials import has_token, store_token
+from ..credentials import CredentialStoreUnavailable, has_token, store_token
 from .first_run_dialog import FirstRunDialog
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
@@ -83,7 +83,15 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             token = dialog.token()
             if token:
-                store_token(token)
+                try:
+                    store_token(token)
+                except CredentialStoreUnavailable:
+                    QMessageBox.critical(
+                        self,
+                        strings.CREDENTIAL_STORE_ERROR_TITLE,
+                        strings.CREDENTIAL_STORE_ERROR_MESSAGE,
+                    )
+                    return False
                 # The status view read the credential state when it was
                 # built, which was before this. Without the refresh it keeps
                 # reporting a missing credential for the whole session.

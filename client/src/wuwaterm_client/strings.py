@@ -91,6 +91,11 @@ SETTINGS_CHANGE_TOKEN_BUTTON = "Change token..."
 SETTINGS_FORGET_TOKEN_BUTTON = "Forget token"
 SETTINGS_TOKEN_STATUS_STORED = "A device credential is stored."
 SETTINGS_TOKEN_STATUS_MISSING = "No device credential is stored."
+CREDENTIAL_STORE_ERROR_TITLE = "Credential store"
+CREDENTIAL_STORE_ERROR_MESSAGE = (
+    "The Windows Credential Manager could not be used, so the device "
+    "token was not stored. Try again once it is available."
+)
 SETTINGS_INVALID_BASE_URL_TITLE = "Server address"
 SETTINGS_INVALID_BASE_URL_MESSAGE = (
     "That server address cannot be used. Plain http:// is accepted only "

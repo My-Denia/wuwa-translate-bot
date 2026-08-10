@@ -15,16 +15,38 @@ SERVICE_NAME = "WuwaTerm"
 CREDENTIAL_USERNAME = "device-token"
 
 
+class CredentialStoreUnavailable(RuntimeError):
+    """The OS credential store could not be used.
+
+    The vault can be temporarily unavailable, and the backend then raises from
+    wherever it was called: during start-up, before a window exists, or from
+    inside a request, where it would bypass every view's error handling and
+    leave the status line saying the work is still in progress. Callers get
+    this instead, and decide what to show.
+    """
+
+
 def store_token(token: str) -> None:
-    keyring.set_password(SERVICE_NAME, CREDENTIAL_USERNAME, token)
+    try:
+        keyring.set_password(SERVICE_NAME, CREDENTIAL_USERNAME, token)
+    except keyring.errors.KeyringError as exc:
+        raise CredentialStoreUnavailable(str(exc)) from exc
 
 
 def read_token() -> str | None:
-    return keyring.get_password(SERVICE_NAME, CREDENTIAL_USERNAME)
+    try:
+        return keyring.get_password(SERVICE_NAME, CREDENTIAL_USERNAME)
+    except keyring.errors.KeyringError as exc:
+        raise CredentialStoreUnavailable(str(exc)) from exc
 
 
 def has_token() -> bool:
-    return read_token() is not None
+    """Whether a credential is stored. A store that cannot be read is not the
+    same as an empty one, but for this question it has the same answer."""
+    try:
+        return read_token() is not None
+    except CredentialStoreUnavailable:
+        return False
 
 
 def delete_token() -> None:
