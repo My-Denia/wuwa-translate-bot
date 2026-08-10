@@ -9,11 +9,15 @@ Token format::
     wtd1.<device_id>.<secret>
 
 **This service never produces or emits a secret.** The operator supplies the
-secret on standard input when issuing a device, and only ``sha256(secret)`` is
+secret on standard input when issuing a device, and only a derived verifier is
 stored. That keeps every credential-bearing byte out of the server process'
 output, out of terminal scrollback and out of anything that could capture,
 format or persist it — a property worth more than the small convenience of
 having the server mint the value for you.
+
+The secret's character set is unconstrained (it may contain dots, which the
+token parser accounts for); only surrounding whitespace is refused, because a
+presented token is stripped as a whole.
 
 Because the operator chooses the secret, this store cannot assume the entropy
 a machine-generated value would have had. It therefore refuses anything shorter
@@ -131,10 +135,15 @@ def normalize_scopes(scopes: object) -> tuple[str, ...]:
 
 
 def parse_token(token: str) -> tuple[str, str] | None:
-    """Split a presented token into (device_id, secret), or None if malformed."""
+    """Split a presented token into (device_id, secret), or None if malformed.
+
+    The split is bounded at two separators so the secret's own character set
+    stays unconstrained: an operator-chosen secret may contain dots (base64,
+    PEM-ish and UUID-ish material all do) and must still round-trip.
+    """
     if not token:
         return None
-    parts = token.strip().split(".")
+    parts = token.strip().split(".", TOKEN_PARTS - 1)
     if len(parts) != TOKEN_PARTS:
         return None
     scheme, device_id, secret = parts
@@ -153,6 +162,19 @@ class DeviceStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # CREATE TABLE IF NOT EXISTS cannot add a column to a store written
+            # by an older shape. Say so plainly instead of failing later with a
+            # confusing SQL error.
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(devices)")
+            }
+            missing = {"salt", "token_hash"} - columns
+            if missing:
+                raise DeviceStoreError(
+                    f"{self.path} was written by an older device store and is "
+                    f"missing {sorted(missing)}; remove the file and register "
+                    f"the devices again"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
@@ -174,7 +196,15 @@ class DeviceStore:
         name = (device_name or "").strip()
         if not name:
             raise DeviceStoreError("device_name must not be empty")
-        material = (secret or "").strip()
+        # Taken verbatim: the secret's character set is deliberately
+        # unconstrained. Surrounding whitespace is refused rather than trimmed,
+        # because a presented token is stripped as a whole and a silently
+        # trimmed secret would register fine and then never authenticate.
+        material = secret or ""
+        if material != material.strip():
+            raise DeviceStoreError(
+                "the supplied secret must not begin or end with whitespace"
+            )
         if len(material) < MIN_SECRET_LENGTH:
             raise DeviceStoreError(
                 f"the supplied secret must be at least {MIN_SECRET_LENGTH}"

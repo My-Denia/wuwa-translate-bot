@@ -6,8 +6,7 @@
     wuwaterm-api device revoke --device-id <id>
 
 There is deliberately no self-service registration route: devices are
-registered by an operator with shell access, typically over SSH as
-``docker compose run --rm -T wuwaterm-api device issue --name ...``.
+registered by an operator with shell access on the host, over SSH.
 
 ``device issue`` reads the secret from standard input and never prints it.
 Nothing in this service emits a credential, so no credential can reach a log,

@@ -1011,3 +1011,46 @@ def test_stored_verifier_is_salted_and_slow_to_search(tmp_path):
         value for _salt, value in rows.values()
     }
     assert auth_module.SCRYPT_N >= 1 << 14
+
+
+def test_a_secret_containing_the_token_separator_round_trips(tmp_path, sample_db):
+    """The credential charset is unconstrained; dots must not break auth."""
+    app, store = build_client_app(tmp_path, sample_db)
+    dotted = "v1.abc.def-0123456789abcdefghijklmnop=="
+    assert "." in dotted and len(dotted) >= MIN_SECRET_LENGTH
+    _, token = issue_device(store, "owner desktop", secret=dotted)
+
+    parsed = parse_token(token)
+    response = run(
+        call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
+    )
+
+    assert parsed == (token.split(".", 2)[1], dotted)
+    assert response.status_code == 200
+
+
+def test_a_secret_with_surrounding_whitespace_is_refused(tmp_path):
+    """Refuse rather than trim: a trimmed secret would never authenticate."""
+    store = DeviceStore(tmp_path / "devices.db")
+    body = "x" * MIN_SECRET_LENGTH
+
+    for candidate in (f" {body}", f"{body} ", f"\t{body}\n"):
+        with pytest.raises(DeviceStoreError):
+            store.issue("owner desktop", None, secret=candidate)
+    assert store.list_devices() == []
+
+
+def test_a_store_written_by_an_older_shape_is_reported_clearly(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "devices.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE devices (device_id TEXT PRIMARY KEY, device_name TEXT,"
+            " scopes TEXT, created_at TEXT, revoked_at TEXT, last_used_at TEXT)"
+        )
+
+    with pytest.raises(DeviceStoreError) as excinfo:
+        DeviceStore(path).initialize()
+
+    assert "older device store" in str(excinfo.value)
