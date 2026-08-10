@@ -24,14 +24,38 @@ block_cipher = None
 # and the built program dies at start-up with
 # "ImportError: DLL load failed while importing _ssl" the first time anything
 # constructs an HTTP client. Bind this interpreter's own copies explicitly.
-INTERPRETER_DLL_DIR = Path(sys.base_prefix) / "DLLs"
-OPENSSL_BINARIES = [
-    (str(path), ".") for path in sorted(INTERPRETER_DLL_DIR.glob("lib*-3-x64.dll"))
-]
-if not OPENSSL_BINARIES:
-    raise SystemExit(
-        f"no OpenSSL runtime found next to the interpreter in {INTERPRETER_DLL_DIR};"
-        " the build would produce a program that cannot open a connection"
+#
+# Where those files live differs between interpreters - a uv-managed CPython
+# keeps them in DLLs/, other builds keep them beside python.exe, and the file
+# name carries a different suffix per platform - so several locations are
+# searched with a loose pattern. An interpreter with no OpenSSL beside it at
+# all is not an error: it may be linked statically. The artifact's own
+# --self-check is what actually proves the built program can open a
+# connection, and it runs on every build.
+def _openssl_binaries():
+    roots = (
+        Path(sys.base_prefix) / "DLLs",
+        Path(sys.base_prefix),
+        Path(sys.prefix) / "DLLs",
+        Path(sys.prefix),
+    )
+    found = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for pattern in ("libssl-*.dll", "libcrypto-*.dll"):
+            for path in sorted(root.glob(pattern)):
+                found.setdefault(path.name, path)
+    return [(str(path), ".") for path in found.values()]
+
+
+OPENSSL_BINARIES = _openssl_binaries()
+if OPENSSL_BINARIES:
+    print(f"WuwaTerm.spec: binding {len(OPENSSL_BINARIES)} OpenSSL runtime file(s)")
+else:
+    print(
+        "WuwaTerm.spec: no OpenSSL runtime found beside this interpreter;"
+        " relying on the dependency scan and the artifact self-check"
     )
 
 CLIENT_ROOT = Path(SPECPATH)
