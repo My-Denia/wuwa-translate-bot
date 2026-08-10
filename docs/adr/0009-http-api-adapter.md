@@ -48,10 +48,15 @@ layer.
 - **Dependency growth is confined to an `api` extra.** `wuwaterm`'s core
   dependency set stays `httpx` + `python-telegram-bot`; the Telegram runtime
   installs without FastAPI or uvicorn. The deploy image adds `--extra api`.
-- **Versioned path prefix `/v1`.** `POST /v1/translations`, `GET /v1/terms`,
-  `GET /v1/meta`, plus unauthenticated `GET /healthz` and `GET /readyz` outside
-  the version prefix because a liveness probe must not be versioned with the
-  product surface.
+- **Versioned path prefix `/v1` for everything that carries a credential.**
+  `POST /v1/translations`, `GET /v1/terms`, `GET /v1/meta`. Three further routes
+  sit outside the prefix and take no credential: `GET /healthz` and
+  `GET /readyz`, because a probe must not be versioned with the product surface,
+  and `GET /openapi.json`, which FastAPI generates from `openapi_url`. The
+  schema route is kept deliberately — it serves the same bytes as the committed
+  `docs/api/openapi.json` — while `docs_url` and `redoc_url` are both set to
+  `None`, so no interactive documentation UI is served. Six routes in total;
+  that is the whole inbound surface.
 - **Plain text only.** The application layer's markup translator is an
   adapter-injected seam; this adapter injects none, so Telegram HTML cannot
   reach the HTTP contract by construction rather than by review.
@@ -72,15 +77,23 @@ layer.
   `wuwaterm.logging_utils` — never `bot`, `channel`, `sentence`, `lookup`, `db`,
   the `telegram_*` helpers, the bare `wuwaterm` package root or the Telegram
   SDK, and `TYPE_CHECKING` is not an exemption
-  (`scripts/check_architecture_boundaries.py` `check_api_package`).
+  (`scripts/check_architecture_boundaries.py` `check_api_package`). The gate
+  reads import statements, so what it guarantees is dependency **direction**:
+  the adapter cannot reach into the domain modules and drift from them. It does
+  not inspect behavior — an adapter that used `sqlite3` or `httpx` to build its
+  own lookup or its own model call would pass — so "one pipeline" is a gate for
+  the accidental case and a review question for the deliberate one.
 - **Packaging: the public wheel now ships the adapter.** `wuwaterm_api` is
   included in the wheel and sdist, and `wuwaterm-api = wuwaterm_api.cli:main` is
   a console entry point. This is explicitly accepted rather than worked around
   with a second distribution: the distribution boundary that matters is "no
   generated database, no game data, no runtime state", and adapter source code
   does not touch it. `scripts/check_package_artifacts.py` **requires** the
-  `wuwaterm_api` members and the entry point, so a packaging change that drops
-  the package fails the gate instead of silently shipping an entry point that
+  `wuwaterm_api` members in both artifacts and the `wuwaterm-api` entry point in
+  the wheel's `entry_points.txt` (an sdist carries no generated entry-point
+  metadata to audit; CI installs the built sdist into a clean virtualenv and
+  runs `wuwaterm-api --help` instead). A packaging change that drops the package
+  therefore fails a gate rather than silently shipping an entry point that
   cannot import itself.
 
 Operational placement (loopback bind, separate state directory, device
@@ -89,8 +102,17 @@ credentials) is decided in [ADR 0010](0010-device-principal-auth.md) and
 
 ## Consequences
 
-- Positive: dictionary-first behavior exists exactly once. A divergent pipeline
-  in the API is not a review question; it is a boundary-guard failure.
+- Positive: the HTTP adapter runs the same dictionary-first pipeline as the
+  Telegram commands, and the cheap way to diverge from it — importing `lookup`
+  or `sentence` and going around `application` — fails the boundary guard rather
+  than a reviewer's attention.
+- Limit, recorded so it is not mistaken for a guarantee: "exactly once" is true
+  of the command and HTTP paths, not of the whole system. The linked-channel
+  adapter (`wuwaterm/channel.py`) still has its own direction, exact-lookup and
+  translate sequence and does not call `application` at all
+  (`docs/architecture.md`, "Current coupling"). And the guard checks imports,
+  not behavior, so it cannot stop an adapter that reimplements the pipeline out
+  of `sqlite3` and `httpx`.
 - Positive: clients build against a byte-pinned contract, and a change to the
   wire shape cannot merge without updating the snapshot in the same commit.
 - Positive: Telegram is untouched at runtime. The bot container's command,

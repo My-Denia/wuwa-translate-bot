@@ -43,14 +43,22 @@ banned marker could hide.
 import allowlist: `src/wuwaterm_api` may import only `wuwaterm.application`,
 `wuwaterm.models`, `wuwaterm.translation_policy` and `wuwaterm.logging_utils`,
 never the bare `wuwaterm` package root and never the Telegram SDK, with
-`TYPE_CHECKING` given no exemption. That guard is what makes "the API cannot
-bypass the shared pipeline" checkable rather than reviewable.
+`TYPE_CHECKING` given no exemption. What that guard checks is import
+statements — so it makes the *dependency direction* checkable rather than
+reviewable. It does not read behavior: an adapter that reached the database
+through `sqlite3` or a model endpoint through `httpx` directly would satisfy it.
+Read it as "the API cannot quietly reuse the domain modules and drift", not as
+"a second pipeline is impossible".
 
 Packaging is audited on built artifacts, not on the source tree. The audit
-requires the `wuwaterm_api` package members and the `wuwaterm-api` entry point
-in both the wheel and the sdist, so a packaging change that drops the HTTP
-adapter fails instead of shipping an entry point that cannot import its own
-package. It also fails if `wuwaterm_client` ever appears in a distribution:
+requires the `wuwaterm_api` package members in **both** the wheel and the sdist,
+and the `wuwaterm-api` entry point in the **wheel** — `audit_sdist` does not
+check entry points, because an sdist contains no generated entry-point metadata
+to check. The sdist's entry point is covered instead by the CI step below, which
+installs the built sdist into a clean virtualenv and runs the console script. So
+a packaging change that drops the HTTP adapter fails the audit, and one that
+drops only the script declaration fails the clean-venv smoke. The audit also
+fails if `wuwaterm_client` ever appears in a distribution:
 
 ```bash
 .venv/bin/python -m build

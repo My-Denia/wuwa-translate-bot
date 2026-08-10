@@ -47,11 +47,14 @@ Authenticate a **revocable device principal** per client machine.
   inside the worker thread, so a request cancelled by the time budget or by a
   client that walked away cannot leave a slot behind.
 - **Uniform rejection.** Unknown device, wrong secret, malformed token, revoked
-  device and an unusable store are all indistinguishable to the caller
-  (`unauthorized`), so the endpoint cannot be used to enumerate device ids or to
-  probe the server's state. An operator who needs to know *why* a store is
-  unusable gets that at startup and from the CLI, where the message has an
-  audience.
+  device and a store that became unusable *while serving* are all
+  indistinguishable to the caller (`unauthorized`), so the endpoint cannot be
+  used to enumerate device ids or to probe the server's state. A store that is
+  already unusable at startup never reaches this path: `cli._serve` initializes
+  it before uvicorn binds, so a corrupt or older-shape store stops the process
+  with an explaining message instead of serving 401s. An operator who needs to
+  know *why* a store is unusable gets it there or from the CLI, where the
+  message has an audience.
 - **Scopes** are `translate` (`POST /v1/translations`) and `meta`
   (`GET /v1/terms`, `GET /v1/meta`); both are granted by default. A missing
   scope is `forbidden`, distinct from `unauthorized`.

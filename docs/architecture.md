@@ -19,20 +19,23 @@ discussion groups                               │
         ▼                                       ▼
 ┌───────────────────────────────┐   ┌───────────────────────────────┐
 │ Compose: wuwaterm-bot         │   │ Compose: wuwaterm-api         │
-│ adapter: bot.py, channel.py   │   │ adapter: src/wuwaterm_api/    │
-│ injects markup translator +   │   │ injects no markup translator  │
-│ UTF-16 splitter               │   │ (plain text only)             │
-│ state/ read-write             │   │ state-api/ read-write         │
+│ commands: bot.py              │   │ adapter: src/wuwaterm_api/    │
+│ linked channel: channel.py    │   │ injects no markup translator  │
+│   (its own translate path)    │   │ (plain text only)             │
+│ injects markup translator +   │   │ state-api/ read-write         │
+│ UTF-16 splitter               │   │                               │
+│ state/ read-write             │   │                               │
 └───────────────┬───────────────┘   └───────────────┬───────────────┘
-                │                                   │
+                │ commands only                     │
                 └──────────► wuwaterm.application ◄─┘
-                             (dictionary-first pipeline, exactly once)
+                             (dictionary-first pipeline for
+                              Telegram commands + HTTP)
                                     │            │
                  lookup / sentence / normalize   │ HTTP (optional)
-                                    ▼            ▼
-                             data/terms.db   OpenAI-compatible LLM
-                        (read-only in both containers)
-                                    ▲
+                       ▲            ▼            ▼
+   channel.py ─────────┘     data/terms.db   OpenAI-compatible LLM
+   (direct, not via     (read-only in both containers)
+    application)                    ▲
                                     │ promote only via deploy/vps-update.sh
 ┌───────────────────────────────────┴───────────┐
 │  Builder jobs (Compose profile: builder)      │
@@ -45,12 +48,18 @@ discussion groups                               │
 
 | Actor | Role | Evidence |
 |-------|------|----------|
-| Owner (`OWNER_USER_ID`) | Private `/tr`, `/authorize` / `/revoke`, `/public`, `/status` | `bot.py` `_is_owner`, `authorize_command`, `public_command` |
-| Group admins | `/tr` when chat is allowlisted (unless public mode) | `bot.py` `_is_authorized_group_sender`, `ChatSettings` |
+| Owner (`OWNER_USER_ID`) | Private `/tr`, `/authorize` / `/revoke`, `/status`; passes the translate gate in any authorized chat without an admin check | `bot.py` `_is_owner`, `authorize_command`, `revoke_command`, `status_command`, `_translation_actor` |
+| Group admins | `/tr` when chat is allowlisted (unless public mode); `/public` on/off | `bot.py` `_is_authorized_group_sender`, `_is_group_admin`, `public_command`, `ChatSettings` |
 | Group members | `/tr` only when public mode is on for that chat | `settings.py` public map; `docs/telegram-behavior.md` |
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
 | API device | Bearer-authenticated principal for `POST /v1/translations`, `GET /v1/terms`, `GET /v1/meta` | `wuwaterm_api/auth.py` `DeviceStore`, `wuwaterm_api/app.py` `authenticated_device` |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device registration and revocation | `deploy/vps-update.sh`, `wuwaterm_api/cli.py`, `docs/deployment.md` |
+
+`/public` is **not** an owner command. `public_command` works only in a group
+and authorizes on a fresh, uncached `_is_group_admin` check; it never reads
+`OWNER_USER_ID`. So any admin of that group may toggle public mode, and a
+configured owner who is not an admin of that group may not. The commands that
+do gate on the owner identity are `/authorize`, `/revoke` and `/status`.
 
 ### External systems
 
@@ -101,10 +110,15 @@ discussion groups                               │
    reviewed ingress decision. No ports are published. The supported transport
    from the owner desktop is an SSH tunnel to that loopback port
    (`docs/deployment.md`).
-8. **Inbound control planes are the Telegram Bot API and the versioned HTTP
-   surface.** There is no web admin, no self-service registration route, and no
-   inbound listener for Telegram updates. Device registration and revocation
-   require shell access on the host over SSH (`wuwaterm_api/cli.py`).
+8. **Inbound control planes are the Telegram Bot API and the HTTP surface.**
+   Everything that needs a credential is under `/v1`; the three routes outside
+   it — `GET /healthz`, `GET /readyz` and the FastAPI-generated
+   `GET /openapi.json` — are unauthenticated by design and expose no data that
+   is not already public in this repository (see
+   [the complete route list](#the-complete-inbound-route-list)). There is no web
+   admin, no self-service registration route, and no inbound listener for
+   Telegram updates. Device registration and revocation require shell access on
+   the host over SSH (`wuwaterm_api/cli.py`).
 
 ## Inbound adapters over one application layer
 
@@ -115,15 +129,33 @@ behavior.
 | Adapter | Responsibility | Module |
 |---------|----------------|--------|
 | Telegram command bot | Handlers, auth, per-chat rate limits, replies, polling bootstrap | `src/wuwaterm/bot.py` |
-| Telegram linked channel | Admission, translate, deliver/edit, flood retry | `src/wuwaterm/channel.py` |
+| Telegram linked channel | Admission, **its own** direction/exact/translate sequence, deliver/edit, flood retry | `src/wuwaterm/channel.py` |
 | Telegram HTML/text helpers | Protect/validate Telegram HTML; chunk limits | `telegram_html.py`, `telegram_text.py` |
 | HTTP API | Routing, bearer device auth, per-device rate limit, body cap, time budget, stable error envelope | `src/wuwaterm_api/app.py`, `auth.py`, `errors.py`, `settings.py` |
 | HTTP operator CLI | `serve`, `device issue` / `device list` / `device revoke` | `src/wuwaterm_api/cli.py` |
 
-The application layer holds the dictionary-first pipeline exactly once
-(prepare → direction → exact hit → trusted fuzzy hit → length gate → chunked,
-term-locked LLM call) and knows nothing about Telegram, HTTP, chats, users or
-markup formats. The two adapter-shaped steps are **injected by the caller**:
+The application layer holds the dictionary-first pipeline (prepare → direction →
+exact hit → trusted fuzzy hit → length gate → chunked, term-locked LLM call) and
+knows nothing about Telegram, HTTP, chats, users or markup formats.
+
+**Two of the three adapters go through it**: the Telegram command handlers
+(`/tr`, `/term`, `/sentence`, via `bot.translate_query*` and
+`telegram_translation_reply`) and the HTTP API (`POST /v1/translations`).
+
+**The linked-channel adapter does not.** `channel.py` imports `TermService` and
+`SentenceTranslator` directly and runs its own CJK/Latin direction threshold,
+its own `lookup_exact` branch and its own call to the translator; it produces no
+`TranslationOutcome` and never reaches the fuzzy stage. It is a partial
+duplicate of the pipeline that predates the extraction and was deliberately left
+alone by it: its translate step is interleaved with admission, reply-index
+claiming and chunk editing, so moving it is a behavior-risking refactor of the
+one path that writes to Telegram unprompted, not a lift-and-shift. The
+consequence a maintainer must hold: **a change to `application.py` does not
+automatically change linked-channel translations**, and a pipeline change that
+must apply everywhere has to be made in `channel.py` too. See
+[Current coupling](#current-coupling-honest).
+
+The adapter-shaped steps of the shared pipeline are **injected by the caller**:
 
 | Seam | Type | Telegram adapter | HTTP adapter |
 |------|------|------------------|--------------|
@@ -194,10 +226,19 @@ to have.
 
 The allowlist is enforced by `scripts/check_architecture_boundaries.py`
 (`API_ALLOWED_WUWATERM_MODULES`, `check_api_package`) and covered by
-`tests/test_architecture_boundaries.py`. It is the machine-checkable form of
-"the API cannot grow a second, divergent translation pipeline": to bypass the
-shared application layer the adapter would have to import `lookup` or
-`sentence` directly, and the gate fails closed on exactly that.
+`tests/test_architecture_boundaries.py`.
+
+**What that gate does and does not prove.** It parses each file under
+`src/wuwaterm_api/` and inspects import statements only: it fails on any
+`wuwaterm.*` import outside the four allowlisted modules, on the bare `wuwaterm`
+package root, and on the Telegram SDK. It says nothing about any other import
+and nothing about what the code does — `sqlite3`, `httpx` and everything else in
+the dependency set are unexamined. So the gate makes the *easy* divergence
+impossible: the adapter cannot quietly start calling `lookup` or `sentence` and
+drift from them. It does **not** make a second pipeline impossible: an adapter
+that opened `terms.db` through `sqlite3` itself, or posted to the model endpoint
+through `httpx` itself, would pass the gate. That form of divergence is caught by
+review, not by a script.
 
 To make the allowlist survivable, `application.py` exposes what an adapter
 needs without reaching deeper: `build_term_service`, `build_translator`,
@@ -231,10 +272,11 @@ Automated enforcement: `scripts/check_architecture_boundaries.py`,
 |----------|--------|-------|
 | Large `bot.py` (config, auth, rate limit, translate orchestration, migration, polling) | Accepted concentration | Documented; not mass-split in this formalization |
 | `translate_query*` in `bot.py` are thin wrappers over `application` | Resolved | The pipeline itself lives in `application.py`; `bot.py` only adds Telegram wording, HTML parse mode and the UTF-16 splitter |
+| `channel.py` keeps its own direction/exact/translate sequence instead of calling `application` | **Open, accepted for now** | It uses `TermService` and `SentenceTranslator` directly, so pipeline changes do not reach linked-channel posts automatically. Not extracted here because the translate step is interleaved with admission, reply-index claiming and chunk editing. Trigger for extracting it: any change that must apply to *every* translation path, or a divergence between command and channel output that a user notices |
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
 | `sentence` → `telegram_html` | Accepted | HTML term-lock is part of Telegram-HTML translation fidelity; the HTTP adapter never reaches it |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
-| The public wheel ships `wuwaterm_api` and a `wuwaterm-api` entry point | Explicitly accepted | The distribution boundary that matters (no DB, no TextMap, no game data, no state) is unaffected; `scripts/check_package_artifacts.py` requires both so packaging drift stays caught ([ADR 0009](adr/0009-http-api-adapter.md)) |
+| The public wheel ships `wuwaterm_api` and a `wuwaterm-api` entry point | Explicitly accepted | The distribution boundary that matters (no DB, no TextMap, no game data, no state) is unaffected; `scripts/check_package_artifacts.py` requires the package members in both artifacts and the entry point in the wheel, and CI smokes the sdist's console script in a clean virtualenv, so packaging drift stays caught ([ADR 0009](adr/0009-http-api-adapter.md)) |
 
 ## Request flows
 
@@ -279,12 +321,17 @@ Evidence: `wuwaterm_api/app.py`; `tests/test_api.py`; `docs/api/openapi.json`.
 
 1. `RequestIdMiddleware` accepts a caller-supplied `X-Request-Id` only when it
    matches `^[A-Za-z0-9._-]{1,64}$`, otherwise mints one; the id is echoed on
-   every response and appears in every log line for the request.
+   every response and is included in every log line the HTTP adapter emits
+   (see [Request-id coverage](#request-id-coverage) for where it stops).
 2. `BodyLimitMiddleware` refuses a declared or streamed body over
-   `WUWATERM_API_MAX_BODY_BYTES` (`payload_too_large`) and bounds how long the
-   body may take to arrive.
-3. `TimeoutMiddleware` bounds the wall-clock cost of the whole request; a
-   timeout answers `504` with code `internal`.
+   `WUWATERM_API_MAX_BODY_BYTES` (`payload_too_large`) and gives the body read
+   its own deadline of `WUWATERM_API_REQUEST_TIMEOUT_SECONDS`.
+3. `TimeoutMiddleware` then gives the handler a **second, independent** deadline
+   of the same length. Either deadline answers `504` with code `internal`.
+   These are two consecutive budgets, not one: the body read completes before
+   the handler deadline starts, so a slow upload followed by a slow handler can
+   consume close to **twice** `WUWATERM_API_REQUEST_TIMEOUT_SECONDS` of
+   wall-clock. Nothing in the adapter bounds the two together.
 4. **Auth**: bearer `wtd1.<device_id>.<secret>` verified against
    `state-api/devices.db` under a bounded number of concurrent verifications.
    Every rejection reason is indistinguishable (`unauthorized`).
@@ -308,6 +355,51 @@ version, source profile, source commit, term count and `llm_configured`, and
 deliberately excludes filesystem paths, credentials and chat identifiers
 (`application.ServiceMetadata`).
 
+### The complete inbound route list
+
+Six routes, not five. Three carry a credential, three do not:
+
+| Route | Versioned | Credential | Scope |
+|-------|-----------|------------|-------|
+| `POST /v1/translations` | yes | bearer device | `translate` |
+| `GET /v1/terms` | yes | bearer device | `meta` |
+| `GET /v1/meta` | yes | bearer device | `meta` |
+| `GET /healthz` | no | none | — |
+| `GET /readyz` | no | none | — |
+| `GET /openapi.json` | no | none | — |
+
+`GET /openapi.json` is generated by FastAPI itself, not registered by
+`_register_routes`, and it is easy to forget when reasoning about the trust
+boundary. It is deliberate: `openapi_url="/openapi.json"` is kept while
+`docs_url` and `redoc_url` are both `None`, so the machine-readable contract is
+served but no interactive documentation UI is. It discloses the same bytes that
+are already committed at `docs/api/openapi.json` in a public repository, so it
+adds no disclosure — but it is an unauthenticated route reachable by anything
+that can reach the loopback port, and it is part of the surface an ingress
+decision would expose.
+
+### Request-id coverage
+
+The request id is threaded by hand, not by a context variable or a logging
+adapter, and it stops at the package boundary:
+
+- **Carries the id**: every log line emitted by `src/wuwaterm_api/app.py` — body
+  and handler timeouts, auth rejection, rate-limit rejection, unhandled
+  exceptions, the translation result line, and the no-model refusal. Each call
+  site passes `_request_id(request)` explicitly.
+- **Does not carry the id**: log lines emitted from inside
+  `src/wuwaterm/application.py` while serving that request — notably
+  `llm translation failed reason=…` (`_llm_failure_outcome`), the unknown
+  markup-error-code warning, and the readiness-probe warning
+  (`probe_database`). The application layer is protocol-neutral and receives no
+  request context.
+
+So the practically important case — an LLM failure behind a `503` — leaves
+an adapter line that has the id and a cause line that does not; correlating them
+means using the timestamp. Making that automatic would mean putting a
+request-scoped context variable into the shared layer, which is a change to
+`application.py`'s contract and is not made here.
+
 ### Paths that never call the LLM
 
 | Path | Why |
@@ -316,10 +408,18 @@ deliberately excludes filesystem paths, credentials and chat identifiers
 | Fuzzy dictionary short answers (`application._fuzzy_dictionary_answer`) | DB-only |
 | Invalid leading `--to` (Telegram) | Usage reply only |
 | Unauthorized / rate-limited / silent reject (both adapters) | No translation work |
-| HTTP body over the cap, request over the time budget, missing scope | Refused before the pipeline |
+| HTTP body over the cap, body read over its deadline, missing scope | Refused before the handler runs |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
 | LLM env incomplete | Telegram: `SentenceTranslator` restores locked placeholders / fails closed without inventing terms. HTTP: `llm_unavailable` |
-| `/about`, `/status`, authorize/revoke/public membership housekeeping, `/healthz`, `/readyz`, `/v1/terms`, `/v1/meta` | No translation |
+| `/about`, `/status`, authorize/revoke/public membership housekeeping, `/healthz`, `/readyz`, `/v1/terms`, `/v1/meta`, `/openapi.json` | No translation |
+
+**The handler timeout is deliberately not in that table.** `TimeoutMiddleware`
+fires *around* the handler, so by the time it fires the request has already
+entered `translate_request_async` and may already have sent a request to the
+model. Cancellation stops the adapter waiting for the answer; it does not
+un-send what is already on the wire. A `504` therefore does **not** guarantee
+that no LLM call was made or billed. Only the body-read deadline refuses a
+request before any pipeline work begins.
 
 ## Identity and principals
 
@@ -433,7 +533,8 @@ aids for a single writer, not a cluster protocol.
 | Telegram API | NetworkError, RetryAfter, BadRequest | Flood retry helper; HTML parse fallback to plain; missing reply target handling; process keeps polling (`restart: unless-stopped`) |
 | LLM HTTP | Timeout, 4xx/5xx, empty content | `LLMTranslationError` mapped to a stable `error_code`; Telegram renders its notice, HTTP answers `llm_unavailable` / `llm_budget_exhausted`; placeholders not left raw when restore fails closed |
 | SQLite terms DB | Missing/corrupt file | Startup/use fails when `TermService` cannot read; `GET /readyz` answers 503; deploy keeps previous DB on failed promotion |
-| Device credential store | Missing, unreadable, corrupt, or written by an older shape | Request path answers a uniform `unauthorized`; the explaining message is produced at startup and by the operator CLI, where it has an audience |
+| Device credential store — at startup | Missing / corrupt / older shape | `cli._serve` calls `DeviceStore.initialize()` **before** uvicorn binds. Missing is recreated empty and the service starts. Corrupt or older-shape aborts startup with the explaining message on the operator's terminal: there is no listener, so there is no request to answer. Nothing degrades silently |
+| Device credential store — after startup | Becomes unreadable, deleted, or corrupted while serving | Every request answers a uniform `unauthorized` (401), whatever the underlying cause: `DeviceStore.authenticate` folds every store error into "no device". The reason is not on the wire by design; the operator CLI is where a store is diagnosed |
 | Filesystem state | Disk full, lock errors, durability errors | Settings/reply-index raise typed errors; startup migration refuses overwrite of existing targets |
 | SSH tunnel down (desktop client) | Connect refused / timeout | Client renders its own offline or timeout state; the service is unaffected |
 | Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for **both** serving containers |
