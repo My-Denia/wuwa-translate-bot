@@ -78,14 +78,25 @@ port the updater gates on. Compose and shell syntax are checked separately:
 
 ```bash
 sh -n deploy/*.sh
-docker compose --env-file .env.example -f deploy/docker-compose.yml config -q
+# Both services declare `env_file: ../.env`, so that file must EXIST for
+# `config` to load it. Never overwrite a real one to satisfy that.
+if [ -e .env ]; then
+  docker compose -f deploy/docker-compose.yml config -q
+else
+  cp .env.example .env && docker compose -f deploy/docker-compose.yml config -q; rm -f .env
+fi
 ```
 
-The Compose check reads the example file directly with `--env-file`. It must
-never be written as `cp .env.example .env && … && rm .env`: on a host that has a
-real `.env` — which is every host where this is worth running — the copy
-overwrites the operator's secrets and the cleanup then deletes the replacement,
-so the original is gone whether or not Compose succeeds.
+The guard is the point. Some hosts have a real `.env` holding the bot token and
+the model key, and some checkouts have none, and the check must work on both
+without assuming either. The form this replaces —
+`cp .env.example .env && … && rm .env`, unguarded — destroys a real `.env`: the
+copy overwrites the operator's secrets and the cleanup deletes the replacement,
+so the original is gone whether or not Compose succeeded. `--env-file
+.env.example` is **not** the fix: it selects the file used for `${...}`
+interpolation, which is not needed here (every substitution in the Compose file
+carries a `:-` default) and it does not satisfy an `env_file:` directive, so on
+a checkout with no `.env` it fails to load rather than validating anything.
 
 The desktop client has its own test suite and its own virtual environment. It
 targets Python 3.12, but nothing pins it: `client/pyproject.toml` declares a

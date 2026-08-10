@@ -311,13 +311,20 @@ Evidence: `channel.py` `channel_post_handler`; single listener pin in
 `scripts/check_non_goals.py` / `bot.py`.
 
 1. Update matches `filters.IS_AUTOMATIC_FORWARD & filters.SenderChat.CHANNEL`.
-2. Age / size / CJK-Latin thresholds; kill switch `WUWATERM_CHANNEL_AUTOTRANSLATE`.
-3. Auth: discussion group must still satisfy allowlist gate.
-4. `ChannelRuntime.reserve` (process-local admission / budget).
-5. Claim original in `ChannelReplyIndex` (file-backed).
-6. Translate: exact DB / term lock / LLM with re-gates before send.
-7. Deliver reply or edit existing chunks with `send_with_flood_retry`.
-8. Telemetry outcomes via channel runtime counters.
+2. Kill switch `WUWATERM_CHANNEL_AUTOTRANSLATE`, then the age gate
+   (`channel_max_age_seconds`).
+3. Auth: discussion group must still satisfy the allowlist gate.
+4. Claim the original in `ChannelReplyIndex` (file-backed).
+5. Direction thresholds (`channel_min_cjk` / `channel_min_latin`) and the size
+   gate. These run **after** the claim, not before it.
+6. Exact dictionary lookup. **On a hit the reply is delivered and the handler
+   returns here** — an exact channel hit never reaches admission and spends no
+   LLM budget at all.
+7. Only a dictionary miss reaches `ChannelRuntime.reserve` (process-local
+   admission / LLM-call budget).
+8. Term-locked LLM translation, with the gates re-checked before send.
+9. Deliver the reply, or edit existing chunks, with `send_with_flood_retry`.
+10. Telemetry outcomes via channel runtime counters.
 
 Channel path is always auto-detected direction; it does not accept command
 `--to` flags (`docs/telegram-behavior.md`).
