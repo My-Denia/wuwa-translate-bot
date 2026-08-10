@@ -403,6 +403,52 @@ def test_split_plain_text_never_exceeds_limit():
     assert "".join(chunk.replace("\n", "") for chunk in chunks) == text.replace("\n", "")
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["\n" * 50, "   ", "single", "a\n\nb", "x" * 40],
+)
+def test_split_plain_text_is_never_empty_for_non_empty_input(text: str):
+    chunks = split_plain_text(text, limit=10)
+
+    assert chunks, text
+    assert all(len(chunk) <= 10 for chunk in chunks)
+
+
+def test_split_plain_text_is_empty_only_for_empty_input():
+    assert split_plain_text("", limit=10) == []
+
+
+def test_sync_pipeline_separates_budget_exhaustion_from_unavailability(
+    monkeypatch, sample_db
+):
+    """The sync entry point must classify failures like the async one."""
+    service, translator = build_pair(sample_db)
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+
+    def raise_budget(*args, **kwargs):
+        raise LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason="budget")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", raise_budget)
+    budget = translate_request(
+        service, translator, TranslationJob(text="一个需要翻译的句子。")
+    )
+
+    def raise_upstream(*args, **kwargs):
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason="upstream")
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm", raise_upstream)
+    unavailable = translate_request(
+        service, translator, TranslationJob(text="另一个需要翻译的句子。")
+    )
+
+    assert budget.kind == KIND_ERROR
+    assert budget.error_code == ERROR_LLM_BUDGET_EXHAUSTED
+    assert unavailable.kind == KIND_ERROR
+    assert unavailable.error_code == ERROR_LLM_UNAVAILABLE
+
+
 def test_lookup_exact_terms_returns_official_strings(sample_db):
     service = build_term_service(sample_db)
 

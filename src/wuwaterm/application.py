@@ -39,6 +39,7 @@ from .lookup import TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
 from .sentence import (
+    BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
     LLMTranslationError,
@@ -257,6 +258,10 @@ def split_plain_text(text: str, limit: int = LLM_INPUT_CHAR_LIMIT) -> list[str]:
     Protocol-neutral default splitter. Lines are kept whole when they fit; a
     single line longer than ``limit`` is hard-wrapped so no chunk can exceed
     the LLM input bound.
+
+    The contract adapters may rely on: for non-empty input the result is never
+    empty, so the caller always makes at least one translation attempt rather
+    than silently answering with nothing.
     """
     limit = max(1, int(limit))
     chunks: list[str] = []
@@ -464,11 +469,19 @@ def translate_request(
     prepared, to_chinese = stage.prepared, stage.to_chinese
     translated = translator.translate(prepared, to_chinese=to_chinese)
     if translated in LLM_FAILURE_NOTICES:
+        # The sync API swallows the exception and returns a notice, so the
+        # notice itself is the only signal left. Classify it the same way the
+        # async path classifies the reason, or the published taxonomy would
+        # disagree with itself depending on which entry point was used.
         return TranslationOutcome(
             kind=KIND_ERROR,
             text=translated,
             to_chinese=to_chinese,
-            error_code=ERROR_LLM_UNAVAILABLE,
+            error_code=(
+                ERROR_LLM_BUDGET_EXHAUSTED
+                if translated == BUDGET_EXHAUSTED_NOTICE
+                else ERROR_LLM_UNAVAILABLE
+            ),
         )
     return TranslationOutcome(
         kind=KIND_LLM,

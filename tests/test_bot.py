@@ -4163,3 +4163,50 @@ def test_revoke_save_failure_keeps_chat_denied_and_unserved(monkeypatch, sample_
     asyncio.run(term_command(tr_update, tr_context))
 
     assert tr_message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 954)]
+
+
+def test_telegram_reply_renders_outcomes_at_the_adapter_seam():
+    """Wording, parse mode and the strip fallback live in bot.py, not below."""
+    from wuwaterm.application import KIND_LLM, TranslationOutcome
+    from wuwaterm.bot import (
+        DICT_MISS_FLAG,
+        TranslationReply,
+        _telegram_reply,
+        _telegram_text,
+    )
+
+    plain = _telegram_reply(TranslationOutcome(kind=KIND_LLM, text="Echo"))
+    assert plain == TranslationReply("Echo")
+
+    flagged = _telegram_reply(
+        TranslationOutcome(kind=KIND_LLM, text="Echo", dictionary_miss=True)
+    )
+    assert flagged.text == f"Echo\n\n{DICT_MISS_FLAG}"
+    assert flagged.parse_mode is None
+
+    rich = _telegram_reply(
+        TranslationOutcome(kind=KIND_LLM, text="<b>Echo</b>", markup_used=True)
+    )
+    assert rich == TranslationReply("<b>Echo</b>", parse_mode="HTML")
+
+    # Structurally broken markup must degrade to plain text, never be sent
+    # with parse_mode=HTML (Telegram would reject the whole message).
+    broken = _telegram_reply(
+        TranslationOutcome(kind=KIND_LLM, text="Echo <b> broken", markup_used=True)
+    )
+    assert broken.parse_mode is None
+    assert "<b>" not in broken.text
+
+    # The flag is appended BEFORE validation, so a flagged rich reply that
+    # still validates keeps HTML mode.
+    flagged_rich = _telegram_reply(
+        TranslationOutcome(
+            kind=KIND_LLM,
+            text="<b>Echo</b>",
+            markup_used=True,
+            dictionary_miss=True,
+        )
+    )
+    assert flagged_rich.parse_mode == "HTML"
+    assert flagged_rich.text.endswith(DICT_MISS_FLAG)
+    assert _telegram_text(TranslationOutcome(kind=KIND_LLM, text="x")) == "x"
