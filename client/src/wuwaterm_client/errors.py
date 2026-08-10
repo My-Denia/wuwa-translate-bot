@@ -6,9 +6,10 @@ The first nine codes below mirror the server's stable error taxonomy
 (docs/api/openapi.json, ErrorDetailBody.code) so the client can branch on the
 same enumerated values the API returns; matching an external wire contract's
 constant names is not translation logic, it is just naming this client's
-side of the same envelope. The last four codes are produced entirely locally
-by this client (transport failures and user-initiated cancellation) and are
-never sent by the server.
+side of the same envelope. The last five codes are produced entirely locally
+by this client (transport failures, user-initiated cancellation, and a
+refusal to use an unprotected server address) and are never sent by the
+server.
 """
 
 from __future__ import annotations
@@ -33,6 +34,9 @@ ERROR_OFFLINE = "offline"
 ERROR_TIMEOUT = "timeout"
 ERROR_CANCELLED = "cancelled"
 ERROR_UNKNOWN = "unknown"
+# Raised before any request is sent, when the configured address would carry
+# the device token to another machine without transport protection.
+ERROR_INSECURE_ENDPOINT = "insecure_endpoint"
 
 MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_UNAUTHORIZED: strings.ERROR_MSG_UNAUTHORIZED,
@@ -48,6 +52,7 @@ MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_TIMEOUT: strings.ERROR_MSG_TIMEOUT,
     ERROR_CANCELLED: strings.STATUS_CANCELLED,
     ERROR_UNKNOWN: strings.ERROR_MSG_UNKNOWN,
+    ERROR_INSECURE_ENDPOINT: strings.ERROR_MSG_INSECURE_ENDPOINT,
 }
 
 

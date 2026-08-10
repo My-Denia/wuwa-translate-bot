@@ -68,6 +68,37 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+def endpoint_is_confidential(value: object) -> bool:
+    """Whether requests sent to `value` are protected in transit.
+
+    True for `https://` (the client always verifies the server certificate,
+    see api.py) and for plain `http://` to this machine's own loopback
+    address, where the bytes never leave the host. False for everything
+    else, including an address this function cannot parse: the client
+    refuses what it cannot show to be safe rather than assuming it is.
+
+    This is the whole of the client's transport-confidentiality policy, and
+    it is deliberately independent of how the network path is arranged. The
+    device token travels in a request header on every call, so an address
+    that carries it in the clear to another machine is refused wherever it
+    arrives from - the settings field, a hand-edited config file, or a
+    caller constructing the transport directly.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+    except ValueError:
+        return False
+    if not parsed.hostname:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme == "http":
+        return _is_loopback(parsed.hostname)
+    return False
+
+
 def usable_base_url(value: object) -> bool:
     """Whether an address can actually be used to reach the service.
 
@@ -91,11 +122,12 @@ def usable_base_url(value: object) -> bool:
         parsed.port
     except ValueError:
         return False
-    # Plain HTTP is only acceptable to this machine. The supported transport
-    # is an SSH tunnel whose local end is loopback; anything else carries the
-    # bearer credential over the wire in the clear, and a mistyped or
-    # hand-edited address is exactly how that happens by accident.
-    if parsed.scheme == "http" and not _is_loopback(parsed.hostname):
+    # Plain HTTP is only acceptable to this machine. Any other host must be
+    # reached over the configured secure endpoint (https, certificate
+    # verified); anything else carries the bearer credential over the wire in
+    # the clear, and a mistyped or hand-edited address is exactly how that
+    # happens by accident.
+    if not endpoint_is_confidential(candidate):
         return False
     # A base address is a scheme, a host, a port and an optional path prefix.
     # A query or fragment on it is silently dropped when a request path is

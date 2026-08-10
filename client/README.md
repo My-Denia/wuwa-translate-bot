@@ -21,25 +21,68 @@ of the `wuwaterm` server wheel.
 
 ## Configuring the server address
 
-The service binds to a loopback port on the server host only; it is not
-reachable directly from the internet. The supported way to reach it today is
-an SSH tunnel from this computer to that loopback port. The remote end must
-be the port the deployment configured (`WUWATERM_API_PORT`, 8787 by default —
-see `docs/deployment.md` for reading it back from the running service); the
-local end is your own choice:
+Settings → Server address takes one value: the base address of the configured
+secure endpoint the service is published on. Everything else about the network
+path is the deployment's business — this client only makes HTTPS requests to
+the address you give it, and the API contract does not encode the path in any
+way, so changing how the service is published changes nothing here except this
+one string.
 
-```
-ssh -N -L 8787:127.0.0.1:8787 <ssh-target>
-```
+Two forms are accepted, and nothing else:
 
-With the tunnel open, set the client's server address (Settings) to
-`http://127.0.0.1:8787` — this is also the default. Only the local half of
-that command has to match the address you configure here.
+- `https://<host>[:<port>][/<path prefix>]` — any host. The server
+  certificate is verified on every request, always. There is no setting,
+  command-line argument or environment variable in this application that
+  turns verification off.
+- `http://127.0.0.1:<port>` (or `localhost`/`::1`) — this machine only, for a
+  development service running on your own computer. Nothing leaves the host,
+  so there is nothing to protect in transit. This is the default,
+  `http://127.0.0.1:8787`.
 
-Plain `http://` is accepted only for this machine, which is where the tunnel
-ends. Any other host must be `https://`: the device token travels in a request
-header, and an address typed or edited by hand is exactly how it would
-otherwise end up crossing a network in the clear.
+Plain `http://` to any other host is refused, in the settings dialog and again
+in the transport itself before a request is built: the device token travels in
+a request header on every call, and an address typed or edited by hand is
+exactly how it would otherwise end up crossing a network in the clear.
+
+The port is whatever the deployment configured (`WUWATERM_API_PORT`, 8787 by
+default) when you are talking to a service on this machine; for a published
+endpoint the address is whatever the operator gives you, and it is normally
+just the host name.
+
+<!-- operations-note: the single place this client's documentation is allowed
+     to name the host administration channel, so that nobody re-introduces it
+     as a way for the application to reach the service. Pinned verbatim by
+     tests/test_client_transport_policy.py. -->
+> Operations note: SSH is how an operator administers the server host. It is
+> not part of this client's path to the service and never a requirement for
+> using it — the application starts no such process, manages no keys, and
+> needs nothing running beside it. See `docs/deployment.md`.
+
+## Timeouts, retries and reconnection
+
+There is no background connection to lose and nothing to reconnect: each
+action opens an HTTP request on demand through a shared, pooled `httpx` client
+and finishes when the response arrives. Connections are pooled and reused;
+when a pooled connection has been closed by the other side, the next request
+establishes a new one.
+
+- **Two deadlines, both configurable.** `request_timeout_seconds` (default
+  10s, Settings → Request timeout) applies to term lookups and status refreshes;
+  `translate_timeout_seconds` (default 60s) applies to `POST /v1/translations`,
+  which may be waiting on a translation model. Each covers the whole
+  request — connect, send, and read the response. Values from the settings
+  dialog and from a hand-edited config file are clamped to 1–600 seconds.
+- **A timeout is reported, never retried.** The request stops and the view
+  shows "The request timed out." This client does not retry automatically:
+  a translation request that has already reached the service may have spent
+  model budget, and silently sending it again is not a decision an application
+  should take for you. Press the button again to make a new request.
+- **Unreachable service.** A connection failure is reported as
+  "Could not reach the server…" and leaves the client usable; the next
+  request tries again from scratch. No state is cached across the failure.
+- **Cancellation.** Translate → Cancel stops the in-flight request
+  immediately; the status line says the request was cancelled and the buttons
+  return to their normal state.
 
 ## Getting and storing a device credential
 

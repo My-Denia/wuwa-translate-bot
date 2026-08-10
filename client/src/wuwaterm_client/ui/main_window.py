@@ -10,6 +10,7 @@ from .. import strings
 from ..api import ApiClient
 from ..config import ClientConfig
 from ..credentials import CredentialStoreUnavailable, has_token, store_token
+from ..errors import ClientError
 from .first_run_dialog import FirstRunDialog
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
@@ -54,28 +55,48 @@ class MainWindow(QMainWindow):
     def _on_settings_clicked(self) -> None:
         dialog = SettingsDialog(self.config, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.config = dialog.result_config()
-            try:
-                self.config.save()
-            except OSError:
-                # The settings still take effect for this session; what the
-                # owner must not be left believing is that they were kept.
-                QMessageBox.warning(
-                    self,
-                    strings.SETTINGS_TITLE,
-                    strings.SETTINGS_NOT_SAVED_MESSAGE,
-                )
-            self.api_client.update_base_url(self.config.base_url)
-            # Timeouts too, or the saved settings and the running client
-            # disagree until the next launch.
-            self.api_client.update_timeouts(
-                self.config.request_timeout_seconds,
-                self.config.translate_timeout_seconds,
-            )
+            self._apply_settings(dialog.result_config())
         # Whether or not the dialog was accepted: entering, changing or
         # forgetting a token inside it writes to the credential store
         # immediately, and Cancel does not undo that.
         self.status_view.refresh_credential_state()
+
+    def _apply_settings(self, new_config: ClientConfig) -> None:
+        """Adopt an accepted settings change, or refuse it whole.
+
+        The address goes to the live transport FIRST, because it is the only
+        part the client can refuse: an address that would carry the device
+        token in the clear is rejected there. Adopting such a configuration -
+        or writing it to disk, where it would come back at the next launch -
+        would leave settings that do not describe the running client, so the
+        refusal keeps the previous address in effect and says why.
+        """
+        try:
+            self.api_client.update_base_url(new_config.base_url)
+        except ClientError as exc:
+            QMessageBox.warning(
+                self,
+                strings.SETTINGS_INVALID_BASE_URL_TITLE,
+                exc.message,
+            )
+            return
+        self.config = new_config
+        # Timeouts too, or the saved settings and the running client
+        # disagree until the next launch.
+        self.api_client.update_timeouts(
+            self.config.request_timeout_seconds,
+            self.config.translate_timeout_seconds,
+        )
+        try:
+            self.config.save()
+        except OSError:
+            # The settings still take effect for this session; what the
+            # owner must not be left believing is that they were kept.
+            QMessageBox.warning(
+                self,
+                strings.SETTINGS_TITLE,
+                strings.SETTINGS_NOT_SAVED_MESSAGE,
+            )
 
     def _on_about_clicked(self) -> None:
         QMessageBox.information(self, strings.MENU_ABOUT, strings.ABOUT_TEXT)

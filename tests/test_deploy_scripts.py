@@ -1520,7 +1520,7 @@ def test_documented_api_commands_use_the_configured_port():
 
     A readback pinned to 8787 reports a connection failure after a perfectly
     successful deployment on any host that set WUWATERM_API_PORT to something
-    else, and a tunnel pinned to 8787 forwards to a closed remote port.
+    else.
     """
     text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     updater = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
@@ -1532,5 +1532,26 @@ def test_documented_api_commands_use_the_configured_port():
     # exactly as the updater's readiness smoke does.
     assert "os.environ.get('WUWATERM_API_PORT', '8787')" in text
     assert "os.environ.get('WUWATERM_API_PORT', '8787')" in updater
-    # The tunnel's remote end is discovered, not assumed.
+    # The serving port is discovered from the running container, not assumed.
     assert "printenv WUWATERM_API_PORT" in text
+
+
+def test_the_guide_does_not_teach_host_administration_as_the_client_path():
+    """The deployment guide is a runbook, and a runbook that documents a
+    host-administration channel as the way a desktop client reaches the
+    service teaches exactly the design this project does not have.
+
+    The client reaches a configured secure endpoint with device
+    authentication on every call. Host shell access is the operator's own
+    channel: it appears here for deployment and credential commands, and
+    never as the application's path.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    # No local port-forwarding recipe, in any of the forms that would put one
+    # back into the guide.
+    for recipe in ("ssh -N -L", "ssh -L", "-N -L", "LocalForward"):
+        assert recipe not in text, recipe
+    # The replacement wording is present, not merely the removal.
+    assert "configured secure endpoint" in text
+    assert "Every request is authenticated at the application layer" in text

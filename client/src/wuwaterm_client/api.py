@@ -14,10 +14,11 @@ from typing import Any, Callable
 
 import httpx
 
-from .config import ClientConfig
+from .config import ClientConfig, endpoint_is_confidential
 from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
+    ERROR_INSECURE_ENDPOINT,
     ERROR_OFFLINE,
     ERROR_TIMEOUT,
     ERROR_UNAUTHORIZED,
@@ -159,6 +160,21 @@ class MetaResult:
         )
 
 
+def _require_confidential_endpoint(base_url: str) -> None:
+    """Refuse an address that would put the device token on the wire in the
+    clear, before the transport exists and before any request is built.
+
+    The check is unconditional: it does not consult a setting, and there is
+    no parameter anywhere in this client that turns it off. It runs here as
+    well as in the settings dialog because this constructor is reachable
+    without that dialog - a hand-edited configuration file, a future caller,
+    a test - and a refusal that only lives in the UI is not a transport
+    guarantee.
+    """
+    if not endpoint_is_confidential(base_url):
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
+
+
 class ApiClient:
     """Bearer-authenticated async client for the wuwaterm HTTP API."""
 
@@ -171,6 +187,7 @@ class ApiClient:
         translate_timeout: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        _require_confidential_endpoint(base_url)
         self._token_provider = token_provider
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
@@ -178,11 +195,18 @@ class ApiClient:
             base_url=base_url,
             timeout=timeout,
             transport=transport,
-            # The supported address is a loopback port on this machine, the
-            # local end of an SSH tunnel. httpx trusts HTTP_PROXY by default,
-            # so a machine with a corporate proxy configured and no NO_PROXY
-            # entry for 127.0.0.1 would send every request - bearer credential
-            # included - to that proxy instead of into the tunnel.
+            # Server certificates are always verified. This is httpx's own
+            # default and is stated here so that removing verification would
+            # have to be a deliberate edit to this line rather than the
+            # silent effect of a flag someone added elsewhere; the client
+            # exposes no setting, argument or environment variable that can
+            # weaken it.
+            verify=True,
+            # httpx trusts HTTP_PROXY by default, so a machine with a proxy
+            # configured and no NO_PROXY entry for the configured host would
+            # send every request - bearer credential included - to that proxy
+            # instead of to the service. The address the owner configured is
+            # the address this client talks to.
             trust_env=False,
         )
 
@@ -195,6 +219,14 @@ class ApiClient:
         )
 
     def update_base_url(self, base_url: str) -> None:
+        """Point the live client at a new address, or refuse and keep the old.
+
+        Raises ClientError(ERROR_INSECURE_ENDPOINT) rather than switching to
+        an address that is not protected in transit. The previous address
+        stays in effect, so a refusal leaves a working client rather than a
+        half-configured one.
+        """
+        _require_confidential_endpoint(base_url)
         self._client.base_url = httpx.URL(base_url)
 
     def update_timeouts(self, timeout: float, translate_timeout: float) -> None:

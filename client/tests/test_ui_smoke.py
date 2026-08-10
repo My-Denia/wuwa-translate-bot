@@ -31,7 +31,7 @@ def _dummy_client() -> ApiClient:
     async def handler(request):  # pragma: no cover - never invoked here
         raise AssertionError("no network calls expected in a construction smoke test")
 
-    return ApiClient("http://test", transport=httpx.MockTransport(handler))
+    return ApiClient("https://test", transport=httpx.MockTransport(handler))
 
 
 def test_translate_view_constructs(qapp) -> None:
@@ -81,9 +81,9 @@ def test_settings_push_the_new_timeouts_into_the_live_client(qapp, tmp_path, mon
     monkeypatch.setattr(config_module, "app_data_dir", lambda: tmp_path)
     monkeypatch.setattr(main_window_module, "has_token", lambda: True)
 
-    window = MainWindow(ClientConfig(base_url="http://test", request_timeout_seconds=5.0))
+    window = MainWindow(ClientConfig(base_url="https://test", request_timeout_seconds=5.0))
     changed = ClientConfig(
-        base_url="http://elsewhere",
+        base_url="https://elsewhere",
         request_timeout_seconds=42.0,
         translate_timeout_seconds=99.0,
     )
@@ -105,7 +105,7 @@ def test_settings_push_the_new_timeouts_into_the_live_client(qapp, tmp_path, mon
 
     assert window.api_client._timeout == 42.0
     assert window.api_client._translate_timeout == 99.0
-    assert str(window.api_client._client.base_url).startswith("http://elsewhere")
+    assert str(window.api_client._client.base_url).startswith("https://elsewhere")
 
 
 def test_the_first_run_dialog_will_not_continue_without_a_token(qapp) -> None:
@@ -162,7 +162,7 @@ def test_storing_a_first_run_credential_refreshes_the_status_view(
         main_window_module, "store_token", lambda token: stored.update(token=token)
     )
 
-    window = MainWindow(ClientConfig(base_url="http://test"))
+    window = MainWindow(ClientConfig(base_url="https://test"))
     refreshed: list[bool] = []
     monkeypatch.setattr(
         window.status_view,
@@ -187,6 +187,57 @@ def test_storing_a_first_run_credential_refreshes_the_status_view(
     assert window.ensure_credential() is True
     assert stored["token"] == "wtd1.device.secret"
     assert refreshed == [True]
+
+
+def test_an_unprotected_address_is_refused_on_screen_and_changes_nothing(
+    qapp, monkeypatch
+) -> None:
+    """The refusal has to reach the owner, not just the transport.
+
+    If the window swallowed the error the settings dialog would close on an
+    address the client will never use, and the only sign would be that
+    requests kept going somewhere else.
+    """
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from wuwaterm_client import strings
+    from wuwaterm_client.config import ClientConfig
+    from wuwaterm_client.ui import main_window as main_window_module
+
+    warned: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
+    )
+    monkeypatch.setattr(main_window_module, "has_token", lambda: True)
+
+    window = MainWindow(ClientConfig(base_url="http://127.0.0.1:8787"))
+    refused = ClientConfig(base_url="http://198.51.100.7:8787", request_timeout_seconds=42.0)
+
+    saved: list[str] = []
+    monkeypatch.setattr(
+        ClientConfig, "save", lambda self, base_dir=None: saved.append(self.base_url)
+    )
+
+    class _AcceptedDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def result_config(self):
+            return refused
+
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _AcceptedDialog)
+    window._on_settings_clicked()
+
+    assert warned, "the owner must be told the address was refused"
+    assert warned[-1][2] == strings.ERROR_MSG_INSECURE_ENDPOINT
+    # Nothing half-applied: not the address, not the timeout, not the file.
+    assert str(window.api_client._client.base_url).startswith("http://127.0.0.1:8787")
+    assert window.config.base_url == "http://127.0.0.1:8787"
+    assert window.api_client._timeout != 42.0
+    assert saved == []
 
 
 def test_settings_refuse_an_address_that_cannot_be_used(qapp, monkeypatch) -> None:
