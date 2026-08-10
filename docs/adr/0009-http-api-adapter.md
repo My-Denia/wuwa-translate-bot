@@ -65,20 +65,29 @@ layer.
   adapter-injected seam; this adapter injects none, so Telegram HTML cannot
   reach the HTTP contract by construction rather than by review.
 - **One stable error envelope**, `{"error": {"code", "message"}, "request_id"}`,
-  for every non-2xx response that reaches an exception handler — including the
-  framework-raised routing failures (404, 405) and validation errors, which are
-  the ones a client is most likely to meet and the ones a bare framework would
-  have answered in its own shape. The documented exception is the router's
-  trailing-slash redirect: `GET /healthz/`, `/readyz/` or `/v1/meta/` returns a
-  307 with a `Location` header and an empty body, because `redirect_slashes` is
-  left at its default and that response never passes through a handler. Clients
-  should follow redirects or use the exact paths; they must not assume every
-  non-2xx body parses as the envelope. The
+  for every non-2xx response **this application produces** — from an exception
+  handler (`ApiError`, validation errors, the framework's own 404 and 405) and
+  equally from the middleware that answers 413 and 504, which sits outside the
+  handler stack and therefore renders the envelope itself (`_error_response`).
+  The one documented exception is a response the application does not produce:
+  the router's trailing-slash redirect. `GET /healthz/`, `/readyz/` or
+  `/v1/meta/` returns a 307 with a `Location` header and an empty body, because
+  `redirect_slashes` is left at its default and the router answers before
+  anything else runs. Clients should follow redirects or use the exact paths,
+  and should not assume a redirect body parses as the envelope. The
   code set is closed and enumerated in the schema: `unauthorized`, `forbidden`,
   `rate_limited`, `payload_too_large`, `invalid_request`, `input_too_long`,
-  `llm_unavailable`, `llm_budget_exhausted`, `internal`. Codes come from
-  `wuwaterm.application` so both adapters classify failures identically; the
-  bot's Telegram-worded notices are never reused.
+  `llm_unavailable`, `llm_budget_exhausted`, `internal`. The pipeline's own
+  failures come from `wuwaterm.application`, so where an outcome already carries
+  an `error_code` both adapters classify it the same way; the bot's
+  Telegram-worded notices are never reused. That shared vocabulary does not mean
+  the two surfaces behave identically. Codes for transport concerns —
+  `unauthorized`, `forbidden`, `rate_limited`, `payload_too_large` — have no
+  Telegram counterpart at all. And the two deliberately diverge on one outcome:
+  with no model configured and a dictionary miss, the application returns a
+  `kind == "llm"` result holding term-substituted source text, which the bot
+  renders and this adapter refuses as `llm_unavailable`, because over HTTP the
+  fallback would read as a successful translation.
 - **Committed contract snapshot + drift gate.** `docs/api/openapi.json` is
   regenerated and byte-compared by `scripts/check_api_contract.py`, which runs
   in CI. That script also re-applies the repo's product token bans to the

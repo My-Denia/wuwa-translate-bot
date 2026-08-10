@@ -81,9 +81,12 @@ sh -n deploy/*.sh
 cp .env.example .env && docker compose -f deploy/docker-compose.yml config -q && rm .env
 ```
 
-The desktop client has its own test suite, its own virtual environment, and its
-own interpreter pin. It is Windows-only and is **not** part of `python -m pytest`
-at the repository root:
+The desktop client has its own test suite and its own virtual environment. It
+targets Python 3.12, but nothing pins it: `client/pyproject.toml` declares a
+`>=3.12` floor, `build.ps1` checks that the venv can import PySide6 and
+PyInstaller without checking the interpreter's version, and CI selects the 3.12
+series without a patch release. It is Windows-only and is **not** part of
+`python -m pytest` at the repository root:
 
 ```powershell
 client\.venv\Scripts\python.exe -m pytest
@@ -93,11 +96,15 @@ client\build.ps1
 The client tests use a mocked HTTP transport and an in-memory credential-store
 stand-in: no network access, no running server, and no real Windows Credential
 Manager writes. `client\build.ps1` produces `client\dist\WuwaTerm\WuwaTerm.exe`,
-performs no code signing, and then runs that artifact's own `--self-check`: a
-start-up rehearsal, off-screen, that constructs everything a normal start does
-and exits without showing a window, requesting a credential or sending a
-request. A build that cannot start therefore fails the build rather than the
-owner's first launch.
+performs no code signing, and then runs that artifact's own `--self-check`: an
+off-screen start-up rehearsal that builds the `QApplication`, installs the
+qasync event loop and constructs the `MainWindow`, then exits without showing a
+window, requesting a credential or sending a request. That covers the failures
+that made this gate necessary — a frozen build that cannot import its own
+package, or is missing a Qt plugin, or ships an SSL library its interpreter
+cannot load. It stops short of the credential flow: `--self-check` returns
+before `ensure_credential()`, so a first-run dialog that failed to construct
+would still pass the rehearsal and surface at the owner's first launch.
 
 ## Live Telegram Smoke
 
@@ -137,12 +144,15 @@ CI never touches the VPS, never holds a device credential, and never opens a
 tunnel. The "VPS only" column is not uniform, though, and the difference
 matters when something goes wrong:
 
-- **Run and recorded by `deploy/vps-update.sh`**: the in-container `/readyz`
-  wait, the image-id and `.deploy_commit` readback, and the bot smoke
+- **Run by `deploy/vps-update.sh`, and gating on it**: the in-container
+  `/readyz` wait, the image-id and `.deploy_commit` readback, and the bot smoke
   (`scripts/deploy_smoke.py`, invoked with `TELEGRAM_TEST_CHAT_ID` blanked so
-  the updater path sends no diagnostic message). A failure here aborts the
-  deployment and triggers the transactional rollback, and the outcome lands in
-  `.deployments/<commit>.json`.
+  the updater path sends no diagnostic message). A failure aborts the deployment
+  and triggers the transactional rollback. Note what the record actually is:
+  `.deployments/<commit>.json` carries image and database provenance and has no
+  readiness or smoke field, but it is written only after those steps have
+  passed — so a manifest existing for a commit is the evidence that they did,
+  and a failed deployment leaves no manifest rather than a failing one.
 - **Manual operator validation, not recorded anywhere by the updater**: the
   device issue/revoke round trip and a real client request over the SSH tunnel.
   Nothing automates them and nothing fails if they are skipped; they are how an

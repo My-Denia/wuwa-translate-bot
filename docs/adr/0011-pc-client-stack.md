@@ -114,7 +114,13 @@ Build `client/` as a separate project in this repository, with its own
   which are not `keyring` exceptions - is converted into one application error
   at that boundary. A request reports it as an unusable credential; the
   first-run and Settings paths say the token was not stored, or that it may
-  still be stored when forgetting fails.
+  still be stored when forgetting fails. One place deliberately does not
+  propagate it: `has_token()` answers `False` when the vault cannot be read,
+  because the question it is asked ("should the first-run dialog open?") has the
+  same answer either way. The cost is that a vault which is failing rather than
+  empty prompts the owner to enter a credential again, and the underlying
+  failure is not shown at that moment - it surfaces on the next store or
+  request instead.
 - **Environment proxies are not trusted.** The supported address is loopback,
   and httpx would otherwise route the bearer credential through an
   `HTTP_PROXY` that no `NO_PROXY` entry covers.
@@ -156,12 +162,15 @@ separation, the packaging entry point, and widget construction smoke tests.
   virtual environment an operator would, runs the client suite, builds through
   `build.ps1`, and uploads the artifact.
 - The build gates itself: `build.ps1` runs the artifact's own `--self-check`
-  after producing it. That rehearsal imports and constructs everything a normal
-  start does, off-screen, and exits without showing a window, requesting a
-  credential or sending a request. It exists because the first real launch of a
-  successfully built artifact failed on an entry point that could not import
-  its own package, and then on an OpenSSL pair its own `_ssl` could not load.
-  A produced file is not a working program, and CI now says so.
+  after producing it. That rehearsal builds the `QApplication`, installs the
+  qasync loop and constructs the `MainWindow`, off-screen, then exits without
+  showing a window, requesting a credential or sending a request. It exists
+  because the first real launch of a successfully built artifact failed on an
+  entry point that could not import its own package, and then on an OpenSSL pair
+  its own `_ssl` could not load — both of which this catches. It returns before
+  `ensure_credential()`, so the first-run path is **not** rehearsed; a failure
+  confined to that dialog would still reach the owner first. A produced file is
+  not a working program, and CI now says so about the part it can see.
 
 ## Evidence
 

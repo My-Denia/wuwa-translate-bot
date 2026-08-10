@@ -123,8 +123,10 @@ do gate on the owner identity are `/authorize`, `/revoke` and `/status`.
 ## Inbound adapters over one application layer
 
 Telegram and HTTP are UI and transport, not the domain model. Each adapter owns
-its own wording, auth model and delivery mechanics; neither owns translation
-behavior.
+its own wording, auth model and delivery mechanics. Neither the Telegram command
+handlers nor the HTTP API owns translation behavior — they delegate it to the
+application layer. The linked-channel adapter is the exception and owns its own,
+which is why it is called out below rather than folded into "the adapters".
 
 | Adapter | Responsibility | Module |
 |---------|----------------|--------|
