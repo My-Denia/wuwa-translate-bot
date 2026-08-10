@@ -9,15 +9,17 @@ service's response (docs/api/openapi.json).
 from __future__ import annotations
 
 import asyncio
+import ssl
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
 
-from .config import ClientConfig
+from .config import ClientConfig, usable_base_url
 from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
+    ERROR_INSECURE_ENDPOINT,
     ERROR_OFFLINE,
     ERROR_TIMEOUT,
     ERROR_UNAUTHORIZED,
@@ -159,6 +161,85 @@ class MetaResult:
         )
 
 
+def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -> None:
+    """The private test seam may not bring weakened TLS with it.
+
+    `verify=True` below configures the transport this client BUILDS. When one
+    is passed in instead, that argument is ignored by httpx and the injected
+    transport's own SSL configuration is what runs - so
+    `AsyncHTTPTransport(verify=False)` would otherwise slip past a guarantee
+    that says no argument can weaken verification.
+
+    Only two kinds are accepted, by EXACT type:
+
+    * `httpx.MockTransport`, whose handler is a callable supplied by the same
+      test that constructs it; and
+    * `httpx.AsyncHTTPTransport`, whose SSL context this function can read -
+      and which must require a certificate and check the host name.
+
+    Exact types, not `isinstance`, because inspecting an object's attributes
+    proves nothing about what its `handle_async_request` does: a subclass, or
+    any other implementation, can expose a verifying context while sending
+    the request down a connection that verifies nothing. Reading a decoy is
+    worse than reading nothing, so an implementation this function cannot
+    reason about is refused rather than inspected.
+
+    What this does NOT claim: a `MockTransport` handler is arbitrary in-process
+    code and could itself hand the request to something unverified. That is not
+    a hole this function can close, and it is not one worth pretending to -
+    in-process code can already replace anything here. It is bounded instead by
+    scope: the parameter is named `_test_transport`, is not part of this
+    client's interface, is passed by nothing the application ships (grep it),
+    and reaches no configuration file, environment variable or dialog. The
+    guarantee is about what an owner or a configuration can do, not about what
+    code running inside the process can do.
+    """
+    if transport is None or type(transport) is httpx.MockTransport:
+        return
+    if type(transport) is not httpx.AsyncHTTPTransport:
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
+    context = getattr(getattr(transport, "_pool", None), "_ssl_context", None)
+    if (
+        not isinstance(context, ssl.SSLContext)
+        or context.verify_mode is not ssl.CERT_REQUIRED
+        or not context.check_hostname
+    ):
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
+
+
+def _normalized(base_url: object) -> str:
+    """The exact string that is validated is the string that is used.
+
+    `usable_base_url` strips before parsing, so a value with surrounding
+    whitespace is approved in its stripped form; handing httpx the raw one
+    would mean the approved address and the configured address are not the
+    same address.
+    """
+    return base_url.strip() if isinstance(base_url, str) else base_url
+
+
+def _require_confidential_endpoint(base_url: str) -> None:
+    """Refuse an address that would put the device token on the wire in the
+    clear, before the transport exists and before any request is built.
+
+    The check is unconditional: it does not consult a setting, and there is
+    no parameter anywhere in this client that turns it off. It runs here as
+    well as in the settings dialog because this constructor is reachable
+    without that dialog - a hand-edited configuration file, a future caller,
+    a test - and a refusal that only lives in the UI is not a transport
+    guarantee.
+
+    It applies `usable_base_url`, the SAME predicate the settings dialog and
+    the on-disk loader use, rather than the narrower confidentiality rule it
+    contains. The layer closest to the network must not be the most
+    permissive one: embedded credentials, a query or a fragment are refused
+    here too, so an address cannot become acceptable merely by arriving
+    through a different door.
+    """
+    if not usable_base_url(base_url):
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
+
+
 class ApiClient:
     """Bearer-authenticated async client for the wuwaterm HTTP API."""
 
@@ -169,20 +250,32 @@ class ApiClient:
         token_provider: TokenProvider = default_token_provider,
         timeout: float = 10.0,
         translate_timeout: float | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        _test_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        base_url = _normalized(base_url)
+        _require_confidential_endpoint(base_url)
+        _require_verifying_transport(_test_transport)
         self._token_provider = token_provider
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
-            transport=transport,
-            # The supported address is a loopback port on this machine, the
-            # local end of an SSH tunnel. httpx trusts HTTP_PROXY by default,
-            # so a machine with a corporate proxy configured and no NO_PROXY
-            # entry for 127.0.0.1 would send every request - bearer credential
-            # included - to that proxy instead of into the tunnel.
+            transport=_test_transport,
+            # Server certificates are always verified. This is httpx's own
+            # default and is stated here so that removing verification would
+            # have to be a deliberate edit to this line rather than the
+            # silent effect of a flag someone added elsewhere; the client
+            # exposes no setting, argument or environment variable that can
+            # weaken it. It configures the transport this client BUILDS, and
+            # httpx ignores it when one is injected instead - which is why
+            # _require_verifying_transport above vets that case separately.
+            verify=True,
+            # httpx trusts HTTP_PROXY by default, so a machine with a proxy
+            # configured and no NO_PROXY entry for the configured host would
+            # send every request - bearer credential included - to that proxy
+            # instead of to the service. The address the owner configured is
+            # the address this client talks to.
             trust_env=False,
         )
 
@@ -195,6 +288,21 @@ class ApiClient:
         )
 
     def update_base_url(self, base_url: str) -> None:
+        """Point the live client at a new address, or refuse and keep the old.
+
+        Raises ClientError(ERROR_INSECURE_ENDPOINT) rather than switching to
+        an address that is not protected in transit. The previous address
+        stays in effect, so a refusal leaves a working client rather than a
+        half-configured one.
+
+        The address is normalised the same way it was validated. They used to
+        differ: the check strips before parsing, so `" https://host "` passed,
+        and the RAW string then went to httpx - which reads a leading space as
+        the start of a relative URL and silently produced a base address that
+        was not the one approved.
+        """
+        base_url = _normalized(base_url)
+        _require_confidential_endpoint(base_url)
         self._client.base_url = httpx.URL(base_url)
 
     def update_timeouts(self, timeout: float, translate_timeout: float) -> None:

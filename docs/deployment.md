@@ -71,21 +71,61 @@ docker compose -f deploy/docker-compose.yml up -d
 `wuwaterm-api` serves the versioned HTTP surface documented by
 `docs/api/openapi.json`. It adds **no new public surface**: it binds
 `WUWATERM_API_BIND` (default `127.0.0.1`) on `WUWATERM_API_PORT`
-(default `8787`), and the Compose file publishes no ports. The supported way
-for an owner desktop to reach it today is the SSH entry point that already
-exists for operating the host:
+(default `8787`). The service runs with host networking, so a `ports:` list
+would have no effect at all and none is present: what keeps this off the host's
+public interfaces is the bind address, hard-coded in
+`deploy/docker-compose.yml` rather than interpolated from an environment file.
+One other line in that same file can override it — `command:` is passed
+through to the server, which accepts `--host` — so both live where they can
+only be changed in review.
 
-The remote end of the tunnel must be the port that deployment actually
-configured, so read it from the running container rather than assuming the
-default; the local end is your own choice.
+**Remote client access is not available in this topology yet, and this page
+does not describe a way to obtain it.** Following this guide gives you a
+service reachable only from the host itself (loopback) — deliberately, because
+the transport a desktop client will use has not been selected. Until it is,
+the supported uses are the on-host readbacks below and a client running on the
+same machine as a development service. A desktop on another machine has no
+address to configure.
+
+Inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.
+
+When it is selected, a client will reach the service at
+**the configured secure endpoint**: one stable base address, served over TLS,
+which the deployment publishes and routes to this loopback port. The selection is
+made from inspected facts of the target host, is an owner-gated decision, and
+is recorded in the architecture documentation together with its rollback.
+
+Two properties will hold whichever endpoint is selected, and neither is a
+consequence of the network arrangement:
+
+- **The API contract does not encode the network path.** The base address is
+  pure client configuration; moving the service from one endpoint to another
+  changes no request, response or contract byte.
+- **Every `/v1` operation is authenticated at the application layer.**
+  Reaching the endpoint is never sufficient: the device credential below is
+  required on every `/v1` call, so being on the right network is not an
+  authorization. The two probes `GET /healthz` and `GET /readyz` are
+  deliberately unauthenticated (they answer `ok`/`ready` and expose nothing
+  else), as is `GET /openapi.json`; whether those three are reachable from
+  outside the host is part of the endpoint decision, not something the
+  application enforces.
+
+Publishing the API on a public hostname is an ingress decision (DNS, TLS, a
+reverse-proxy route) and is owner-gated: it is not part of this topology
+today, and it is not something a deployment run may introduce on its own.
+
+The port a running container was actually given is an operations fact, so
+read it back from that container rather than assuming the default:
 
 ```bash
-api_port="$(ssh <vps> 'cd /opt/wuwaterm/current && docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT')"
-ssh -N -L "8787:127.0.0.1:${api_port}" <vps>
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
 
-Exposing the API on a public hostname would be a new ingress decision (DNS,
-TLS, a reverse-proxy route) and is deliberately not part of this topology.
+Shell access to the host stays what it has always been: the operator's
+administration channel, used for the deployment and credential commands on
+this page. It is not a path for the desktop client and is never required for
+using it.
 
 ### Device Credentials
 

@@ -107,8 +107,9 @@ SETTINGS_NOT_SAVED_MESSAGE = (
 SETTINGS_INVALID_BASE_URL_TITLE = "Server address"
 SETTINGS_INVALID_BASE_URL_MESSAGE = (
     "That server address cannot be used. Plain http:// is accepted only "
-    "for this machine, which is where an SSH tunnel ends; anything else "
-    "must be https://. For example http://127.0.0.1:8787."
+    "for this machine; every other address must be https://, so that the "
+    "device token is never sent in the clear. For example "
+    "https://example.com/wuwaterm-api or http://127.0.0.1:8787."
 )
 
 CONFIRM_FORGET_TOKEN_TITLE = "Forget device credential"
@@ -149,4 +150,9 @@ ERROR_MSG_INTERNAL = "The service reported an internal error."
 ERROR_MSG_OFFLINE = "Could not reach the server. Check the server address and your connection."
 ERROR_MSG_TIMEOUT = "The request timed out."
 ERROR_MSG_UNKNOWN = "An unexpected error occurred."
+ERROR_MSG_INSECURE_ENDPOINT = (
+    "That server address would send the device token to another machine "
+    "without transport protection, so no request was made. Use an https:// "
+    "address, or http:// only for this machine."
+)
 STATUS_CANCELLED = "Translation cancelled."

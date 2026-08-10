@@ -33,8 +33,8 @@ def qapp():
 def _view(handler) -> TranslateView:
     return TranslateView(
         ApiClient(
-            "http://test",
-            transport=httpx.MockTransport(handler),
+            "https://test",
+            _test_transport=httpx.MockTransport(handler),
             token_provider=lambda: "wtd1.device.secret",
         )
     )

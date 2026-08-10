@@ -6,9 +6,10 @@ The first nine codes below mirror the server's stable error taxonomy
 (docs/api/openapi.json, ErrorDetailBody.code) so the client can branch on the
 same enumerated values the API returns; matching an external wire contract's
 constant names is not translation logic, it is just naming this client's
-side of the same envelope. The last four codes are produced entirely locally
-by this client (transport failures and user-initiated cancellation) and are
-never sent by the server.
+side of the same envelope. The last five codes are produced entirely locally
+by this client (transport failures, user-initiated cancellation, and a
+refusal to send the credential through an address or a transport this client
+will not use) and are never sent by the server.
 """
 
 from __future__ import annotations
@@ -33,6 +34,21 @@ ERROR_OFFLINE = "offline"
 ERROR_TIMEOUT = "timeout"
 ERROR_CANCELLED = "cancelled"
 ERROR_UNKNOWN = "unknown"
+# Raised before any request is sent, in three situations, of which only the
+# first is worded into the message below and only the first is reachable by an
+# owner:
+#   1. the configured address would carry the device token to another machine
+#      without transport protection;
+#   2. the address is protected in transit but is not a usable base address at
+#      all - embedded credentials, a query, a fragment, an unparseable port.
+#      The settings dialog refuses these first with its own precise message,
+#      and ClientConfig.load falls back to the default, so this arm exists to
+#      keep the transport from being the most permissive layer, not to be
+#      seen;
+#   3. a caller-injected transport is not one this client can reason about, or
+#      does not verify server certificates. Unreachable from the UI, from
+#      configuration and from the packaged application.
+ERROR_INSECURE_ENDPOINT = "insecure_endpoint"
 
 MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_UNAUTHORIZED: strings.ERROR_MSG_UNAUTHORIZED,
@@ -48,6 +64,7 @@ MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_TIMEOUT: strings.ERROR_MSG_TIMEOUT,
     ERROR_CANCELLED: strings.STATUS_CANCELLED,
     ERROR_UNKNOWN: strings.ERROR_MSG_UNKNOWN,
+    ERROR_INSECURE_ENDPOINT: strings.ERROR_MSG_INSECURE_ENDPOINT,
 }
 
 

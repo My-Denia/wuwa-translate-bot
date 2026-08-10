@@ -20,9 +20,9 @@ def _client(handler, **kwargs) -> ApiClient:
     transport = httpx.MockTransport(handler)
     token_provider = kwargs.pop("token_provider", lambda: "wtd1.deadbeef.secret")
     return ApiClient(
-        "http://test",
+        "https://test",
         token_provider=token_provider,
-        transport=transport,
+        _test_transport=transport,
         **kwargs,
     )
 
@@ -390,11 +390,11 @@ def test_a_successful_body_missing_fields_becomes_a_client_error() -> None:
 
 
 def test_the_client_does_not_trust_environment_proxies() -> None:
-    """The supported address is the local end of an SSH tunnel.
+    """Requests go to the address the owner configured, and nowhere else.
 
     httpx trusts HTTP_PROXY by default, so a machine with a proxy configured
-    and no NO_PROXY entry for 127.0.0.1 would send every request - bearer
-    credential included - to that proxy instead of into the tunnel.
+    and no NO_PROXY entry for the configured host would send every request -
+    bearer credential included - to that proxy instead of to the service.
     """
     client = ApiClient("http://127.0.0.1:8787")
     try:

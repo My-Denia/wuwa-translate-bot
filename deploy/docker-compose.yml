@@ -24,8 +24,13 @@ services:
 
   # Same image, same read-only terminology database, separate process and
   # separate writable state. It binds loopback only, so the host gains no new
-  # public surface; the owner desktop reaches it through the existing SSH
-  # entry point.
+  # public surface of its own; a desktop client reaches it through the
+  # configured secure endpoint the deployment publishes, and every /v1
+  # operation authenticates the caller's device credential regardless of how
+  # the network path is arranged. The three routes that answer without a
+  # credential - GET /healthz, GET /readyz, GET /openapi.json - are public by
+  # design, so whether they should be reachable from outside the host is part
+  # of the endpoint decision, not something this service enforces.
   #
   # Its state directory is a SIBLING of the bot's, not a child: the bot mounts
   # the whole of ../state read-write, so a child directory would have handed
