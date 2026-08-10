@@ -42,6 +42,8 @@ def build_wheel(
         "wuwaterm_api/app.py": "",
         "wuwaterm_api/auth.py": "",
         "wuwaterm_api/cli.py": "",
+        "wuwaterm_api/errors.py": "",
+        "wuwaterm_api/settings.py": "",
         f"{dist_info}/METADATA": WHEEL_METADATA,
         f"{dist_info}/entry_points.txt": ENTRY_POINTS,
         f"{dist_info}/RECORD": "",
@@ -74,6 +76,8 @@ def build_sdist(
         f"{root}/src/wuwaterm_api/app.py": "",
         f"{root}/src/wuwaterm_api/auth.py": "",
         f"{root}/src/wuwaterm_api/cli.py": "",
+        f"{root}/src/wuwaterm_api/errors.py": "",
+        f"{root}/src/wuwaterm_api/settings.py": "",
     }
     members.update(extra or {})
     for name in omit or set():

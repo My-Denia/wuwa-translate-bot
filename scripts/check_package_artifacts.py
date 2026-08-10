@@ -74,6 +74,8 @@ REQUIRED_WHEEL_MEMBERS = (
     "wuwaterm_api/app.py",
     "wuwaterm_api/auth.py",
     "wuwaterm_api/cli.py",
+    "wuwaterm_api/errors.py",
+    "wuwaterm_api/settings.py",
 )
 REQUIRED_SDIST_MEMBERS = (
     "pyproject.toml",
@@ -86,6 +88,8 @@ REQUIRED_SDIST_MEMBERS = (
     "src/wuwaterm_api/app.py",
     "src/wuwaterm_api/auth.py",
     "src/wuwaterm_api/cli.py",
+    "src/wuwaterm_api/errors.py",
+    "src/wuwaterm_api/settings.py",
 )
 ENTRY_POINT_LINES = (
     "wuwaterm = wuwaterm.cli:main",
