@@ -121,6 +121,10 @@ def test_forbidden_member_reasons():
     assert forbidden_member_reason("data/wutheringdata/README.md")
     assert forbidden_member_reason("vendor/WutheringData/file.json")
     assert forbidden_member_reason("vps.credential.xml")
+    # The desktop client is never published; it must not ride along in a
+    # server distribution if the packaging configuration ever widens.
+    assert forbidden_member_reason("wuwaterm_client/app.py")
+    assert forbidden_member_reason("src/wuwaterm_client/__init__.py")
 
 
 def test_forbidden_member_is_case_insensitive():

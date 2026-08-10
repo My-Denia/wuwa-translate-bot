@@ -1,0 +1,68 @@
+"""Non-secret client settings, persisted as JSON under the per-user app data
+directory.
+
+The device token is never stored here, and never held by this module at
+all: see credentials.py, which is the only place that touches it and keeps
+it exclusively in the OS credential store.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+from pathlib import Path
+
+APP_DIR_NAME = "WuwaTerm"
+CONFIG_FILE_NAME = "config.json"
+
+DEFAULT_BASE_URL = "http://127.0.0.1:8787"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
+DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 60.0
+
+
+def app_data_dir() -> Path:
+    """Per-user app data directory. ``%APPDATA%/WuwaTerm`` on Windows."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / APP_DIR_NAME
+    return Path.home() / ".config" / APP_DIR_NAME
+
+
+def config_path(base_dir: Path | None = None) -> Path:
+    return (base_dir if base_dir is not None else app_data_dir()) / CONFIG_FILE_NAME
+
+
+@dataclasses.dataclass(frozen=True)
+class ClientConfig:
+    base_url: str = DEFAULT_BASE_URL
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    translate_timeout_seconds: float = DEFAULT_TRANSLATE_TIMEOUT_SECONDS
+
+    @classmethod
+    def load(cls, base_dir: Path | None = None) -> "ClientConfig":
+        """Load from disk, falling back to defaults for anything missing,
+        unreadable, malformed, or unrecognized. Never raises."""
+        path = config_path(base_dir)
+        if not path.exists():
+            return cls()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return cls()
+        if not isinstance(raw, dict):
+            return cls()
+        known_fields = {field.name for field in dataclasses.fields(cls)}
+        filtered = {key: value for key, value in raw.items() if key in known_fields}
+        try:
+            return cls(**filtered)
+        except TypeError:
+            return cls()
+
+    def save(self, base_dir: Path | None = None) -> None:
+        path = config_path(base_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dataclasses.asdict(self)
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )

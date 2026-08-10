@@ -40,6 +40,25 @@ does not distribute generated game data or generated SQLite databases.
   instance, its own model concurrency cap (default 2) and its own per-minute
   call budget (default 30).
 
+### Desktop Client (new)
+
+- New `client/` tree: a Windows desktop client for the HTTP adapter, with its
+  own `pyproject.toml` outside `src/` so it is never part of the `wuwaterm`
+  wheel. `scripts/check_package_artifacts.py` fails if `wuwaterm_client` ever
+  appears in a built distribution.
+- It calls the published contract and renders what comes back: plain-text
+  translation with an automatic or forced direction and mid-flight
+  cancellation, dictionary lookup, service status, and the error envelope's
+  stable codes plus the transport states only a client can know (offline,
+  timed out, cancelled). It contains no translation logic and no Telegram
+  concept.
+- One device credential, held only in the Windows Credential Manager, never
+  written to a config file.
+- `client/build.ps1` produces a one-folder PyInstaller build and then runs the
+  artifact's own start-up self-check, so a build that cannot start fails the
+  build. A `windows-latest` CI job runs the client suite, builds through the
+  same script and uploads the artifact.
+
 ### Deployment
 
 - New Compose service `wuwaterm-api` runs the same runtime image with
