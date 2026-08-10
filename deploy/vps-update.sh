@@ -322,12 +322,15 @@ rollback_on_failure() {
     fi
   fi
 
-  # On a host running only the API there is no bot image id to verify the
-  # restored binding against, and passing an empty one would compare the
-  # manifest to nothing at all. Both containers are the same deployment, so
-  # whichever surface this host has is the one that proves it.
-  verify_image_id="$old_image_id"
-  if [ -z "$verify_image_id" ]; then
+  # The binding is verified against a surface that was actually RESTORED. A
+  # stopped bot container can sit on a different image than the running API,
+  # and verifying against the one that stayed down would compare the manifest
+  # to something this rollback never brought back. With nothing restored there
+  # is nothing to verify, and an empty id would compare against nothing at all.
+  verify_image_id=""
+  if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
+    verify_image_id="$old_image_id"
+  elif [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
     verify_image_id="$old_api_image_id"
   fi
   if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ] \

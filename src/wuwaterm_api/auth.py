@@ -192,19 +192,21 @@ class DeviceStore:
         self.path = Path(path)
 
     def initialize(self) -> None:
-        if not self.path.exists():
-            legacy = legacy_store_path(self.path)
-            if legacy is not None and legacy.exists():
-                raise DeviceStoreError(
-                    f"the device store moved from {legacy} to {self.path}, so "
-                    f"the bot's writable state mount can no longer reach it, "
-                    f"and {legacy} still holds the only copy of the verifiers. "
-                    f"Move that file (with any -wal and -shm sidecars) to "
-                    f"{self.path}, or point WUWATERM_API_DEVICE_DB_PATH at it, "
-                    f"before starting. Creating an empty store here would look "
-                    f"like a clean start while every registered device stopped "
-                    f"authenticating"
-                )
+        # Whether or not a store already exists here: an earlier start may
+        # have created an empty one at this path, and two stores is precisely
+        # the state in which nobody can tell which file holds the live
+        # verifiers.
+        legacy = legacy_store_path(self.path)
+        if legacy is not None and legacy.exists():
+            raise DeviceStoreError(
+                f"a device store still exists at {legacy}, the path this "
+                f"service used before its state directory moved out of the "
+                f"bot's writable mount. It now reads {self.path}. Move that "
+                f"file (with any -wal and -shm sidecars) here if it holds the "
+                f"live verifiers, or delete it if this one does, or point "
+                f"WUWATERM_API_DEVICE_DB_PATH at the store you mean. Starting "
+                f"with both in place could refuse every device ever registered"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists()
         with self._connect() as conn:

@@ -1085,6 +1085,22 @@ def test_a_store_left_at_the_old_default_path_is_not_silently_abandoned(tmp_path
     assert not current.exists()
 
 
+def test_a_store_at_both_paths_is_refused_rather_than_guessed(tmp_path):
+    """An earlier start may already have created an empty store here."""
+    legacy = tmp_path / "state" / "api" / "devices.db"
+    legacy.parent.mkdir(parents=True)
+    DeviceStore(legacy).initialize()
+
+    current = tmp_path / "state-api" / "devices.db"
+    current.parent.mkdir(parents=True)
+    current.write_bytes(b"SQLite format 3\x00")
+
+    with pytest.raises(DeviceStoreError) as excinfo:
+        DeviceStore(current).initialize()
+
+    assert str(legacy) in str(excinfo.value)
+
+
 def test_an_explicit_store_path_never_looks_for_the_old_default(tmp_path):
     """Only the default layout ever had the old path."""
     legacy = tmp_path / "state" / "api" / "devices.db"

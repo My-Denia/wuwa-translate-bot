@@ -1308,8 +1308,11 @@ def test_vps_update_keeps_a_rollback_image_per_surface():
         'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"'
         in text[bot_restart:api_restart]
     )
-    # The restored binding is verified against whichever surface this host has.
-    assert 'verify_image_id="$old_image_id"' in text
+    # The restored binding is verified against a surface that was actually
+    # restored, never against one that stayed down on a different image.
+    assert 'verify_image_id=""' in text
+    assert '[ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]' in text
+    assert '[ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]' in text
     assert '--image-id "$verify_image_id"' in text
 
 
