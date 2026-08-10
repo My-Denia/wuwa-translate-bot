@@ -57,35 +57,44 @@ SCANNED_FILES = (
 )
 SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".toml"}
 
-# Two rules, because the two surfaces have different jobs.
+# Two rules, because the two surfaces have different jobs - but ONE source of
+# truth for the forwarding half, so the strict rule is a superset of the
+# lenient one by construction rather than by two lists staying in step.
 #
-# The SHIPPED CLIENT SURFACE may not name the administration channel at all,
-# outside the one allowlisted note: the client does not use it, and a mention
-# there is how the revoked design comes back.
-FORWARDING_TOKENS = re.compile(
-    r"""
-    \bssh\b | \bsshd\b | \bautossh\b       # the administration channel
-    | \btunnel\w*                          # and the design it used to justify
-    | \bport[-\s]?forward\w*
-    | \bLocalForward\b | \bRemoteForward\b
-    | -N\s+-L\b | \bssh\s+-\w*[LDR]\b
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-# The OPERATOR RUNBOOK legitimately names it - the deployment and credential
-# commands are run over it - so only the forwarding half applies there.
-# "Shell access is required to run these commands" must stay sayable;
-# teaching a forwarded port must not.
-FORWARDING_RECIPE_TOKENS = re.compile(
-    r"""
+# Three details that are load-bearing, each of them a hole that was open until
+# a reviewer found it:
+#   * no `\b` after the flag class: `ssh -fNL8787:127.0.0.1:8787` attaches its
+#     argument, and a word boundary after `L` can never match a digit;
+#   * `(?-i:…)` around the flag letters, because the patterns are compiled
+#     IGNORECASE and `-l` (login name), `-d` and `-r` are ordinary flags that
+#     an operator command may carry - `ssh vps 'docker compose … up -d'` must
+#     not be a CI failure;
+#   * both spellings of the prose, since "a forwarded port" and "port
+#     forwarding" are the same instruction written two ways.
+_FORWARDING_RECIPE_SOURCE = r"""
     \btunnel\w* | \bautossh\b
     | \bport[-\s]?forward\w*
     | \bLocalForward\b | \bRemoteForward\b
-    | -N\s+-L\b | \bssh\s+-\w*[LDR]\b
-    | \bssh\b[^\n]*\s-\w*[LDR]\b
+    | (?-i:-N\s+-L)
+    | \bssh\s+-\w*(?-i:[LDR])
+    | \bssh\b[^\n]*\s-\w*(?-i:[LDR])
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
-    """,
+"""
+
+# The OPERATOR RUNBOOK legitimately names the administration channel - the
+# deployment and credential commands are run over it - so only the forwarding
+# half applies there. "Shell access is required to run these commands" must
+# stay sayable; teaching a forwarded port must not.
+FORWARDING_RECIPE_TOKENS = re.compile(
+    _FORWARDING_RECIPE_SOURCE, re.IGNORECASE | re.VERBOSE
+)
+
+# The SHIPPED CLIENT SURFACE may not name the administration channel at all,
+# outside the one allowlisted note: the client does not use it, and a mention
+# there is how the revoked design comes back. Everything the runbook rule
+# catches, this one catches too.
+FORWARDING_TOKENS = re.compile(
+    r"\bssh\b | \bsshd\b |" + _FORWARDING_RECIPE_SOURCE,
     re.IGNORECASE | re.VERBOSE,
 )
 
@@ -109,9 +118,11 @@ ALLOWED_OPERATIONS_NOTES: dict[str, tuple[str, ...]] = {
     ),
     # The runbook's own prohibition sentence: it names the thing in order to
     # forbid it. A gate that made this unsayable would push the next author
-    # towards a vaguer warning.
+    # towards a vaguer warning. It is kept on ONE unwrapped line in the
+    # document, so reflowing the paragraph around it cannot turn a pin into
+    # what looks like a policy violation.
     "docs/deployment.md": (
-        "address to configure, and inventing one here (a forwarded port, an open port,",
+        "> inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.",
     ),
 }
 
@@ -244,6 +255,50 @@ def test_a_command_split_over_a_continuation_is_still_one_command() -> None:
     assert _offending_lines("docs/deployment.md", "ssh -N -L 1:2:3 host \\")
 
 
+RECIPE_SPELLINGS = [
+    "ssh -N -L 8787:127.0.0.1:8787 <vps>",
+    "ssh -fNL 8787:127.0.0.1:8787 <vps>",
+    "ssh -fNL8787:127.0.0.1:8787 <vps>",   # attached argument, valid syntax
+    "ssh -L8787:127.0.0.1:8787 <vps>",
+    "ssh -D 1080 <vps>",
+    "ssh -R 8787:127.0.0.1:8787 <vps>",
+    "autossh -M 0 <vps>",
+    "LocalForward 8787 127.0.0.1:8787",
+    "RemoteForward 8787 127.0.0.1:8787",
+    "set up a port-forward from this computer",
+    "the desktop reaches the service through a forwarded port",
+    "try forwarding the port instead",
+    "With the tunnel open, set the client's server address",
+]
+
+ORDINARY_OPERATOR_COMMANDS = [
+    "SSH access to the host is required to run these deployment commands.",
+    "ssh -l deploy <vps>",
+    "ssh <vps> 'cd /opt/wuwaterm/current && docker compose up -d'",
+    "ssh -p 2222 -i ~/.ssh/deploy_key <vps>",
+    "ssh -o StrictHostKeyChecking=yes <vps>",
+]
+
+
+@pytest.mark.parametrize("line", RECIPE_SPELLINGS)
+def test_every_spelling_of_the_recipe_is_caught_in_both_surfaces(line: str) -> None:
+    """One source for the forwarding half means the strict rule is a superset
+    of the lenient one by construction. Each spelling below is a way the
+    revoked instruction can be written; `ssh -fNL8787:…` is the one that
+    escaped both the pattern and the four literals in the deploy tests."""
+    assert _offending_lines("docs/deployment.md", line + "\n"), line
+    assert _offending_lines("client/README.md", line + "\n"), line
+
+
+@pytest.mark.parametrize("line", ORDINARY_OPERATOR_COMMANDS)
+def test_ordinary_operator_commands_do_not_fail_the_runbook_gate(line: str) -> None:
+    """The whole point of the two-pattern split. `-l`, `-d` and `-r` are
+    ordinary flags, and the patterns are compiled IGNORECASE, so without the
+    scoped-case group these would each have been a CI failure on an accurate
+    sentence."""
+    assert _offending_lines("docs/deployment.md", line + "\n") == [], line
+
+
 def test_the_runbook_may_still_describe_operator_access() -> None:
     """A gate that forbids an accurate operations sentence pushes the next
     author towards a vaguer one. The runbook may name the administration
@@ -288,17 +343,37 @@ def test_the_scanner_catches_the_wording_it_exists_for(line: str) -> None:
     ]
 
 
+def _exempted_occurrences(allowlist: dict[str, tuple[str, ...]]) -> int:
+    """How many LINES in the repository an allowlist actually exempts.
+
+    Not `len(dict)` and not the number of entries: exemption is by text, so
+    one entry exempts every line in that file with that text. Counting what
+    is really exempted is the only number worth pinning - the mechanism's
+    promise is that widening it is a decision, and a duplicate line is a
+    widening nobody had to write down.
+    """
+    total = 0
+    for relative, lines in allowlist.items():
+        present = [
+            line.strip()
+            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        ]
+        for allowed in lines:
+            total += present.count(allowed)
+    return total
+
+
 def test_the_allowlisted_operations_note_is_present_and_singular() -> None:
     """An allowlist that no longer matches anything is dead configuration,
     and an allowlist that grows without review is the hole itself."""
-    # Counted in LINES, not files: one dict key can hold twenty exemptions,
-    # and the promise this mechanism makes is that widening it is a decision.
-    assert sum(len(lines) for lines in ALLOWED_OPERATIONS_NOTES.values()) == 2
     for relative, lines in ALLOWED_OPERATIONS_NOTES.items():
         text = (ROOT / relative).read_text(encoding="utf-8")
         stripped = {line.strip() for line in text.splitlines()}
         for allowed in lines:
             assert allowed in stripped, f"{relative}: {allowed}"
+    # Two exempted lines in the whole repository - counted as occurrences, so
+    # a second copy of an exempted line is a failure and not a free pass.
+    assert _exempted_occurrences(ALLOWED_OPERATIONS_NOTES) == 2
     # Each note says what it is for; without this they could be reduced to a
     # bare mention and still pass.
     assert "not part of this client's path" in (
@@ -432,9 +507,6 @@ def test_the_tls_scan_reaches_the_operator_commands_as_well_as_the_client() -> N
 def test_the_tls_exemptions_still_describe_real_lines() -> None:
     """An exemption whose line is gone is dead configuration, and an
     exemption list that grows without review is the hole itself."""
-    # Lines, not files - see the note on the wording allowlist. Two identical
-    # lines under one key are two exemptions.
-    assert sum(len(lines) for lines in ALLOWED_INSECURE_TLS_LINES.values()) == 2
     for relative, lines in ALLOWED_INSECURE_TLS_LINES.items():
         present = {
             line.strip()
@@ -442,6 +514,10 @@ def test_the_tls_exemptions_still_describe_real_lines() -> None:
         }
         for allowed in lines:
             assert allowed in present, f"{relative}: {allowed}"
+    # Occurrences, not entries: the negative test constructs its unverified
+    # transport twice, and both copies are exempted by the one entry - so the
+    # number that has to be reviewed is three, not two.
+    assert _exempted_occurrences(ALLOWED_INSECURE_TLS_LINES) == 3
 
 
 def test_the_client_asks_httpx_for_verification_in_writing() -> None:
@@ -468,17 +544,20 @@ PROCESS_AND_KEY_TOKENS = re.compile(
 
 
 def _shipped_client_python() -> list[Path]:
-    """Every Python file that ships with the client, artefacts excluded.
+    """The client APPLICATION's Python: what a packaged build executes.
 
-    `client/src` is not all of it: `client/main.py` is the PyInstaller entry
+    `client/src` is not all of it - `client/main.py` is the PyInstaller entry
     point, and a helper started from there would run in exactly the same
-    application.
+    application. `client/tests` is deliberately NOT in it: tests do not ship,
+    and one that shells out to inspect a packaged build should not trip a gate
+    about what the application does.
     """
     tree = ROOT / "client"
     paths = [
         path
         for path in sorted(tree.rglob("*.py"))
         if not _is_generated(path.relative_to(tree).parts[:-1])
+        and "tests" not in path.relative_to(tree).parts[:-1]
     ]
     assert paths, "no client Python found, which would pass vacuously"
     return paths

@@ -208,10 +208,25 @@ def test_the_client_exposes_no_way_to_turn_verification_off() -> None:
     # is. Nothing the application ships passes it.
     assert "transport" not in parameters
     assert "_test_transport" in parameters
-    package_dir = Path(inspect.getfile(ApiClient)).parent
+    # Every Python file the packaged application executes, not just the
+    # package directory: client/main.py is the PyInstaller entry point and
+    # lives outside client/src.
+    client_root = Path(inspect.getfile(ApiClient)).parents[2]
+    assert (client_root / "main.py").is_file(), client_root
+    application = [
+        path
+        for path in client_root.rglob("*.py")
+        if "tests" not in path.relative_to(client_root).parts[:-1]
+        and not any(
+            part in {".venv", "build", "dist", "__pycache__"}
+            or part.endswith(".egg-info")
+            for part in path.relative_to(client_root).parts[:-1]
+        )
+    ]
+    assert len(application) > 1
     callers = sorted(
         path.name
-        for path in package_dir.rglob("*.py")
+        for path in application
         if path.name != "api.py" and "_test_transport" in path.read_text(encoding="utf-8")
     )
     assert callers == [], f"the test seam is used by shipped code: {callers}"
