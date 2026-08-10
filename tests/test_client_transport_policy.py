@@ -62,31 +62,26 @@ SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".to
 # truth for the forwarding half, so the strict rule is a superset of the
 # lenient one by construction rather than by two lists staying in step.
 #
-# Three details that are load-bearing, each of them a hole that was open until
-# a reviewer found it:
-#   * no `\b` after the flag class: `ssh -fNL8787:127.0.0.1:8787` attaches its
-#     argument, and a word boundary after `L` can never match a digit;
-#   * `(?-i:…)` around the flag letters, because the patterns are compiled
-#     IGNORECASE and `-l` (login name), `-d` and `-r` are ordinary flags that
-#     an operator command may carry - `ssh vps 'docker compose … up -d'` must
-#     not be a CI failure;
-#   * a FORWARD-SPEC lookahead after the flag letter, because dropping the
-#     boundary re-opened the same false-positive class from the other side:
-#     `chown -R deploy:deploy`, `cp -R`, `curl -L https://…` and
-#     `-oLogLevel=ERROR` all carry an uppercase L/D/R that forwards nothing;
-#   * the flag scan confined to ssh's own options by PARSING the command line
-#     (see `_ssh_option_sections`), because `ssh <vps> '…'` and
-#     `ssh <vps> curl -L …` carry remote commands whose flags are not ssh's -
-#     while `ssh -L "8787:…"` and `ssh -i "a key" -L 8787:…` quote something
-#     inside ssh's own arguments and must still be caught;
-#   * both spellings of the prose, since "a forwarded port" and "port
-#     forwarding" are the same instruction written two ways.
-# `-L`/`-R` take a colon-separated forward spec - `[bind:]port:host:hostport`,
-# `*:8787:…`, `/tmp/local.sock:/tmp/remote.sock`, `[::1]:8787:…` - so a colon
-# is the shape, not a digit: a socket-to-socket forward has no port in it at
-# all. `-D` takes `[bind:]port`, which always carries a digit. The shapes can
-# be this loose because the parse has already excluded everything that is not
-# an ssh option.
+# A forwarding instruction is written in one of two ways, and they need two
+# different readers:
+#
+#   PROSE - "tunnel", "port-forward", "a forwarded port", `LocalForward` - is
+#   matched anywhere on the line, because it means the same thing wherever it
+#   appears, quoted or not.
+#
+#   A COMMAND is matched by PARSING it (`_ssh_option_flags`). Five rounds of
+#   review went into learning that a regex cannot find where ssh's own
+#   arguments end: the whole line made `ssh <vps> 'chmod -R 755 /opt'` an
+#   offence; blanking quotes lost `ssh -L "8787:…"`; stopping at the first
+#   quote lost `ssh -i "a key" -L 8787:…` and still rejected
+#   `ssh <vps> curl -L https://…`. `ssh -h` states the structure in one line -
+#   `ssh [options] destination [command [argument ...]]` - and reading the
+#   option letters is both simpler and exact. Inside ssh's own options, `-L`,
+#   `-R` and `-D` ARE forwarding whatever their argument looks like, so the
+#   shape rules that used to be needed are gone with the guessing.
+#
+# The shapes below survive for one case only: a line with no `ssh` on it at
+# all, where there is nothing to parse.
 _SPEC_LR = r"(?=\s*\S*:)"
 _SPEC_D = r"(?=\s*\S*\d)"
 
@@ -98,17 +93,8 @@ _RECIPE_PROSE_SOURCE = r"""
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
 """
 
-# Flag forms, read only inside SSH's OWN option section - which is found by
-# PARSING the command line, not by guessing where it ends. `ssh -h` gives the
-# structure: `ssh [options] destination [command [argument ...]]`. Three
-# attempts guessed at that boundary and each got half of it:
-#   * whole line          -> `ssh <vps> 'chmod -R 755 /opt'` was an offence;
-#   * quoted text blanked -> `ssh -L "8787:127.0.0.1:8787" <vps>` was not;
-#   * stop at first quote -> `ssh -i "$HOME/.ssh/deploy key" -L 8787:…` was
-#                            not, and `ssh <vps> curl -L https://…` still was.
-# Walking the tokens costs twenty lines and ends the argument: options and
-# their values are ssh's, everything from the destination on belongs to the
-# far side.
+# Flag forms for a line with no `ssh` command on it to parse - a config-file
+# fragment, a snippet quoted out of context.
 _RECIPE_FLAG_SOURCE = rf"""
     (?-i:-N\s+-L)
     | \s-\w*(?-i:[LR]){_SPEC_LR}
@@ -129,55 +115,76 @@ RECIPE_FLAGS = re.compile(_RECIPE_FLAG_SOURCE, re.IGNORECASE | re.VERBOSE)
 # name.
 CLIENT_SURFACE_ONLY = re.compile(r"\bssh\b | \bsshd\b", re.IGNORECASE | re.VERBOSE)
 
-# Flags that consume the next token as their value, from `ssh -h`. A cluster
-# ending in one of these (`-fNL`) takes a value too; a token with a non-letter
-# in it carries its value attached (`-L8787:…`, `-i~/.ssh/key`).
-_SSH_VALUE_FLAGS = set("bcDEeFIiJLlmOopQRSWw")
+# Flags that consume a value, from `ssh -h` (OpenSSH 9.6: `-B bind_interface`
+# and `-P tag` are in it and were missed once). The value may be the next
+# token or attached to the letter, which is what makes an option cluster
+# readable at all: in `-oLogLevel=ERROR` the `o` takes everything after it, so
+# the `L` in `LogLevel` is part of a VALUE and not a forward.
+_SSH_VALUE_FLAGS = set("BbcDEeFIiJLlmOoPpQRSWw")
+_SSH_FORWARD_FLAGS = set("LRD")
 _SSH_COMMAND = re.compile(r"\bssh\b", re.IGNORECASE)
 
 
-def _ssh_option_sections(line: str) -> list[str]:
-    """The parts of `line` that are SSH's own options.
+def _ssh_tokens(tail: str) -> list[str]:
+    """Shell tokens, with concatenated quoting handled.
 
-    `ssh [options] destination [command [argument ...]]`: the walk keeps
-    option tokens and the values they consume, and stops at the first token
-    that is neither - the destination. Everything after that runs on the far
-    side and its flags are not ssh's.
+    `-oProxyCommand="ssh jump nc %h %p"` is ONE argument: the quote starts
+    mid-token. POSIX mode joins adjacent quoted and unquoted segments, which
+    non-POSIX mode does not - and getting that wrong made the walk mistake
+    `jump` for the destination and miss the forward after it.
     """
-    sections: list[str] = []
+    try:
+        return shlex.split(tail, posix=True)
+    except ValueError:
+        # An unbalanced quote is not a command; fall back to a plain split
+        # rather than dropping the line from the scan entirely.
+        return tail.split()
+
+
+def _ssh_option_flags(line: str) -> set[str]:
+    """The option LETTERS that ssh itself is given on this line.
+
+    `ssh [options] destination [command [argument ...]]`. The walk reads
+    option tokens letter by letter and stops a token at the first
+    value-taking letter, because everything after that letter is its value;
+    it stops the whole section at the first token that is not an option and
+    is not a value, because that is the destination and what follows runs on
+    the far side.
+
+    Returning LETTERS rather than text is what removes the last guess: inside
+    ssh's own options, `-L`, `-R` and `-D` are forwarding flags whatever their
+    argument looks like, so a socket-to-socket forward and a bare `-R 1080`
+    need no shape rule at all.
+    """
+    flags: set[str] = set()
     for match in _SSH_COMMAND.finditer(line):
-        tail = line[match.end():]
-        try:
-            tokens = shlex.split(tail, posix=False)
-        except ValueError:
-            # An unbalanced quote is not a command; fall back to a plain split
-            # rather than dropping the line from the scan entirely.
-            tokens = tail.split()
-        kept: list[str] = []
         expect_value = False
-        for token in tokens:
+        for token in _ssh_tokens(line[match.end():]):
             if expect_value:
-                kept.append(token)
                 expect_value = False
                 continue
             if not token.startswith("-") or token == "-":
                 break  # the destination
-            kept.append(token)
-            letters = token[1:]
-            if letters.isalpha() and letters[-1] in _SSH_VALUE_FLAGS:
-                expect_value = True
-        sections.append(" " + " ".join(kept))
-    return sections
+            for index, letter in enumerate(token[1:], start=1):
+                if not letter.isalpha():
+                    break
+                flags.add(letter)
+                if letter in _SSH_VALUE_FLAGS:
+                    # The rest of this token, or the next one, is its value.
+                    expect_value = index == len(token) - 1
+                    break
+    return flags
 
 
 def _forwarding_hit(line: str, *, strict: bool) -> bool:
     """Prose anywhere on the line; flags only in SSH's own option section."""
     if RECIPE_PROSE.search(line):
         return True
-    if any(RECIPE_FLAGS.search(section) for section in _ssh_option_sections(line)):
-        return True
-    # A config-file forward has no `ssh` on the line at all.
-    if RECIPE_FLAGS.search(line) and not _SSH_COMMAND.search(line):
+    if _SSH_COMMAND.search(line):
+        if _ssh_option_flags(line) & _SSH_FORWARD_FLAGS:
+            return True
+    elif RECIPE_FLAGS.search(line):
+        # A config-file forward has no `ssh` on the line at all.
         return True
     return bool(strict and CLIENT_SURFACE_ONLY.search(line))
 
@@ -352,6 +359,11 @@ RECIPE_SPELLINGS = [
     "ssh -D [::1]:1080 <vps>",                         # dynamic, IPv6 bind
     'ssh -i "$HOME/.ssh/deploy key" -L 8787:127.0.0.1:8787 <vps>',  # quoted option value
     "ssh -N -f -L 8787:127.0.0.1:8787 <vps>",          # forward after other flags
+    "ssh -B lo -L 8787:127.0.0.1:8787 <vps>",          # -B takes a value
+    "ssh -P tag -L 8787:127.0.0.1:8787 <vps>",         # so does -P
+    'ssh -oProxyCommand="ssh jump nc %h %p" -L 8787:127.0.0.1:8787 <vps>',
+    "ssh -R 1080 <vps>",                               # remote dynamic forward
+    "ssh -R /tmp/remote.sock <vps>",                   # remote socket forward
     "set up a port-forward from this computer",
     "the desktop reaches the service through a forwarded port",
     "try forwarding the port instead",
@@ -438,6 +450,11 @@ def test_the_runbook_may_still_describe_operator_access() -> None:
     "ssh -D [::1]:1080 <vps>",                         # dynamic, IPv6 bind
     'ssh -i "$HOME/.ssh/deploy key" -L 8787:127.0.0.1:8787 <vps>',  # quoted option value
     "ssh -N -f -L 8787:127.0.0.1:8787 <vps>",          # forward after other flags
+    "ssh -B lo -L 8787:127.0.0.1:8787 <vps>",          # -B takes a value
+    "ssh -P tag -L 8787:127.0.0.1:8787 <vps>",         # so does -P
+    'ssh -oProxyCommand="ssh jump nc %h %p" -L 8787:127.0.0.1:8787 <vps>',
+    "ssh -R 1080 <vps>",                               # remote dynamic forward
+    "ssh -R /tmp/remote.sock <vps>",                   # remote socket forward
     "set up a port-forward from this computer",
         "LocalForward 8787 127.0.0.1:8787",
     ],
@@ -516,7 +533,11 @@ INSECURE_TLS = re.compile(
     | VERIFY_NONE
     | _create_unverified_context
     | _create_default_https_context\s*=
-    | curl\s+(-\w*k\b|--insecure)
+    | create_default_context\s*=\s*\w*_create_unverified
+    # `-k` anywhere in a short-option cluster: `curl -ksS`, `curl -kL`. The
+    # lookbehind keeps `--key` out, which is a different option entirely.
+    | curl[^\n]*(?<![-\w])-[a-zA-Z]*k[a-zA-Z]*\b
+    | curl[^\n]*--insecure\b
     """,
     re.VERBOSE,
 )
@@ -655,7 +676,10 @@ def test_the_client_asks_httpx_for_verification_in_writing() -> None:
 PROCESS_AND_KEY_TOKENS = re.compile(
     r"""
     \bimport\s+subprocess\b | \bfrom\s+subprocess\s+import\b
-    | \bos\.system\b | \bos\.exec\w*\b | \bos\.spawn\w*\b
+    | \bsubprocess\.\w+ | \bPopen\s*\(
+    | \bos\.system\b | \bos\.exec\w*\b | \bos\.spawn\w*\b | \bos\.popen\b
+    | \bcreate_subprocess_(exec|shell)\b
+    | \bimport\s+multiprocessing\b | \bpty\.spawn\b
     | \bimport\s+paramiko\b | \bimport\s+asyncssh\b | \bimport\s+fabric\b
     | \bQProcess\b
     | \bid_rsa\b | \bid_ed25519\b | \bknown_hosts\b | \bPRIVATE\s+KEY\b
