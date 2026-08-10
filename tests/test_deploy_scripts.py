@@ -608,6 +608,11 @@ def deploy_harness(tmp_path):
         "echo \"docker $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         # Fail only the SECOND stop: the deployment's own stop must succeed so
         # the run reaches the rollback whose stop is under test.
+        "if [ \"${FAKE_ALL_STOPS_FAIL:-0}\" = 1 ]; then\n"
+        "  case \"$*\" in\n"
+        "    *' stop '*) exit 1 ;;\n"
+        "  esac\n"
+        "fi\n"
         "if [ \"${FAKE_ROLLBACK_STOP_FAILURE:-0}\" = 1 ]; then\n"
         "  case \"$*\" in\n"
         "    *' stop '*)\n"
@@ -1206,6 +1211,39 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     assert not [line for line in between if "up -d" in line], between
 
 
+def test_vps_update_reports_a_failed_stop_before_the_database_moves(
+    deploy_harness,
+):
+    """A combined stop can fail after stopping one of the two surfaces.
+
+    `compose stop wuwaterm wuwaterm-api` is one command over two containers.
+    If the transition were recorded only after it returned, a partial failure
+    would leave the previously running bot down while the rollback concluded
+    that nothing had been touched, and said nothing about it.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    env["FAKE_ALL_STOPS_FAIL"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "could not be stopped" in result.stderr
+    assert "manual recovery is required" in result.stderr
+    # The database never moved, because the stop is what precedes promotion.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+
+
 def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
     deploy_harness,
 ):
@@ -1231,7 +1269,7 @@ def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
     )
 
     assert result.returncode == 97, result.stdout + result.stderr
-    assert "may still be serving" in result.stderr
+    assert "could not be stopped" in result.stderr
     assert "manual recovery is required" in result.stderr
     # The promoted database is still the promoted one: nothing was reverted
     # underneath a container that may still be reading it.

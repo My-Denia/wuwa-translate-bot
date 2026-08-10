@@ -200,13 +200,13 @@ rollback_on_failure() {
     fi
   fi
 
-  # If a replacement container may still be serving, rolling the database back
-  # underneath it would CREATE the mixed binding instead of preventing it. The
-  # promoted database and pointer are consistent with the code that is running,
-  # so they are left exactly as they are and the operator is told to intervene.
+  # If a container may still be serving, rolling the database back underneath
+  # it would CREATE the mixed binding instead of preventing it. Whatever the
+  # database and pointer currently are, they match the code that is running, so
+  # they are left exactly as they are and the operator is told to intervene.
   if [ "$containers_quiesced" -eq 0 ]; then
-    echo "warning: a replacement container may still be serving; the promoted" >&2
-    echo "database and commit pointer are left in place and nothing is" >&2
+    echo "warning: a serving container could not be stopped; the database and" >&2
+    echo "commit pointer are left exactly as they are and nothing is" >&2
     echo "restarted. Stop both containers by hand, then roll back." >&2
     echo "warning: rollback completed with errors; manual recovery is required" >&2
     exit "$status"
@@ -311,8 +311,13 @@ trap rollback_on_failure EXIT
 # Candidate DB and immutable image are both verified before this stop. Both
 # surfaces mount the same terminology database read-only, so both must be down
 # while it is replaced.
-compose stop wuwaterm wuwaterm-api
+#
+# The transition is recorded BEFORE the command, for the same reason
+# db_promoted is: a combined stop that fails partway may already have stopped
+# one surface, and a rollback that believes nothing was touched would leave the
+# previously running bot down without saying so.
 runtime_stopped=1
+compose stop wuwaterm wuwaterm-api
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
   --source "$candidate_path" --destination "$db_path"
