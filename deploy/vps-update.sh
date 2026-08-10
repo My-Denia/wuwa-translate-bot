@@ -95,6 +95,10 @@ old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null ||
 if [ -n "$old_image_id" ]; then
   docker image tag "$old_image_id" "$rollback_image_ref"
 fi
+# The api container runs the same image as the bot. Record it separately so a
+# host still on a pre-api deployment (empty value) is handled without
+# pretending the container ever existed.
+old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 
 # The builder tag is intentionally local and mutable, so rebuild it from the
 # verified clean source checkout before any data command. Reusing a builder
@@ -231,15 +235,23 @@ rollback_on_failure() {
           echo "warning: old runtime image could not be restarted" >&2
           rollback_failed=1
         fi
+        # Only bring the api surface back if this host was already running it.
+        if [ -n "$old_api_image_id" ]; then
+          if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+            compose up -d --no-build --force-recreate wuwaterm-api; then
+            echo "warning: old api image could not be restarted" >&2
+            rollback_failed=1
+          fi
+        fi
       else
         echo "warning: refusing to restart old runtime without its database" >&2
         rollback_failed=1
-        if ! compose stop wuwaterm >/dev/null 2>&1; then
+        if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
           echo "warning: replacement runtime could not be stopped" >&2
         fi
       fi
     else
-      if ! compose stop wuwaterm >/dev/null 2>&1; then
+      if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
         echo "warning: replacement runtime could not be stopped" >&2
         rollback_failed=1
       fi
@@ -268,8 +280,10 @@ rollback_on_failure() {
 }
 trap rollback_on_failure EXIT
 
-# Candidate DB and immutable image are both verified before this stop.
-compose stop wuwaterm
+# Candidate DB and immutable image are both verified before this stop. Both
+# surfaces mount the same terminology database read-only, so both must be down
+# while it is replaced.
+compose stop wuwaterm wuwaterm-api
 runtime_stopped=1
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
@@ -305,15 +319,24 @@ done
 fail_if state
 
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose up -d --no-build \
-  --force-recreate wuwaterm
+  --force-recreate wuwaterm wuwaterm-api
 fail_if start
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
   -e TELEGRAM_TEST_CHAT_ID= wuwaterm python scripts/deploy_smoke.py
+# The api surface binds loopback only, so its smoke runs inside its own
+# container and needs nothing exposed to the host.
+WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T wuwaterm-api \
+  python -c "import os, sys, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); response = urllib.request.urlopen('http://127.0.0.1:' + port + '/healthz', timeout=10); sys.exit(0 if response.status == 200 else 1)"
 fail_if smoke
 
 running_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot)"
 if [ "$running_image_id" != "$image_id" ]; then
   echo "running container image does not match validated image" >&2
+  exit 1
+fi
+running_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
+if [ "$running_api_image_id" != "$image_id" ]; then
+  echo "running api container image does not match validated image" >&2
   exit 1
 fi
 
@@ -348,6 +371,8 @@ trap - EXIT
 
 echo "deployment source commit: $source_commit"
 echo "deployment image id: $image_id"
+echo "deployment bot container image id: $running_image_id"
+echo "deployment api container image id: $running_api_image_id"
 echo "deployment image digest: $image_digest"
 echo "deployment database sha256: $db_hash"
 echo "deployment manifest: $manifest_path"

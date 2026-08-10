@@ -40,6 +40,23 @@ does not distribute generated game data or generated SQLite databases.
   instance, its own model concurrency cap (default 2) and its own per-minute
   call budget (default 30).
 
+### Deployment
+
+- New Compose service `wuwaterm-api` runs the same runtime image with
+  `command: ["api"]`, mounts the terminology database read-only and keeps its
+  own writable `state/api/`. It binds loopback only and publishes no ports, so
+  the host gains no new public surface; an owner desktop reaches it through the
+  existing SSH entry point.
+- The runtime entry point accepts `bot`, `api` and `device` and still exits 64
+  for every data-build command. CI asserts both halves.
+- `deploy/vps-update.sh` now stops, restarts, smokes and reads back BOTH
+  serving containers, and its rollback restores the API surface only on hosts
+  that were already running it. The API smoke runs inside its own container
+  over loopback, so nothing has to be exposed to run it.
+- `scripts/check_non_goals.py` skips nested virtual environments and build
+  output at any depth, so a per-component venv cannot drown the product gate in
+  third-party matches.
+
 ## 0.2.1 - 2026-08-06
 
 Maintenance release packaging post-v0.2.0 production hardening already merged

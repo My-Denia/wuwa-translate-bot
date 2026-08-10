@@ -313,9 +313,12 @@ def test_builder_entrypoint_preserves_fallback_command():
     assert result.stdout == "ok"
 
 
-def test_runtime_entrypoint_rejects_data_builder_commands():
+@pytest.mark.parametrize(
+    "command", ["refresh-data", "build-db", "verify-db", "shell", "python"]
+)
+def test_runtime_entrypoint_rejects_data_builder_commands(command: str):
     result = subprocess.run(
-        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), "refresh-data"],
+        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), command],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -324,7 +327,19 @@ def test_runtime_entrypoint_rejects_data_builder_commands():
     )
 
     assert result.returncode == 64
-    assert "runtime image only supports" in result.stderr
+    assert "use the builder image for data commands" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [("api", "wuwaterm_api.cli serve"), ("device", "wuwaterm_api.cli device")],
+)
+def test_runtime_entrypoint_serves_the_api_surfaces(command: str, expected: str):
+    """The runtime image runs both inbound surfaces, and only those."""
+    text = (ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert f"exec python -m {expected}" in text
+    assert f"  {command})" in text
 
 
 def test_env_examples_are_byte_identical():
@@ -371,7 +386,7 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
 
     assert "FROM python-base AS runtime" in text
     assert "FROM python-base AS builder" in text
-    assert "uv sync --locked --no-dev --no-editable --no-cache" in text
+    assert "uv sync --locked --no-dev --no-editable --extra api --no-cache" in text
     assert "uv sync --locked --no-dev --no-editable --extra build --no-cache" in text
     runtime_section = text.split("FROM python-base AS runtime", 1)[1].split(
         "FROM python-base AS builder", 1
@@ -379,6 +394,9 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
     builder_section = text.split("FROM python-base AS builder", 1)[1]
     assert "git" not in runtime_section
     assert "--extra build" not in runtime_section
+    # The serving surface needs its own extra; the builder path must stay out.
+    assert "--extra api" in runtime_section
+    assert "--extra api" not in builder_section
     assert "apt-get install -y --no-install-recommends git ca-certificates" in builder_section
     assert "deploy/entrypoint.sh" in runtime_section
     assert "deploy/builder-entrypoint.sh" in builder_section
@@ -986,3 +1004,89 @@ def test_vps_update_does_not_promote_candidate_rejected_by_real_verifier(
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+
+
+def test_compose_api_service_is_loopback_only_with_separate_state():
+    """The api container adds no public surface and no writable game data."""
+    text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "  wuwaterm-api:" in text
+    api_section = text.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    assert "container_name: wuwaterm-api" in api_section
+    assert 'command: ["api"]' in api_section
+    assert "target: runtime" in api_section
+    assert "network_mode: host" in api_section
+    assert "restart: unless-stopped" in api_section
+    # Same terminology database, read-only; its own writable state directory.
+    assert "../data:/app/data:ro" in api_section
+    assert "../state/api:/app/state-api" in api_section
+    assert "WUWATERM_API_STATE_DIR: /app/state-api" in api_section
+    # Loopback default, and no published ports anywhere in the file.
+    assert "WUWATERM_API_BIND: ${WUWATERM_API_BIND:-127.0.0.1}" in api_section
+    assert "ports:" not in text
+    # It must not be able to write the chat state the bot owns.
+    assert "/app/state\n" not in api_section
+
+
+def test_env_example_covers_the_api_surface():
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for name in (
+        "WUWATERM_API_BIND=127.0.0.1",
+        "WUWATERM_API_PORT=8787",
+        "WUWATERM_API_STATE_DIR=state/api",
+        "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
+        "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
+        "WUWATERM_API_RATE_LIMIT_PER_MINUTE=30",
+        "WUWATERM_API_MAX_BODY_BYTES=32768",
+        "WUWATERM_API_REQUEST_TIMEOUT_SECONDS=90",
+    ):
+        assert name in text, name
+    # The per-process nature of the budgets must be stated where they are set.
+    assert "per process" in text
+
+
+def test_vps_update_manages_both_surfaces_together():
+    """Both containers share the terminology database, so both move together."""
+    text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    # Down before the shared read-only database is replaced.
+    assert "compose stop wuwaterm wuwaterm-api" in text
+    # Up together, from the same validated image.
+    assert "--force-recreate wuwaterm wuwaterm-api" in text
+    # Smoked in-container over loopback, so nothing has to be exposed.
+    assert "compose exec -T wuwaterm-api" in text
+    assert "/healthz" in text
+    # Read back separately, and both must match the validated image id.
+    assert "running_api_image_id=" in text
+    assert "running api container image does not match validated image" in text
+    # Rollback restores the api surface only when the host was running it.
+    assert 'if [ -n "$old_api_image_id" ]; then' in text
+    assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
+
+
+def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
+    root, env, _old_hash, _new_hash = deploy_harness
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_log = (root / "docker.log").read_text(encoding="utf-8")
+    stop_lines = [
+        line for line in docker_log.splitlines() if "stop wuwaterm" in line
+    ]
+    assert stop_lines
+    assert all("wuwaterm-api" in line for line in stop_lines), stop_lines
+    up_lines = [line for line in docker_log.splitlines() if "up -d" in line]
+    assert up_lines
+    assert all("wuwaterm-api" in line for line in up_lines), up_lines
+    assert "exec -T wuwaterm-api" in docker_log
+    assert "deployment api container image id:" in result.stdout

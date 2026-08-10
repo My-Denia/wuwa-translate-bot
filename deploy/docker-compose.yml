@@ -22,6 +22,33 @@ services:
       - ../state:/app/state
     command: ["bot"]
 
+  # Same image, same read-only terminology database, separate process and
+  # separate writable state. It binds loopback only, so the host gains no new
+  # public surface; the owner desktop reaches it through the existing SSH
+  # entry point.
+  wuwaterm-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:-unknown}
+    image: ${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}
+    container_name: wuwaterm-api
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ../.env
+    environment:
+      WUWATERM_DB_PATH: /app/data/terms.db
+      WUWATERM_API_STATE_DIR: /app/state-api
+      WUWATERM_API_BIND: ${WUWATERM_API_BIND:-127.0.0.1}
+      WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8787}
+    volumes:
+      - ../data:/app/data:ro
+      - ../state/api:/app/state-api
+    command: ["api"]
+
   wuwaterm-builder:
     profiles: ["builder"]
     build:

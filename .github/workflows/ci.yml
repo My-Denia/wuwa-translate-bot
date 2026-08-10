@@ -84,11 +84,18 @@ jobs:
           rm .env
       - run: docker build -f deploy/Dockerfile --target runtime -t wuwaterm-runtime:ci .
       - run: docker build -f deploy/Dockerfile --target builder -t wuwaterm-builder:ci .
-      - name: Runtime image refuses non-bot commands
+      - name: Runtime image refuses data-build commands
         run: |
-          status=0
-          docker run --rm wuwaterm-runtime:ci build-db || status=$?
-          test "$status" -eq 64
+          for forbidden in build-db refresh-data verify-db; do
+            status=0
+            docker run --rm wuwaterm-runtime:ci "$forbidden" || status=$?
+            test "$status" -eq 64
+          done
+      - name: Runtime image serves both inbound surfaces
+        run: |
+          docker run --rm --entrypoint sh wuwaterm-runtime:ci -c 'python -c "import wuwaterm.bot, wuwaterm_api.app"'
+          docker run --rm wuwaterm-runtime:ci api --help >/dev/null
+          docker run --rm wuwaterm-runtime:ci device list >/dev/null
       - name: Runtime image excludes builder tooling; builder retains git
         run: |
           docker run --rm --entrypoint sh wuwaterm-runtime:ci -c '! command -v git && ! command -v uv && ! command -v uvx'
