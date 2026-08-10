@@ -341,23 +341,6 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
-def _verify_credential(slots, store: DeviceStore, token: str):
-    """Verify one credential and release the admission slot when done.
-
-    The slot is acquired WITHOUT blocking, before this worker is scheduled (see
-    :func:`authenticated_device`): the deliberately expensive scrypt check
-    happens before any per-device limit can apply, so it must never queue, or
-    the check itself becomes the load. It is released here, inside the worker,
-    so an awaiting request that is cancelled — by the time budget, or by a
-    client that walked away — cannot leave a slot behind, because the thread
-    always runs to completion.
-    """
-    try:
-        return store.authenticate(token)
-    finally:
-        slots.release()
-
-
 async def _require_active_device(request: Request, device: Device) -> None:
     """Refuse if the device was revoked while this request was in flight.
 
@@ -365,7 +348,8 @@ async def _require_active_device(request: Request, device: Device) -> None:
     after it but before an expensive call or before the response would
     otherwise be served on a credential that is no longer valid. This is a
     cheap read run at the TOCTOU seams: before the model call and before
-    returning.
+    returning. It NARROWS the window best-effort; it does not close it — a
+    revocation that commits after this read is still served.
     """
     active = await asyncio.to_thread(
         request.app.state.device_store.is_active, device.device_id
@@ -403,7 +387,17 @@ async def authenticated_device(
             _request_id(request),
         )
         raise ApiError(ERROR_RATE_LIMITED)
-    device = await asyncio.to_thread(_verify_credential, slots, store, token)
+    # The slot is owned by THIS coroutine and released here, on the loop, not
+    # inside the worker: if the awaiting task is cancelled (time budget, client
+    # disconnect) while the to_thread job is still QUEUED on a saturated
+    # executor, the worker never runs — so a worker-side release would leak the
+    # slot permanently and wedge every later request into 429. store.authenticate
+    # touches no shared lock, so releasing while a started worker finishes only
+    # relaxes the bound briefly; it never double-releases or strands a slot.
+    try:
+        device = await asyncio.to_thread(store.authenticate, token)
+    finally:
+        slots.release()
     if device is None:
         LOGGER.info(
             "auth rejected path=%s request_id=%s",

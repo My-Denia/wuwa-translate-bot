@@ -32,7 +32,11 @@ def validate_loopback_bind(value: str) -> str:
       never by resolution, is accepted.
 
     The offending value is not echoed: settings never reflect a raw environment
-    value back, and the fix is the same regardless of what was set.
+    value back, and the fix is the same regardless of what was set. The returned
+    value is the NORMALIZED literal (``str(address)``) so the accepted value is
+    the one that actually binds: brackets are URL syntax, not host syntax, and
+    ``uvicorn.run(host="[::1]")`` raises at bind time, so ``[::1]`` is returned
+    as ``::1`` and surrounding whitespace is dropped.
     """
     candidate = (value or "").strip()
     host = (
@@ -52,7 +56,7 @@ def validate_loopback_bind(value: str) -> str:
             "the API bind must be a loopback address such as 127.0.0.1 or ::1; "
             "binding any other interface would expose this single-owner surface"
         )
-    return candidate
+    return str(address)
 
 
 DEFAULT_BIND = "127.0.0.1"
@@ -76,11 +80,6 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
 # many of those can run at once so an unauthenticated caller cannot turn the
 # credential check itself into the load.
 DEFAULT_AUTH_MAX_CONCURRENCY = 2
-# A total in-flight request ceiling handed to uvicorn. The bounded auth
-# executor already sheds credential-verification load; this is the coarser
-# belt-and-suspenders that stops any request class from opening unbounded
-# concurrent work on the single shared worker pool.
-DEFAULT_MAX_CONCURRENT_REQUESTS = 64
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -133,7 +132,6 @@ class ApiSettings:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
-    max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -195,11 +193,5 @@ class ApiSettings:
                 DEFAULT_AUTH_MAX_CONCURRENCY,
                 minimum=1,
                 maximum=64,
-            ),
-            max_concurrent_requests=_env_int(
-                "WUWATERM_API_MAX_CONCURRENT_REQUESTS",
-                DEFAULT_MAX_CONCURRENT_REQUESTS,
-                minimum=1,
-                maximum=4096,
             ),
         )

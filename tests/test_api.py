@@ -1206,7 +1206,9 @@ def test_credential_verification_is_bounded_before_any_device_limit(
     # Non-queuing admission: an admitted attempt is rejected as a bad
     # credential (401); an attempt that found the verifier full is shed (429).
     # Either way the expensive check itself never runs more than the bound.
-    assert {item.status_code for item in responses} <= {401, 429}
+    # `401 in` guards against the vacuous all-429 case (verification never ran).
+    statuses = {item.status_code for item in responses}
+    assert 401 in statuses and statuses <= {401, 429}, statuses
     assert state["peak"] == 1, state["peak"]
 
 
@@ -1343,6 +1345,54 @@ def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_
     assert recovered.status_code == 200
 
 
+def test_admission_slot_is_released_if_verification_is_cancelled_before_it_runs(
+    tmp_path, sample_db, monkeypatch
+):
+    """The admission slot must be released on the loop, not only in the worker.
+
+    If the to_thread verification job is cancelled while still QUEUED on a
+    saturated executor, the worker never runs — so releasing only inside the
+    worker would leak the slot permanently and wedge every later request into
+    429. Here `to_thread` is cancelled before the worker callable runs, exactly
+    that case, and the slot must still be reacquirable afterwards.
+    """
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    import wuwaterm_api.app as appmod
+
+    app, store = build_client_app(tmp_path, sample_db, auth_max_concurrency=1)
+    _, token = issue_device(store, "owner desktop")
+
+    class _Url:
+        path = "/v1/translations"
+
+    class _State:
+        pass
+
+    class _Req:
+        def __init__(self, app):
+            self.app = app
+            self.url = _Url()
+            self.state = _State()
+
+    async def cancel_before_worker(func, *args, **kwargs):
+        # The awaiting task is cancelled before the queued worker starts.
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(appmod.asyncio, "to_thread", cancel_before_worker)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            await appmod.authenticated_device(_Req(app), creds)
+
+    run(scenario())
+
+    # The slot survived the cancelled-before-it-ran verification.
+    assert app.state.auth_slots.acquire(blocking=False)
+    app.state.auth_slots.release()
+
+
 # --------------------------------------------------------------------------
 # Hardening fixes (gpt5.6 safety critic): loopback bind, auth admission,
 # revocation TOCTOU
@@ -1350,11 +1400,19 @@ def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_
 
 
 def test_validate_loopback_bind_accepts_only_numeric_loopback():
-    """A numeric loopback literal is required; everything else is refused."""
+    """A numeric loopback literal is required; everything else is refused.
+
+    The returned value is the NORMALIZED literal that actually binds — brackets
+    and surrounding whitespace are stripped — so an accepted value can never be
+    one uvicorn then rejects at bind time.
+    """
     from wuwaterm_api.settings import validate_loopback_bind
 
-    for good in ("127.0.0.1", "127.255.255.254", "::1", "[::1]", " 127.0.0.1 "):
-        assert validate_loopback_bind(good).strip() == good.strip()
+    assert validate_loopback_bind("127.0.0.1") == "127.0.0.1"
+    assert validate_loopback_bind("127.255.255.254") == "127.255.255.254"
+    assert validate_loopback_bind("::1") == "::1"
+    assert validate_loopback_bind("[::1]") == "::1"
+    assert validate_loopback_bind(" 127.0.0.1 ") == "127.0.0.1"
     for bad in (
         "0.0.0.0",
         "::",
@@ -1391,9 +1449,8 @@ def test_serve_refuses_a_non_loopback_host_override(monkeypatch):
     assert "kw" not in called  # never reached uvicorn.run
 
 
-def test_serve_binds_loopback_with_a_concurrency_limit(monkeypatch):
-    """The happy path binds the validated loopback bind and hands uvicorn an
-    explicit total in-flight ceiling."""
+def test_serve_binds_the_validated_loopback_host(monkeypatch):
+    """The happy path binds the validated loopback bind."""
     import types
 
     import wuwaterm_api.cli as cli
@@ -1409,7 +1466,6 @@ def test_serve_binds_loopback_with_a_concurrency_limit(monkeypatch):
 
     assert cli.main(["serve"]) == 0
     assert captured["host"] == "127.0.0.1"
-    assert captured["limit_concurrency"] == 64
 
 
 def test_auth_admission_sheds_load_when_the_verifier_is_full(tmp_path, sample_db):

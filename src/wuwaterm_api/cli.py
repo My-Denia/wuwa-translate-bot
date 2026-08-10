@@ -49,11 +49,6 @@ def _serve(args: argparse.Namespace) -> int:
         port=args.port or settings.port,
         log_level=args.log_level,
         access_log=False,
-        # A total in-flight ceiling so no request class can open unbounded
-        # concurrent work on the shared worker pool. The bounded auth executor
-        # sheds credential-verification load specifically; this is the coarser
-        # bound over everything.
-        limit_concurrency=settings.max_concurrent_requests,
     )
     return 0
 
