@@ -97,8 +97,13 @@ if [ -n "$old_image_id" ]; then
 fi
 # The api container runs the same image as the bot. Record it separately so a
 # host still on a pre-api deployment (empty value) is handled without
-# pretending the container ever existed.
+# pretending the container ever existed. Existence is not enough: a container
+# left stopped by an earlier failed upgrade, or stopped deliberately by the
+# operator, still answers `docker inspect`. Rollback restores the state this
+# deployment found, so what it needs to know is whether the surface was
+# RUNNING.
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
+old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
 
 # The builder tag is intentionally local and mutable, so rebuild it from the
 # verified clean source checkout before any data command. Reusing a builder
@@ -235,11 +240,13 @@ rollback_on_failure() {
           echo "warning: old runtime image could not be restarted" >&2
           rollback_failed=1
         fi
-        # Only bring the api surface back if this host was already running it.
-        # On a first upgrade there is nothing to restore, but the replacement
-        # may already be running, so it has to be stopped rather than left
-        # behind serving from a rolled-back database.
-        if [ -n "$old_api_image_id" ]; then
+        # Only bring the api surface back if this host was actually RUNNING
+        # it when the deployment started. On a first upgrade there is nothing
+        # to restore, and a container that existed but was stopped (an earlier
+        # failed upgrade, or an operator decision) must not be started here:
+        # in both cases the replacement may already be running, so it is
+        # stopped rather than left behind serving from a rolled-back database.
+        if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
           if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
             compose up -d --no-build --force-recreate wuwaterm-api; then
             echo "warning: old api image could not be restarted" >&2
@@ -247,7 +254,7 @@ rollback_on_failure() {
           fi
         else
           if ! compose stop wuwaterm-api >/dev/null 2>&1; then
-            echo "warning: newly created api container could not be stopped" >&2
+            echo "warning: api container that was not running could not be stopped" >&2
             rollback_failed=1
           fi
         fi

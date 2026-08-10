@@ -604,7 +604,16 @@ def deploy_harness(tmp_path):
         ": \"${FAKE_DEPLOY_ROOT:?}\"\n"
         "echo \"${WUWATERM_RUNTIME_IMAGE:-unset}|$*\" >> \"$FAKE_DEPLOY_ROOT/docker.log\"\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
-        "  cat \"$FAKE_DEPLOY_ROOT/running-image\"\n"
+        # A stopped container still answers `docker inspect`, so the fake has
+        # to answer the running-state query separately from the image query.
+        "  case \"$*\" in\n"
+        "    *State.Running*wuwaterm-api*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
+        "    *State.Running*)\n"
+        "      echo true ;;\n"
+        "    *)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
+        "  esac\n"
         "  exit 0\n"
         "fi\n"
         "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = tag ]; then exit 0; fi\n"
@@ -707,6 +716,9 @@ def deploy_harness(tmp_path):
     )
     python_script.chmod(0o755)
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    # Default host state: both surfaces were up when the deployment started.
+    # A test that wants a present-but-stopped API rewrites this file.
+    (root / "api-running").write_text("true\n", encoding="ascii")
 
     old_hash = hashlib.sha256(old_db.read_bytes()).hexdigest()
     new_hash = hashlib.sha256(seed_db.read_bytes()).hexdigest()
@@ -1083,12 +1095,53 @@ def test_vps_update_manages_both_surfaces_together():
     # Read back separately, and both must match the validated image id.
     assert "running_api_image_id=" in text
     assert "running api container image does not match validated image" in text
-    # Rollback restores the api surface only when the host was running it, and
-    # stops a first-deployment container rather than leaving it serving from a
-    # rolled-back database.
-    assert 'if [ -n "$old_api_image_id" ]; then' in text
+    # Rollback restores the api surface only when the host was RUNNING it.
+    # Existence is not the test: a container left stopped by an earlier failed
+    # upgrade, or stopped deliberately, still answers `docker inspect`, and
+    # starting it here would put a surface up that was down before.
+    assert "old_api_running=" in text
+    assert "{{.State.Running}}" in text
+    assert 'if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then' in text
     assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
-    assert "newly created api container could not be stopped" in text
+    assert "api container that was not running could not be stopped" in text
+
+
+def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
+    """A present-but-stopped API must not be started by a rollback.
+
+    The first upgrade of a host can fail after the replacement API starts,
+    which leaves the container present and stopped. On the NEXT deployment
+    `docker inspect` reports an image for it, so existence alone would make a
+    rollback start a surface the host was not serving.
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    (root / "api-running").write_text("false\n", encoding="ascii")
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    rollback_ups = [
+        line
+        for line in docker_lines
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, docker_lines
+    # The bot comes back; the api does not.
+    assert not any("wuwaterm-api" in line for line in rollback_ups), rollback_ups
+    assert any(
+        line.endswith("compose -f deploy/docker-compose.yml stop wuwaterm-api")
+        for line in docker_lines
+    ), docker_lines
 
 
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
