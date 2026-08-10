@@ -440,11 +440,23 @@ async def translate_request_async(
                 markup_used=True,
             )
         if not markup.fallback_to_plain:
+            # The outcome vocabulary must stay stable no matter which adapter
+            # supplied the hook, so an unknown code from an injected translator
+            # is normalized rather than published.
+            code = markup.error_code
+            if code not in TRANSLATION_ERROR_CODES:
+                if code is not None:
+                    LOGGER.warning(
+                        "markup translator returned an unknown error code; "
+                        "reporting %s instead",
+                        ERROR_LLM_UNAVAILABLE,
+                    )
+                code = ERROR_LLM_UNAVAILABLE
             return TranslationOutcome(
                 kind=KIND_ERROR,
                 text=markup.message or "",
                 to_chinese=to_chinese,
-                error_code=markup.error_code or ERROR_LLM_UNAVAILABLE,
+                error_code=code,
             )
 
     return await _translate_plain_async(translator, prepared, to_chinese=to_chinese)

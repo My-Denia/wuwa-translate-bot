@@ -32,11 +32,16 @@ from .application import (
     SlidingWindowRateLimiter as PerChatRateLimiter,
     TranslationJob,
     TranslationOutcome,
-    _fuzzy_dictionary_answer,
     error_code_for_llm_reason,
     translate_request,
     translate_request_async,
 )
+
+# Re-exported on purpose, not used inside this module: the fuzzy gate now has
+# exactly one definition (in the application layer) and this import is the
+# whole of bot.py's relationship with it. Keeping the name reachable here is
+# what lets existing callers and tests keep importing it from wuwaterm.bot.
+from .application import _fuzzy_dictionary_answer  # noqa: F401
 from .channel import channel_post_handler, send_with_flood_retry
 from .channel_reply_index import ChannelReplyIndex
 from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_payload

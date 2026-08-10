@@ -129,8 +129,10 @@ def test_direction_is_auto_detected_from_script(sample_db):
     assert to_chinese.to_chinese is True
 
 
-def test_fuzzy_pinyin_answer_and_length_gate(sample_db):
+def test_fuzzy_pinyin_answer_and_length_gate(monkeypatch, sample_db):
     service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: "model answer")
 
     # ASCII input auto-detects "translate into Chinese", so the fuzzy pinyin
     # hit answers with the official Chinese string.
@@ -150,13 +152,16 @@ def test_fuzzy_pinyin_answer_and_length_gate(sample_db):
     assert forced.kind == KIND_FUZZY
     assert forced.text == "Echo"
 
-    # Short prefix/substring shapes must not hijack ordinary English words.
-    calls: list[tuple[str, object]] = []
+    # Short prefix/substring shapes must not hijack ordinary English words:
+    # "he" is inside "shenghai", but the query is too short to be trusted.
+    assert not calls
     miss = asyncio.run(
         translate_request_async(service, translator, TranslationJob(text="he"))
     )
     assert miss.kind != KIND_FUZZY
-    assert not calls
+    # It falls through to the model instead of answering from the dictionary.
+    assert miss.kind == KIND_LLM
+    assert len(calls) == 1
 
 
 def test_input_over_limit_returns_stable_error_code(sample_db):
@@ -386,6 +391,29 @@ def test_markup_hook_hard_failure_stops_the_pipeline(monkeypatch, sample_db):
     assert outcome.error_code == ERROR_LLM_UNAVAILABLE
     assert outcome.text == "upstream refused"
     assert not calls
+
+
+def test_markup_hook_cannot_publish_an_unknown_error_code(monkeypatch, sample_db):
+    """An injected adapter must not be able to widen the outcome vocabulary."""
+    service, translator = build_pair(sample_db)
+    calls: list[tuple[str, object]] = []
+    enable_mock_llm(monkeypatch, calls, lambda locked_text, locks: "plain answer")
+
+    async def markup_translator(markup: str, *, to_chinese: bool) -> MarkupTranslation:
+        return MarkupTranslation(message="odd", error_code="teapot")
+
+    outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="需要翻译的句子", markup="<b>需要翻译的句子</b>"),
+            markup_translator=markup_translator,
+        )
+    )
+
+    assert outcome.kind == KIND_ERROR
+    assert outcome.error_code in TRANSLATION_ERROR_CODES
+    assert outcome.error_code == ERROR_LLM_UNAVAILABLE
 
 
 # --------------------------------------------------------------------------
