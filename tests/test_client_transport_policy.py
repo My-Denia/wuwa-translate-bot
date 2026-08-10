@@ -89,7 +89,7 @@ _SPEC_D = r"(?=\s*\S*\d)"
 _RECIPE_PROSE_SOURCE = r"""
     \btunnel\w* | \bautossh\b
     | \bport[-\s]?forward\w*
-    | \bLocalForward\b | \bRemoteForward\b
+    | \bLocalForward\b | \bRemoteForward\b | \bDynamicForward\b
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
 """
 
@@ -123,6 +123,10 @@ CLIENT_SURFACE_ONLY = re.compile(r"\bssh\b | \bsshd\b", re.IGNORECASE | re.VERBO
 _SSH_VALUE_FLAGS = set("BbcDEeFIiJLlmOoPpQRSWw")
 _SSH_FORWARD_FLAGS = set("LRD")
 _SSH_COMMAND = re.compile(r"\bssh\b", re.IGNORECASE)
+# The same forwarding, configured instead of flagged: `-oLocalForward=…`,
+# `-o DynamicForward=1080`, or a line in a config file. Attached to the `o`
+# there is no word boundary in front of it, so the prose pattern cannot see it.
+_FORWARD_DIRECTIVE = re.compile(r"(Local|Remote|Dynamic)Forward", re.IGNORECASE)
 
 
 def _ssh_tokens(tail: str) -> list[str]:
@@ -158,10 +162,12 @@ def _ssh_option_flags(line: str) -> set[str]:
     """
     flags: set[str] = set()
     for match in _SSH_COMMAND.finditer(line):
-        expect_value = False
+        pending_letter = ""
         for token in _ssh_tokens(line[match.end():]):
-            if expect_value:
-                expect_value = False
+            if pending_letter:
+                if pending_letter == "o" and _FORWARD_DIRECTIVE.search(token):
+                    flags.add("L")
+                pending_letter = ""
                 continue
             if not token.startswith("-") or token == "-":
                 break  # the destination
@@ -171,7 +177,16 @@ def _ssh_option_flags(line: str) -> set[str]:
                 flags.add(letter)
                 if letter in _SSH_VALUE_FLAGS:
                     # The rest of this token, or the next one, is its value.
-                    expect_value = index == len(token) - 1
+                    attached = token[index + 1:]
+                    if attached:
+                        # `-oLocalForward=…` is a forward that neither the
+                        # letter walk nor the prose pattern can see: the
+                        # directive is concatenated to the `o`, so there is no
+                        # word boundary in front of it.
+                        if letter == "o" and _FORWARD_DIRECTIVE.search(attached):
+                            flags.add("L")
+                    else:
+                        pending_letter = letter
                     break
     return flags
 
@@ -364,6 +379,10 @@ RECIPE_SPELLINGS = [
     'ssh -oProxyCommand="ssh jump nc %h %p" -L 8787:127.0.0.1:8787 <vps>',
     "ssh -R 1080 <vps>",                               # remote dynamic forward
     "ssh -R /tmp/remote.sock <vps>",                   # remote socket forward
+    "ssh -oLocalForward='8787 127.0.0.1:8787' <vps>",  # directive through -o
+    "ssh -o RemoteForward=8787:127.0.0.1:8787 <vps>",
+    "ssh -oDynamicForward=1080 <vps>",
+    "DynamicForward 1080",
     "set up a port-forward from this computer",
     "the desktop reaches the service through a forwarded port",
     "try forwarding the port instead",
@@ -436,33 +455,26 @@ def test_the_runbook_may_still_describe_operator_access() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        "ssh -N -L 8787:127.0.0.1:8787 user@host",
-        "# the owner desktop reaches it through the existing SSH entry point",
-        "With the tunnel open, set the client's server address",
-        "ssh -L *:8787:127.0.0.1:8787 <vps>",          # documented bind spelling
-    "ssh -L /run/wuwaterm.sock:127.0.0.1:8787 <vps>",  # socket-path forward
-    'ssh -L "8787:127.0.0.1:8787" <vps>',              # quoted forward spec
-    "ssh -L /tmp/local.sock:/tmp/remote.sock <vps>",   # socket to socket, no port
-    "ssh -D localhost:1080 <vps>",                     # dynamic, named bind
-    "ssh -D [::1]:1080 <vps>",                         # dynamic, IPv6 bind
-    'ssh -i "$HOME/.ssh/deploy key" -L 8787:127.0.0.1:8787 <vps>',  # quoted option value
-    "ssh -N -f -L 8787:127.0.0.1:8787 <vps>",          # forward after other flags
-    "ssh -B lo -L 8787:127.0.0.1:8787 <vps>",          # -B takes a value
-    "ssh -P tag -L 8787:127.0.0.1:8787 <vps>",         # so does -P
-    'ssh -oProxyCommand="ssh jump nc %h %p" -L 8787:127.0.0.1:8787 <vps>',
-    "ssh -R 1080 <vps>",                               # remote dynamic forward
-    "ssh -R /tmp/remote.sock <vps>",                   # remote socket forward
-    "set up a port-forward from this computer",
-        "LocalForward 8787 127.0.0.1:8787",
-    ],
-)
+# Sentences that were REALLY on the shipped surface before this branch, taken
+# from the gen-3 inventory rather than invented. `RECIPE_SPELLINGS` above is
+# the constructed set; this one is the historical evidence that the gate would
+# have caught the thing it was written for.
+HISTORICAL_WORDING = [
+    "ssh -N -L 8787:127.0.0.1:8787 user@host",
+    "# the owner desktop reaches it through the existing SSH entry point",
+    "With the tunnel open, set the client's server address",
+    "an SSH tunnel from this computer to that loopback port",
+    "The supported address is the local end of an SSH tunnel",
+    "LocalForward 8787 127.0.0.1:8787",
+]
+
+
+@pytest.mark.parametrize("line", HISTORICAL_WORDING)
 def test_the_scanner_catches_the_wording_it_exists_for(line: str) -> None:
     """The gate is only worth its green tick if it is known to fail. Each of
-    these is a real sentence that was on the shipped surface before this
-    change, run through the same function the repository scan uses.
+    these was really on the shipped surface before this change - they are the
+    lines the gen-3 inventory listed - run through the same function the
+    repository scan uses.
 
     The second case also shows the allowlist is a per-line exemption and not
     a per-file one: the same file that carries the operations note still
@@ -536,7 +548,7 @@ INSECURE_TLS = re.compile(
     | create_default_context\s*=\s*\w*_create_unverified
     # `-k` anywhere in a short-option cluster: `curl -ksS`, `curl -kL`. The
     # lookbehind keeps `--key` out, which is a different option entirely.
-    | curl[^\n]*(?<![-\w])-[a-zA-Z]*k[a-zA-Z]*\b
+    | curl[^\n]*(?<![-\w])-[a-zA-Z0-9]*k[a-zA-Z0-9]*\b
     | curl[^\n]*--insecure\b
     """,
     re.VERBOSE,
@@ -679,7 +691,8 @@ PROCESS_AND_KEY_TOKENS = re.compile(
     | \bsubprocess\.\w+ | \bPopen\s*\(
     | \bos\.system\b | \bos\.exec\w*\b | \bos\.spawn\w*\b | \bos\.popen\b
     | \bcreate_subprocess_(exec|shell)\b
-    | \bimport\s+multiprocessing\b | \bpty\.spawn\b
+    | \bimport\s+multiprocessing\b | \bfrom\s+multiprocessing\s+import\b
+    | \bpty\.spawn\b | \bos\.startfile\b
     | \bimport\s+paramiko\b | \bimport\s+asyncssh\b | \bimport\s+fabric\b
     | \bQProcess\b
     | \bid_rsa\b | \bid_ed25519\b | \bknown_hosts\b | \bPRIVATE\s+KEY\b
