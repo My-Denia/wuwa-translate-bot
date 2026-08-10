@@ -624,6 +624,11 @@ def deploy_harness(tmp_path):
         "  esac\n"
         "fi\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
+        # A host may run one surface and not the other: an absent container
+        # answers nothing at all and exits nonzero.
+        "  if [ \"${FAKE_NO_BOT_CONTAINER:-0}\" = 1 ]; then\n"
+        "    case \"$*\" in *wuwaterm-bot*) exit 1 ;; esac\n"
+        "  fi\n"
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.
         "  case \"$*\" in\n"
@@ -1210,6 +1215,68 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     # Nothing is started between that stop and the restored database.
     between = actions[stops_before_restore[-1] : restore_at]
     assert not [line for line in between if "up -d" in line], between
+
+
+def test_vps_update_refuses_to_deploy_over_a_store_at_the_old_path(deploy_harness):
+    """Only the host can see both paths.
+
+    The library refuses to create an empty store beside an old one, but the
+    API container mounts only `state-api/`, so inside the container the old
+    path does not exist and that guard can never fire. The updater runs on the
+    host, where both directories are visible.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    legacy = root / "state" / "api"
+    legacy.mkdir(parents=True)
+    (legacy / "devices.db").write_bytes(b"SQLite format 3\x00")
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "state/api/devices.db" in result.stderr
+    assert "state-api/devices.db" in result.stderr
+    # Refused before anything was touched.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert not (root / "docker.log").exists()
+
+
+def test_vps_update_restores_an_api_only_host(deploy_harness):
+    """A host may run the API and no bot; the bot's absence is not a veto."""
+    root, env, _old_hash, _new_hash = deploy_harness
+    # No bot container: `docker inspect wuwaterm-bot` answers nothing.
+    (root / "no-bot").write_text("1\n", encoding="ascii")
+    env["FAKE_NO_BOT_CONTAINER"] = "1"
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, "the api was running and must come back"
+    assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
 
 
 def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):

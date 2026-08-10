@@ -47,6 +47,21 @@ if [ "${#source_commit}" -ne 40 ]; then
   exit 1
 fi
 
+# The device store's default moved from state/api/ - inside the directory the
+# bot mounts read-write in full - to the sibling state-api/. The library
+# refuses to create an empty store next to an old one, but the API container
+# only ever sees state-api/, so inside the container the old path does not
+# exist and that guard cannot fire. The host is the only place that can see
+# both, which makes this the only place the upgrade can be caught.
+if [ -f "state/api/devices.db" ] && [ ! -f "state-api/devices.db" ]; then
+  echo "refusing deployment: device credentials are still at" >&2
+  echo "state/api/devices.db while the API now reads state-api/devices.db." >&2
+  echo "Move that file, with any -wal and -shm sidecars, into state-api/" >&2
+  echo "first. Deploying now would start an API that refuses every device" >&2
+  echo "that was ever registered." >&2
+  exit 1
+fi
+
 deployment_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 deployment_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 candidate_path="data/candidates/terms.$deployment_id.db"
@@ -91,22 +106,23 @@ if [ -f "$db_path" ]; then
   old_db_present=1
 fi
 
+# Each surface is recorded separately, so a host on a pre-api deployment
+# (empty value) is handled without pretending the container ever existed.
+# Existence is not enough either: a container left stopped by an earlier failed
+# upgrade, or stopped deliberately by the operator, still answers
+# `docker inspect`. Rollback restores the state this deployment found, so what
+# it needs to know is whether each surface was RUNNING.
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
-# Running, not merely present: an operator can stop the bot on purpose, and a
-# rollback that starts it again would enable a surface that was down.
 old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
-if [ -n "$old_image_id" ]; then
-  docker image tag "$old_image_id" "$rollback_image_ref"
-fi
-# The api container runs the same image as the bot. Record it separately so a
-# host still on a pre-api deployment (empty value) is handled without
-# pretending the container ever existed. Existence is not enough: a container
-# left stopped by an earlier failed upgrade, or stopped deliberately by the
-# operator, still answers `docker inspect`. Rollback restores the state this
-# deployment found, so what it needs to know is whether the surface was
-# RUNNING.
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
+# Both surfaces run the same image, so a host running only one of them still
+# has an image to roll back to.
+if [ -n "$old_image_id" ]; then
+  docker image tag "$old_image_id" "$rollback_image_ref"
+elif [ -n "$old_api_image_id" ]; then
+  docker image tag "$old_api_image_id" "$rollback_image_ref"
+fi
 
 # The builder tag is intentionally local and mutable, so rebuild it from the
 # verified clean source checkout before any data command. Reusing a builder
@@ -265,11 +281,12 @@ rollback_on_failure() {
   # Everything the deployment started is already stopped by this point, so this
   # section only decides what may come BACK. Anything not started here stays
   # down, which is the correct outcome for a host that was not running it.
-  if [ "$runtime_stopped" -eq 1 ] && [ -n "$old_image_id" ]; then
+  if [ "$runtime_stopped" -eq 1 ]; then
     if [ "$db_binding_restored" -eq 1 ]; then
-      # Same rule for both surfaces: restore what was RUNNING, not what
-      # merely existed.
-      if [ "$old_bot_running" = "true" ]; then
+      # Same rule for both surfaces, and each is gated on ITS OWN state: a
+      # host running only the API has no bot image, and that must not decide
+      # whether the API comes back.
+      if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
         if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
           compose up -d --no-build --force-recreate wuwaterm; then
           echo "warning: old runtime image could not be restarted" >&2
