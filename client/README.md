@@ -76,7 +76,10 @@ establishes a new one.
   value separately to connecting, writing, reading and waiting for a pooled
   connection, so it bounds how long the client waits *without progress*, not
   the wall-clock length of the whole call: something that keeps sending bytes
-  can legitimately keep a request open past the configured number.
+  can legitimately keep a request open past the configured number. Not the
+  service itself, though — it enforces its own deadline as real elapsed time
+  and answers 504 — so a call that runs long in this way means something
+  between this computer and the service, not the service.
 - **Which limit expires first, on the shipped defaults.** The client's 60s
   translate timeout is shorter than the service's own request deadline
   (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS`, 90s by default), so a translation

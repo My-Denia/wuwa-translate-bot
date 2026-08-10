@@ -71,11 +71,13 @@ docker compose -f deploy/docker-compose.yml up -d
 `wuwaterm-api` serves the versioned HTTP surface documented by
 `docs/api/openapi.json`. It adds **no new public surface**: it binds
 `WUWATERM_API_BIND` (default `127.0.0.1`) on `WUWATERM_API_PORT`
-(default `8787`), and the Compose file publishes no ports. Note what is
-actually doing the work there: the service runs with host networking, where a
-`ports:` list would have no effect at all, so the bind address — hard-coded in
-`deploy/docker-compose.yml` rather than interpolated from an environment file —
-is the exposure control, not a port-publish gate.
+(default `8787`). The service runs with host networking, so a `ports:` list
+would have no effect at all and none is present: what keeps this off the host's
+public interfaces is the bind address, hard-coded in
+`deploy/docker-compose.yml` rather than interpolated from an environment file.
+One other line in that same file can override it — `command:` is passed
+through to the server, which accepts `--host` — so both live where they can
+only be changed in review.
 
 **Remote client access is not available in this topology yet, and this page
 does not describe a way to obtain it.** Following this guide gives you a

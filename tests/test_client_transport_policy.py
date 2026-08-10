@@ -22,18 +22,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 # (a) The scan scope is the UNION of the shipped client surface and the
-#     deployment file that describes how it is reached.
-SCANNED_TREES = (
-    ROOT / "client" / "src",
-    ROOT / "client" / "tests",
-)
+#     deployment files that describe how it is reached.
+#
+# The client side is scanned by RECURSION over `client/`, not by a list: a
+# list has to be maintained, and a file added to the client root tomorrow
+# would be silently out of scope. Build artefacts and virtual environments
+# are excluded because they are third-party bytes, not shipped surface.
+SCANNED_TREES = (ROOT / "client",)
+EXCLUDED_DIR_NAMES = {
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
 SCANNED_FILES = (
-    ROOT / "client" / "README.md",
-    # The packaged entry point, the build spec and the build script: they are
-    # shipped client surface too, and none of them lives under client/src.
-    ROOT / "client" / "main.py",
-    ROOT / "client" / "WuwaTerm.spec",
-    ROOT / "client" / "build.ps1",
     # The runbook. tests/test_deploy_scripts.py pins four literal recipes in
     # it; this adds the pattern scan, so a spelling those literals miss
     # (`ssh -fNL`, `autossh`, prose) is caught as well.
@@ -43,18 +49,39 @@ SCANNED_FILES = (
 )
 SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".toml"}
 
-# A local port-forwarding recipe is the specific thing being kept out, but
-# the words that introduce one are what a reader copies, so both are matched.
+# Two rules, because the two surfaces have different jobs.
+#
+# The SHIPPED CLIENT SURFACE may not name the administration channel at all,
+# outside the one allowlisted note: the client does not use it, and a mention
+# there is how the revoked design comes back.
 FORWARDING_TOKENS = re.compile(
     r"""
     \bssh\b | \bsshd\b | \bautossh\b       # the administration channel
     | \btunnel\w*                          # and the design it used to justify
     | \bport[-\s]?forward\w*
-    | \bLocalForward\b
+    | \bLocalForward\b | \bRemoteForward\b
     | -N\s+-L\b | \bssh\s+-\w*L\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+# The OPERATOR RUNBOOK legitimately names it - the deployment and credential
+# commands are run over it - so only the forwarding half applies there.
+# "Shell access is required to run these commands" must stay sayable;
+# teaching a forwarded port must not.
+FORWARDING_RECIPE_TOKENS = re.compile(
+    r"""
+    \btunnel\w* | \bautossh\b
+    | \bport[-\s]?forward\w*
+    | \bLocalForward\b | \bRemoteForward\b
+    | -N\s+-L\b | \bssh\s+-\w*L\b
+    | \bssh\b[^\n]*\s-\w*L\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Which pattern applies where. Anything not listed gets the strict one.
+RECIPE_ONLY_PATHS = {"docs/deployment.md"}
 
 # The one place the client's documentation may name the administration
 # channel: a note that exists precisely to say it is NOT the client's path.
@@ -71,8 +98,11 @@ def _scanned_paths() -> list[Path]:
     paths: list[Path] = []
     for tree in SCANNED_TREES:
         for path in sorted(tree.rglob("*")):
-            if path.is_file() and path.suffix in SCANNED_SUFFIXES:
-                paths.append(path)
+            if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
+                continue
+            if EXCLUDED_DIR_NAMES.intersection(path.relative_to(tree).parts[:-1]):
+                continue
+            paths.append(path)
     paths.extend(path for path in SCANNED_FILES if path.is_file())
     assert paths, "the scan found no files at all, which would pass vacuously"
     return paths
@@ -81,9 +111,14 @@ def _scanned_paths() -> list[Path]:
 def _offending_lines(relative: str, text: str) -> list[str]:
     """Every line carrying a forwarding token, minus the allowlisted ones."""
     allowed = ALLOWED_OPERATIONS_NOTES.get(relative, ())
+    pattern = (
+        FORWARDING_RECIPE_TOKENS
+        if relative in RECIPE_ONLY_PATHS
+        else FORWARDING_TOKENS
+    )
     offences = []
     for number, line in enumerate(text.splitlines(), start=1):
-        if not FORWARDING_TOKENS.search(line):
+        if not pattern.search(line):
             continue
         if line.strip() in allowed:
             continue
@@ -121,10 +156,34 @@ def test_the_scan_actually_covers_the_files_it_claims_to() -> None:
         "client/main.py",
         "client/WuwaTerm.spec",
         "client/build.ps1",
+        "client/pyproject.toml",
         "docs/deployment.md",
         "deploy/docker-compose.yml",
     ):
         assert required in scanned, required
+    # ...and nothing from a virtual environment or a build output, which are
+    # third-party bytes and would make the gate unrunnable after a local build.
+    assert not [path for path in scanned if "/.venv/" in path or "/dist/" in path]
+
+
+def test_the_runbook_may_still_describe_operator_access() -> None:
+    """A gate that forbids an accurate operations sentence pushes the next
+    author towards a vaguer one. The runbook may name the administration
+    channel; it may not teach a forwarded port."""
+    assert _offending_lines(
+        "docs/deployment.md",
+        "SSH access to the host is required to run these deployment commands.\n",
+    ) == []
+    assert _offending_lines(
+        "docs/deployment.md", "ssh -fNL 8787:127.0.0.1:8787 <vps>\n"
+    )
+    assert _offending_lines("docs/deployment.md", "Open a tunnel to the API port.\n")
+    # The client surface keeps the strict rule: the same first sentence fails
+    # there, because the client has no business naming that channel at all.
+    assert _offending_lines(
+        "client/src/wuwaterm_client/api.py",
+        "# SSH access to the host is required to run these commands\n",
+    )
 
 
 @pytest.mark.parametrize(
@@ -221,10 +280,17 @@ def _insecure_tls_offences(relative: str, text: str) -> list[str]:
 def _tls_scanned_paths() -> list[Path]:
     paths: list[Path] = []
     for tree in TLS_SCANNED_TREES:
-        paths.extend(sorted(tree.rglob("*.py")))
-    # The shell scripts too: `curl --insecure` is in the pattern above, and a
-    # Python-only scan could never have matched it.
+        for path in sorted(tree.rglob("*.py")):
+            if EXCLUDED_DIR_NAMES.intersection(path.relative_to(tree).parts[:-1]):
+                continue
+            paths.append(path)
+    # The deployment scripts, and the guide that reproduces their commands
+    # verbatim: the readiness probe there is a `urllib.request.urlopen` call,
+    # and the edit that would weaken it - an unverified SSL context - is
+    # exactly what this pattern is for. A copy that is documented but not
+    # scanned is the copy that rots.
     paths.extend(sorted((ROOT / "deploy").glob("*.sh")))
+    paths.append(ROOT / "docs" / "deployment.md")
     return paths
 
 
@@ -255,17 +321,27 @@ def test_the_tls_scanner_catches_a_real_disabling_line() -> None:
     assert _insecure_tls_offences("src/wuwaterm/sentence.py", "ctx.check_hostname = False\n")
 
 
-def test_the_tls_scan_covers_the_shell_scripts_too() -> None:
-    """`curl --insecure` cannot live in a .py file; a scan that only read
-    Python would have carried a pattern it could never match."""
+def test_the_tls_scan_reaches_the_operator_commands_as_well_as_the_client() -> None:
+    """The scripts and the guide run the same readiness probe.
+
+    `deploy/vps-update.sh` and `docs/deployment.md` carry the same
+    `urllib.request.urlopen` command; if one of them ever gained an
+    unverified SSL context, a client-only scan would not have seen it. The
+    `curl` branch of the pattern has no producer in this repository today -
+    it is there for the shell one-liner someone reaches for first.
+    """
     scanned = {path.relative_to(ROOT).as_posix() for path in _tls_scanned_paths()}
     for required in (
         "client/src/wuwaterm_client/api.py",
         "deploy/vps-update.sh",
         "deploy/entrypoint.sh",
+        "docs/deployment.md",
     ):
         assert required in scanned, required
     assert _insecure_tls_offences("deploy/vps-update.sh", 'curl -sk "$url"\n')
+    assert _insecure_tls_offences(
+        "docs/deployment.md", "urlopen(url, context=ssl._create_unverified_context())\n"
+    )
 
 
 def test_the_tls_exemptions_still_describe_real_lines() -> None:

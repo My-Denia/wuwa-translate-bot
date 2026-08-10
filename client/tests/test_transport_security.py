@@ -236,3 +236,46 @@ def test_a_transport_whose_configuration_cannot_be_read_is_refused() -> None:
     with pytest.raises(ClientError) as raised:
         ApiClient("https://api.example.com", transport=_Opaque())
     assert raised.value.code == ERROR_INSECURE_ENDPOINT
+
+
+def test_a_transport_that_shows_a_verifying_context_but_uses_another_is_refused() -> None:
+    """Inspecting attributes proves nothing about what a transport DOES.
+
+    This one presents a perfectly good SSL context for inspection and would
+    have sent the bearer credential down an unverified connection. The guard
+    accepts exact types it can reason about, so a decoy never gets that far -
+    and neither does a subclass, which could override the request method
+    while inheriting the verifying pool.
+    """
+
+    class _Decoy(httpx.AsyncBaseTransport):
+        def __init__(self, honest: httpx.AsyncHTTPTransport,
+                     real: httpx.AsyncHTTPTransport) -> None:
+            self._pool = honest._pool          # what an inspector sees
+            self._real = real                  # what the request would use
+
+        async def handle_async_request(self, request):  # pragma: no cover
+            return await self._real.handle_async_request(request)
+
+    honest = httpx.AsyncHTTPTransport(verify=True)
+    unverified = httpx.AsyncHTTPTransport(verify=False)
+    try:
+        decoy = _Decoy(honest, unverified)
+        # The decoy really would pass an attribute-only inspection.
+        assert decoy._pool._ssl_context.verify_mode is ssl.CERT_REQUIRED
+        with pytest.raises(ClientError) as raised:
+            ApiClient("https://api.example.com", transport=decoy)
+        assert raised.value.code == ERROR_INSECURE_ENDPOINT
+
+        class _Subclass(httpx.AsyncHTTPTransport):
+            pass
+
+        subclass = _Subclass(verify=True)
+        try:
+            with pytest.raises(ClientError):
+                ApiClient("https://api.example.com", transport=subclass)
+        finally:
+            asyncio.run(subclass.aclose())
+    finally:
+        asyncio.run(honest.aclose())
+        asyncio.run(unverified.aclose())

@@ -170,14 +170,24 @@ def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -
     `AsyncHTTPTransport(verify=False)` would otherwise slip past a guarantee
     that says no argument can weaken verification.
 
-    A mock transport sends nothing over a network and is the reason the
-    parameter exists at all. Anything else must prove it verifies: its SSL
-    context has to require a certificate and check the host name, and a
-    transport whose configuration cannot be read is refused rather than
-    trusted.
+    Only two kinds are accepted, by EXACT type:
+
+    * `httpx.MockTransport`, which sends nothing over a network and is the
+      reason this parameter exists at all; and
+    * `httpx.AsyncHTTPTransport`, whose SSL context this function can read -
+      and which must require a certificate and check the host name.
+
+    Exact types, not `isinstance`, because inspecting an object's attributes
+    proves nothing about what its `handle_async_request` does: a subclass, or
+    any other implementation, can expose a verifying context while sending
+    the request down a connection that verifies nothing. Reading a decoy is
+    worse than reading nothing, so an implementation this function cannot
+    reason about is refused rather than inspected.
     """
-    if transport is None or isinstance(transport, httpx.MockTransport):
+    if transport is None or type(transport) is httpx.MockTransport:
         return
+    if type(transport) is not httpx.AsyncHTTPTransport:
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
     context = getattr(getattr(transport, "_pool", None), "_ssl_context", None)
     if (
         not isinstance(context, ssl.SSLContext)
