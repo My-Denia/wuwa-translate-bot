@@ -19,12 +19,12 @@ does not distribute generated game data or generated SQLite databases.
 - New `wuwaterm_api` package: a versioned, plain-text HTTP surface
   (`POST /v1/translations`, `GET /v1/terms`, `GET /v1/meta`, `GET /healthz`,
   `GET /readyz`) served by the same dictionary-first pipeline as the bot.
-- Revocable device credentials in their own store (`state/api/devices.db`),
+- Revocable device credentials in their own store (`state-api/devices.db`),
   registered and withdrawn by an operator through the new `wuwaterm-api device`
-  commands. The operator supplies the secret on standard input and only its
-  hash is stored: the service never produces or prints credential material, so
-  none can reach a log, a terminal recording or a captured command output
-  through it.
+  commands. The operator supplies the secret on standard input and only a
+  salted scrypt verifier is stored: the service never produces or prints
+  credential material, so none can reach a log, a terminal recording or a
+  captured command output through it.
 - Stable error envelope with enumerated codes, request ids, per-device request
   limits, a streaming body-size cap, and a time budget applied to both the body
   read and the handler. Credential verification is itself bounded, so the
@@ -39,6 +39,36 @@ does not distribute generated game data or generated SQLite databases.
 - API budgets are per process and separate from the bot's: its own translator
   instance, its own model concurrency cap (default 2) and its own per-minute
   call budget (default 30).
+
+### Deployment
+
+- New Compose service `wuwaterm-api` runs the same runtime image with
+  `command: ["api"]`, mounts the terminology database read-only and keeps its
+  own writable `state-api/`, a sibling of the bot's state directory rather than
+  a child of it, so the bot's read-write state mount cannot reach the
+  credential store. It binds loopback only and publishes no ports, so the host
+  gains no new public surface; an owner desktop reaches it through the existing
+  SSH entry point.
+- Documented operator commands read `WUWATERM_API_PORT` from the serving
+  container instead of assuming the default, so a deployment that configured
+  another port is not read back against a closed one.
+- The runtime entry point accepts `bot`, `api` and `device` and still exits 64
+  for every data-build command. CI asserts both halves.
+- `deploy/vps-update.sh` now stops, restarts, smokes and reads back BOTH
+  serving containers. The API smoke runs inside its own container over
+  loopback, so nothing has to be exposed to run it.
+- Rollback restores what was RUNNING, not what merely existed: both surfaces
+  record their running state before the deployment, both go down before the
+  database is rolled back, and a stop that fails aborts the restoration
+  entirely rather than reverting a database underneath a container that may
+  still be serving it.
+- The device store refuses to start an empty store at the new
+  `state-api/devices.db` while an older `state/api/devices.db` still holds the
+  verifiers; that would have looked like a clean start while every registered
+  device stopped authenticating.
+- `scripts/check_non_goals.py` skips nested virtual environments and build
+  output at any depth, so a per-component venv cannot drown the product gate in
+  third-party matches.
 
 ## 0.2.1 - 2026-08-06
 

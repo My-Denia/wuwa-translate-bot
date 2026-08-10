@@ -445,7 +445,10 @@ def create_app(
     )
 
     app.state.settings = resolved
-    app.state.device_store = device_store or DeviceStore(resolved.device_db_path)
+    app.state.device_store = device_store or DeviceStore(
+        resolved.device_db_path,
+        guard_legacy_default=resolved.device_db_is_default,
+    )
     app.state.term_service = term_service or build_term_service(resolved.db_path)
     app.state.translator = translator or build_translator(
         resolved.db_path,

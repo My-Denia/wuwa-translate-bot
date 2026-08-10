@@ -19,7 +19,9 @@ class ApiConfigError(ValueError):
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_DB_PATH = "data/terms.db"
-DEFAULT_STATE_DIR = "state/api"
+# A sibling of the bot's state directory, never a child of it: the bot
+# mounts the whole of state/ read-write.
+DEFAULT_STATE_DIR = "state-api"
 DEVICE_DB_FILENAME = "devices.db"
 
 # Deliberately smaller than the bot's: the API is a single-owner surface and a
@@ -74,6 +76,10 @@ def _env_path(name: str, default: str) -> Path:
 class ApiSettings:
     db_path: Path
     device_db_path: Path
+    # False when an operator named the store explicitly. Only the default
+    # layout can have inherited the pre-move path, so only the default layout
+    # is checked for one.
+    device_db_is_default: bool = True
     bind: str = DEFAULT_BIND
     port: int = DEFAULT_PORT
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
@@ -95,6 +101,7 @@ class ApiSettings:
                 if device_db and device_db.strip()
                 else state_dir / DEVICE_DB_FILENAME
             ),
+            device_db_is_default=not (device_db and device_db.strip()),
             bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
             or DEFAULT_BIND,
             port=_env_int(

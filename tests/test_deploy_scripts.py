@@ -313,9 +313,12 @@ def test_builder_entrypoint_preserves_fallback_command():
     assert result.stdout == "ok"
 
 
-def test_runtime_entrypoint_rejects_data_builder_commands():
+@pytest.mark.parametrize(
+    "command", ["refresh-data", "build-db", "verify-db", "shell", "python"]
+)
+def test_runtime_entrypoint_rejects_data_builder_commands(command: str):
     result = subprocess.run(
-        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), "refresh-data"],
+        ["sh", str(ROOT / "deploy" / "entrypoint.sh"), command],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -324,7 +327,19 @@ def test_runtime_entrypoint_rejects_data_builder_commands():
     )
 
     assert result.returncode == 64
-    assert "runtime image only supports" in result.stderr
+    assert "use the builder image for data commands" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [("api", "wuwaterm_api.cli serve"), ("device", "wuwaterm_api.cli device")],
+)
+def test_runtime_entrypoint_serves_the_api_surfaces(command: str, expected: str):
+    """The runtime image runs both inbound surfaces, and only those."""
+    text = (ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert f"exec python -m {expected}" in text
+    assert f"  {command})" in text
 
 
 def test_env_examples_are_byte_identical():
@@ -371,7 +386,7 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
 
     assert "FROM python-base AS runtime" in text
     assert "FROM python-base AS builder" in text
-    assert "uv sync --locked --no-dev --no-editable --no-cache" in text
+    assert "uv sync --locked --no-dev --no-editable --extra api --no-cache" in text
     assert "uv sync --locked --no-dev --no-editable --extra build --no-cache" in text
     runtime_section = text.split("FROM python-base AS runtime", 1)[1].split(
         "FROM python-base AS builder", 1
@@ -379,6 +394,9 @@ def test_dockerfile_declares_separate_locked_runtime_and_builder_targets():
     builder_section = text.split("FROM python-base AS builder", 1)[1]
     assert "git" not in runtime_section
     assert "--extra build" not in runtime_section
+    # The serving surface needs its own extra; the builder path must stay out.
+    assert "--extra api" in runtime_section
+    assert "--extra api" not in builder_section
     assert "apt-get install -y --no-install-recommends git ca-certificates" in builder_section
     assert "deploy/entrypoint.sh" in runtime_section
     assert "deploy/builder-entrypoint.sh" in builder_section
@@ -585,8 +603,42 @@ def deploy_harness(tmp_path):
         "set -eu\n"
         ": \"${FAKE_DEPLOY_ROOT:?}\"\n"
         "echo \"${WUWATERM_RUNTIME_IMAGE:-unset}|$*\" >> \"$FAKE_DEPLOY_ROOT/docker.log\"\n"
+        # One ordered stream across both fakes, so a test can assert that a
+        # container stop happens BEFORE the database is touched.
+        "echo \"docker $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
+        # Fail only the SECOND stop: the deployment's own stop must succeed so
+        # the run reaches the rollback whose stop is under test.
+        "if [ \"${FAKE_ALL_STOPS_FAIL:-0}\" = 1 ]; then\n"
+        "  case \"$*\" in\n"
+        "    *' stop '*) exit 1 ;;\n"
+        "  esac\n"
+        "fi\n"
+        "if [ \"${FAKE_ROLLBACK_STOP_FAILURE:-0}\" = 1 ]; then\n"
+        "  case \"$*\" in\n"
+        "    *' stop '*)\n"
+        "      stops=$(cat \"$FAKE_DEPLOY_ROOT/stop-count\" 2>/dev/null || echo 0)\n"
+        "      stops=$((stops + 1))\n"
+        "      echo \"$stops\" > \"$FAKE_DEPLOY_ROOT/stop-count\"\n"
+        "      if [ \"$stops\" -ge 2 ]; then exit 1; fi\n"
+        "      ;;\n"
+        "  esac\n"
+        "fi\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
-        "  cat \"$FAKE_DEPLOY_ROOT/running-image\"\n"
+        # A host may run one surface and not the other: an absent container
+        # answers nothing at all and exits nonzero.
+        "  if [ \"${FAKE_NO_BOT_CONTAINER:-0}\" = 1 ]; then\n"
+        "    case \"$*\" in *wuwaterm-bot*) exit 1 ;; esac\n"
+        "  fi\n"
+        # A stopped container still answers `docker inspect`, so the fake has
+        # to answer the running-state query separately from the image query.
+        "  case \"$*\" in\n"
+        "    *State.Running*wuwaterm-api*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
+        "    *State.Running*)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/bot-running\" ;;\n"
+        "    *)\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
+        "  esac\n"
         "  exit 0\n"
         "fi\n"
         "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = tag ]; then exit 0; fi\n"
@@ -636,6 +688,8 @@ def deploy_harness(tmp_path):
     python_script.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
+        ": \"${FAKE_DEPLOY_ROOT:?}\"\n"
+        "echo \"python3 $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
         f"real_python={shlex.quote(sys.executable)}\n"
         "case \"$*\" in\n"
         "  *'deployment_manifest.py durable-replace --source data/terms.db.backup.'*)\n"
@@ -689,6 +743,10 @@ def deploy_harness(tmp_path):
     )
     python_script.chmod(0o755)
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
+    # Default host state: both surfaces were up when the deployment started.
+    # A test that wants a present-but-stopped surface rewrites these.
+    (root / "api-running").write_text("true\n", encoding="ascii")
+    (root / "bot-running").write_text("true\n", encoding="ascii")
 
     old_hash = hashlib.sha256(old_db.read_bytes()).hexdigest()
     new_hash = hashlib.sha256(seed_db.read_bytes()).hexdigest()
@@ -986,3 +1044,493 @@ def test_vps_update_does_not_promote_candidate_rejected_by_real_verifier(
     assert hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest() == old_hash
     assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
     assert (root / "running-image").read_text(encoding="ascii").strip() == OLD_IMAGE
+
+
+def test_compose_api_service_is_loopback_only_with_separate_state():
+    """The api container adds no public surface and no writable game data."""
+    text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "  wuwaterm-api:" in text
+    api_section = text.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    assert "container_name: wuwaterm-api" in api_section
+    assert 'command: ["api"]' in api_section
+    assert "target: runtime" in api_section
+    assert "network_mode: host" in api_section
+    assert "restart: unless-stopped" in api_section
+    # Same terminology database, read-only; its own writable state directory.
+    assert "../data:/app/data:ro" in api_section
+    # A SIBLING of the bot's state tree, never a child of it: the bot mounts
+    # the whole of ../state read-write.
+    assert "../state-api:/app/state-api" in api_section
+    assert "../state/" not in api_section
+    assert "WUWATERM_API_STATE_DIR: /app/state-api" in api_section
+    # The bind is fixed in this file, not interpolated: with host networking an
+    # environment knob would make a public exposure a one-line edit.
+    assert "WUWATERM_API_BIND: 127.0.0.1" in api_section
+    assert "${WUWATERM_API_BIND" not in text
+    assert "ports:" not in text
+    # The bot's credentials are not this process' business.
+    for blanked in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TEST_CHAT_ID",
+        "OWNER_USER_ID",
+        # Keys the bot's log redaction, and only the bot's.
+        "WUWATERM_REDACTION_SECRET",
+        # Would otherwise win over the state dir and point the credential
+        # store at a path the serving container never sees.
+        "WUWATERM_API_DEVICE_DB_PATH",
+    ):
+        assert f'{blanked}: ""' in api_section, blanked
+    # It must not be able to write the chat state the bot owns.
+    assert "/app/state\n" not in api_section
+
+
+def test_env_example_covers_the_api_surface():
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for name in (
+        "WUWATERM_API_PORT=8787",
+        "WUWATERM_API_STATE_DIR=state-api",
+        "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
+        "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
+        "WUWATERM_API_RATE_LIMIT_PER_MINUTE=30",
+        "WUWATERM_API_MAX_BODY_BYTES=32768",
+        "WUWATERM_API_REQUEST_TIMEOUT_SECONDS=90",
+    ):
+        assert name in text, name
+    # The per-process nature of the budgets must be stated where they are set.
+    assert "per process" in text
+
+
+def test_vps_update_manages_both_surfaces_together():
+    """Both containers share the terminology database, so both move together."""
+    text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    # Down before the shared read-only database is replaced.
+    assert "compose stop wuwaterm wuwaterm-api" in text
+    # Up together, from the same validated image.
+    assert "--force-recreate wuwaterm wuwaterm-api" in text
+    # Smoked in-container over loopback, so nothing has to be exposed, and
+    # against readiness rather than liveness: /healthz answers even when the
+    # terminology database is missing or mounted at the wrong path.
+    assert "compose exec -T wuwaterm-api" in text
+    assert "/readyz" in text
+    # compose up returns before the server binds its socket, so a single shot
+    # would fail the deployment on a connection refusal that only meant
+    # "not yet". The smoke waits, and says why it gave up.
+    assert "api readiness never reported ok" in text
+    assert "deadline = time.monotonic()" in text
+    # Read back separately, and both must match the validated image id.
+    assert "running_api_image_id=" in text
+    assert "running api container image does not match validated image" in text
+    # Rollback restores the api surface only when the host was RUNNING it.
+    # Existence is not the test: a container left stopped by an earlier failed
+    # upgrade, or stopped deliberately, still answers `docker inspect`, and
+    # starting it here would put a surface up that was down before.
+    assert "old_api_running=" in text
+    assert "{{.State.Running}}" in text
+    assert 'if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then' in text
+    assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
+    # Rollback takes both surfaces down before it touches the database, so no
+    # replacement container can serve new code against a database that is being
+    # rolled back underneath it. Only the restart is conditional.
+    assert "replacement containers could not be stopped before rollback" in text
+    rollback_body = text.split("rollback_on_failure() {", 1)[1]
+    stop_at = rollback_body.index("compose stop wuwaterm wuwaterm-api")
+    restore_at = rollback_body.index("durable-replace")
+    assert stop_at < restore_at
+
+
+def test_vps_update_does_not_start_an_api_that_was_not_running(deploy_harness):
+    """A present-but-stopped API must not be started by a rollback.
+
+    The first upgrade of a host can fail after the replacement API starts,
+    which leaves the container present and stopped. On the NEXT deployment
+    `docker inspect` reports an image for it, so existence alone would make a
+    rollback start a surface the host was not serving.
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    (root / "api-running").write_text("false\n", encoding="ascii")
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    docker_lines = (root / "docker.log").read_text(encoding="utf-8").splitlines()
+    rollback_ups = [
+        line
+        for line in docker_lines
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, docker_lines
+    # The bot comes back; the api does not.
+    assert not any("wuwaterm-api" in line for line in rollback_ups), rollback_ups
+
+
+def test_vps_update_stops_both_surfaces_before_restoring_the_database(
+    deploy_harness,
+):
+    """A replacement container must not serve while the database rolls back.
+
+    The deployment starts both surfaces from the new image before the smoke
+    runs. If that smoke fails, the database goes back to its previous content
+    underneath containers that are still running new code, which is exactly the
+    mixed binding the transactional updater exists to prevent.
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
+    restore_at = next(
+        index
+        for index, line in enumerate(actions)
+        if "durable-replace --source data/terms.db.rollback." in line
+    )
+    stops_before_restore = [
+        index
+        for index, line in enumerate(actions[:restore_at])
+        if "stop wuwaterm wuwaterm-api" in line
+    ]
+    # Two: the planned stop before promotion, and the rollback's own stop.
+    assert len(stops_before_restore) == 2, actions[: restore_at + 1]
+    # Nothing is started between that stop and the restored database.
+    between = actions[stops_before_restore[-1] : restore_at]
+    assert not [line for line in between if "up -d" in line], between
+
+
+def test_vps_update_refuses_to_deploy_over_a_store_at_the_old_path(deploy_harness):
+    """Only the host can see both paths.
+
+    The library refuses to create an empty store beside an old one, but the
+    API container mounts only `state-api/`, so inside the container the old
+    path does not exist and that guard can never fire. The updater runs on the
+    host, where both directories are visible.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    legacy = root / "state" / "api"
+    legacy.mkdir(parents=True)
+    (legacy / "devices.db").write_bytes(b"SQLite format 3\x00")
+    # Even with a store already at the new path: an earlier attempt may have
+    # created an empty one there, and then nobody can tell which file holds
+    # the live verifiers.
+    current = root / "state-api"
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "devices.db").write_bytes(b"SQLite format 3\x00")
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "state/api/devices.db" in result.stderr
+    assert "state-api/devices.db" in result.stderr
+    # Refused before anything was touched.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+    assert not (root / "docker.log").exists()
+
+
+def test_vps_update_restores_an_api_only_host(deploy_harness):
+    """A host may run the API and no bot; the bot's absence is not a veto."""
+    root, env, _old_hash, _new_hash = deploy_harness
+    # No bot container: `docker inspect wuwaterm-bot` answers nothing.
+    (root / "no-bot").write_text("1\n", encoding="ascii")
+    env["FAKE_NO_BOT_CONTAINER"] = "1"
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, "the api was running and must come back"
+    assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
+    # Restored from the API's own rollback tag, not the bot's.
+    assert all("rollback-api-" in line for line in rollback_ups), rollback_ups
+
+
+def test_vps_update_keeps_a_rollback_image_per_surface():
+    """Two containers can be on two different images after a hand recovery.
+
+    Restoring both from one tag would move a surface onto an image it was
+    never running.
+    """
+    text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    assert 'rollback_image_ref="wuwaterm-runtime:rollback-$deployment_id"' in text
+    assert (
+        'rollback_api_image_ref="wuwaterm-runtime:rollback-api-$deployment_id"' in text
+    )
+    assert 'docker image tag "$old_image_id" "$rollback_image_ref"' in text
+    assert 'docker image tag "$old_api_image_id" "$rollback_api_image_ref"' in text
+    bot_restart = text.index('compose up -d --no-build --force-recreate wuwaterm;')
+    api_restart = text.index('compose up -d --no-build --force-recreate wuwaterm-api;')
+    assert 'WUWATERM_RUNTIME_IMAGE="$rollback_image_ref"' in text[:bot_restart]
+    assert (
+        'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"'
+        in text[bot_restart:api_restart]
+    )
+    # The restored binding is verified against a surface that was actually
+    # restored, never against one that stayed down on a different image.
+    assert 'verify_image_id=""' in text
+    assert '[ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]' in text
+    assert '[ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]' in text
+    assert '--image-id "$verify_image_id"' in text
+
+
+def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
+    """The rule is the same for both surfaces: restore what was running.
+
+    A combined stop that fails on one container still records the transition,
+    so the rollback must not read "we stopped it" as "it was up".
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    (root / "bot-running").write_text("false\n", encoding="ascii")
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, "the api was running and should have come back"
+    assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
+
+
+def test_vps_update_reports_a_failed_stop_before_the_database_moves(
+    deploy_harness,
+):
+    """A combined stop can fail after stopping one of the two surfaces.
+
+    `compose stop wuwaterm wuwaterm-api` is one command over two containers.
+    If the transition were recorded only after it returned, a partial failure
+    would leave the previously running bot down while the rollback concluded
+    that nothing had been touched, and said nothing about it.
+    """
+    root, env, old_hash, _new_hash = deploy_harness
+    env["FAKE_ALL_STOPS_FAIL"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "could not be stopped" in result.stderr
+    assert "manual recovery is required" in result.stderr
+    # The database never moved, because the stop is what precedes promotion.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == old_hash
+    )
+
+
+def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
+    deploy_harness,
+):
+    """A stop that fails must abort the restoration, not proceed without it.
+
+    Rolling the database back while a replacement container may still be
+    serving would CREATE the mixed binding the rollback exists to prevent. The
+    promoted database and pointer are at least consistent with the code that is
+    running, so they stay, and the operator is told to intervene.
+    """
+    root, env, _old_hash, new_hash = deploy_harness
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+    env["FAKE_ROLLBACK_STOP_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    assert "could not be stopped" in result.stderr
+    assert "manual recovery is required" in result.stderr
+    # The promoted database is still the promoted one: nothing was reverted
+    # underneath a container that may still be reading it.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == new_hash
+    )
+    # The pointer is published after the smoke, so it never moved; what
+    # matters is that the rollback did not try to move it back either.
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
+    assert not [
+        line for line in actions if "durable-replace --source data/terms.db.rollback." in line
+    ], actions
+    # And nothing was restarted either.
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d" in line and "rollback-" in line
+    ]
+    assert not rollback_ups, rollback_ups
+
+
+def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
+    root, env, _old_hash, _new_hash = deploy_harness
+
+    result = subprocess.run(
+        ["sh", "deploy/vps-update.sh"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_log = (root / "docker.log").read_text(encoding="utf-8")
+    stop_lines = [
+        line for line in docker_log.splitlines() if "stop wuwaterm" in line
+    ]
+    assert stop_lines
+    assert all("wuwaterm-api" in line for line in stop_lines), stop_lines
+    up_lines = [line for line in docker_log.splitlines() if "up -d" in line]
+    assert up_lines
+    assert all("wuwaterm-api" in line for line in up_lines), up_lines
+    assert "exec -T wuwaterm-api" in docker_log
+    assert "deployment api container image id:" in result.stdout
+
+
+def test_api_state_directory_is_not_inside_the_bot_state_tree():
+    """The bot mounts all of state/ read-write; credentials must be outside."""
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    bot_section = compose.split("  wuwaterm:", 1)[1].split("  wuwaterm-api:", 1)[0]
+    assert "../state:/app/state" in bot_section
+    api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    assert "../state-api:/app/state-api" in api_section
+    assert ":/app/state" + chr(10) not in api_section
+
+    assert "WUWATERM_API_STATE_DIR=state-api" in env_example
+    # Runtime state, generated on the host, must never be committable.
+    assert "state-api/" in ignored
+
+
+def test_docker_context_excludes_the_api_state_and_sqlite_sidecars():
+    """Sidecars carry credential rows and do not match the *.db pattern."""
+    lines = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    }
+
+    for pattern in ("state", "state-api", "*.db", "*.db-wal", "*.db-shm"):
+        assert pattern in lines, pattern
+
+
+def test_documented_readback_uses_the_same_endpoint_the_updater_gates_on():
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    assert "/readyz" in text
+    # Liveness answers even with no terminology database mounted, so it must
+    # not be what an operator is told to read back.
+    assert "/healthz', timeout" not in text
+
+
+def test_the_guide_describes_the_credential_boundary_it_actually_has():
+    """The boundary is specific, not total, and saying otherwise is worse
+    than saying nothing: an operator would believe the model credential is
+    confined to the bot when both surfaces receive it."""
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "Runtime secrets are injected only into `wuwaterm`" not in text
+    assert "WUWATERM_OPENAI_API_KEY" in text
+    # Everything the guide claims is blanked must actually be blanked.
+    api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    for name in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TEST_CHAT_ID",
+        "OWNER_USER_ID",
+        "WUWATERM_REDACTION_SECRET",
+    ):
+        assert f"{name}: \"\"" in api_section, name
+        assert name in text, name
+    # ...and the model settings it says are shared must NOT be blanked.
+    assert "WUWATERM_OPENAI_API_KEY:" not in api_section
+
+
+def test_documented_api_commands_use_the_configured_port():
+    """The port is an option, so no operator command may assume the default.
+
+    A readback pinned to 8787 reports a connection failure after a perfectly
+    successful deployment on any host that set WUWATERM_API_PORT to something
+    else, and a tunnel pinned to 8787 forwards to a closed remote port.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    updater = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    # No documented URL may carry a literal port; the updater does not.
+    assert "http://127.0.0.1:8787" not in text
+    assert "http://127.0.0.1:8787" not in updater
+    # The readback reads the port the serving container was actually given,
+    # exactly as the updater's readiness smoke does.
+    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in text
+    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in updater
+    # The tunnel's remote end is discovered, not assumed.
+    assert "printenv WUWATERM_API_PORT" in text

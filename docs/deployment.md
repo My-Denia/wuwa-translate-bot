@@ -8,18 +8,41 @@ checkout with an `origin` remote and a `main` ref; the updater fetches and
 requires `HEAD == origin/main`, so an exported source copy without `.git` is
 intentionally not deployable. Create `/opt/wuwaterm/current/.env` from
 `.env.example` or `deploy/env.example`, and set it to mode `600`. These two
-template files are intentionally identical and tested for drift. Runtime
-secrets are injected only into `wuwaterm` through Compose `env_file`; the
-builder has no `env_file`, and `.env` is ignored and excluded from the image
-build context.
+template files are intentionally identical and tested for drift.
 
-The Compose file has two image roles:
+Both serving services read that one file through Compose `env_file`; the
+builder has no `env_file` at all, and `.env` is ignored and excluded from the
+image build context. What reaches each serving container is then narrowed by
+its own `environment:` block. `wuwaterm-api` has `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET` and the
+bot's state paths blanked, because none of them are its business. It does
+receive the model credentials — `WUWATERM_OPENAI_API_KEY` and the other
+`WUWATERM_OPENAI_*` settings — and that sharing is deliberate: both surfaces
+translate through the same upstream account, and a second key would carry the
+same power while doubling what has to be rotated. So the isolation boundary is
+specific, not total: the Telegram identity, the owner identity and the log
+redaction key stay with the bot; the model credential is shared.
 
-- `wuwaterm` builds the `runtime` target and only runs the Telegram bot. It
-  mounts `data/` at `/app/data` read-only and `state/` at `/app/state` writable.
-- `wuwaterm-builder` builds the `builder` target. It has `git` and build-only
-  dependencies, mounts `data/` writable, and runs `refresh-data`, `build-db`,
+The Compose file has two image roles across three services:
+
+- `wuwaterm` builds the `runtime` target and runs the Telegram bot. It mounts
+  `data/` at `/app/data` read-only and `state/` at `/app/state` writable.
+- `wuwaterm-api` runs the SAME runtime image with `command: ["api"]`. It mounts
+  the same `data/` read-only and its own `state-api/` at `/app/state-api`
+  writable, so the two serving processes never share writable state. That
+  directory is a SIBLING of `state/`, not a child: the bot mounts the whole of
+  `state/` read-write, so a child directory would have given the bot process
+  read-write access to the credential store. The API container also gets the
+  bot's credentials blanked, because they are not its business. It binds
+  loopback only, and that bind is fixed in the Compose file rather than read
+  from `.env`: with host networking, an environment knob would turn a public
+  exposure into a one-line edit.
+- `wuwaterm-builder` builds the `builder` target. It has the data-build
+  toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
+
+The runtime image refuses every command except `bot`, `api` and `device`
+(exit 64 otherwise), and still ships without the data-build toolchain.
 
 Prepare and verify a candidate without changing the serving database:
 
@@ -42,6 +65,72 @@ owner-gated:
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+## HTTP Adapter Service
+
+`wuwaterm-api` serves the versioned HTTP surface documented by
+`docs/api/openapi.json`. It adds **no new public surface**: it binds
+`WUWATERM_API_BIND` (default `127.0.0.1`) on `WUWATERM_API_PORT`
+(default `8787`), and the Compose file publishes no ports. The supported way
+for an owner desktop to reach it today is the SSH entry point that already
+exists for operating the host:
+
+The remote end of the tunnel must be the port that deployment actually
+configured, so read it from the running container rather than assuming the
+default; the local end is your own choice.
+
+```bash
+api_port="$(ssh <vps> 'cd /opt/wuwaterm/current && docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT')"
+ssh -N -L "8787:127.0.0.1:${api_port}" <vps>
+```
+
+Exposing the API on a public hostname would be a new ingress decision (DNS,
+TLS, a reverse-proxy route) and is deliberately not part of this topology.
+
+### Device Credentials
+
+There is no registration endpoint. Credentials are issued by the operator on
+the host and shown exactly once:
+
+```bash
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
+docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
+```
+
+`device issue` reads the secret from standard input; the service never prints
+credential material. Generate it where it will be stored, then register it:
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
+```
+
+The token is `wtd1.<device_id>.<that secret>`. Only a salted scrypt verifier is
+stored, in `state-api/devices.db` (created 0600, in a 0700 directory, together
+with its write-ahead log). Revoking keeps the row and stamps `revoked_at`, so a
+withdrawal stays auditable. Break-glass: deleting `state-api/devices.db`
+revokes every device at once, and the next start recreates an empty store.
+
+`state-api/` must exist and be writable by the container user before the first
+start; create it on the host rather than letting Docker create it root-owned:
+
+```bash
+mkdir -p state-api && chmod 700 state-api
+```
+
+### Cost Topology
+
+The API's budgets are per process and are NOT shared with the bot:
+
+| Process | Model concurrency | Model calls per minute |
+|---|---|---|
+| `wuwaterm` (bot) | `WUWATERM_LLM_MAX_CONCURRENCY` (default 4) | per-chat request limit only, plus the linked-channel budget |
+| `wuwaterm-api` | `WUWATERM_API_LLM_MAX_CONCURRENCY` (default 2) | `WUWATERM_API_LLM_CALLS_PER_MINUTE` (default 30) |
+
+The worst case for the host is the SUM of the two, never one shared ceiling.
+Nothing in either process coordinates with the other; if a single global budget
+is ever needed, that is a new mechanism, not a configuration change.
 
 ## State Migration
 
@@ -125,10 +214,14 @@ cd /opt/wuwaterm/current
 cat .deploy_commit
 python3 -m json.tool ".deployments/$(cat .deploy_commit).json"
 docker inspect --format '{{.Image}}' wuwaterm-bot
+docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
+docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api \
+  python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
 ```
 
-The pointer must equal the intended source SHA exactly; the running image ID
-and DB hash must match the manifest. These are runtime evidence only when read
+The pointer must equal the intended source SHA exactly; BOTH running image IDs
+and the DB hash must match the manifest, and the health check must print
+`200`. These are runtime evidence only when read
 from the actual VPS after deployment. Local tests and failure injection are
 offline/deployment validation, not proof that production changed.

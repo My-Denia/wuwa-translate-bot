@@ -47,6 +47,27 @@ if [ "${#source_commit}" -ne 40 ]; then
   exit 1
 fi
 
+# The device store's default moved from state/api/ - inside the directory the
+# bot mounts read-write in full - to the sibling state-api/. The library
+# refuses to create an empty store next to an old one, but the API container
+# only ever sees state-api/, so inside the container the old path does not
+# exist and that guard cannot fire. The host is the only place that can see
+# both, which makes this the only place the upgrade can be caught.
+# The presence of the old file is enough to refuse, whether or not a new one
+# exists: an earlier attempt may already have created an empty store at the new
+# path, and then having both is precisely the state where nobody can tell which
+# one holds the live verifiers.
+if [ -f "state/api/devices.db" ]; then
+  echo "refusing deployment: a device store still exists at" >&2
+  echo "state/api/devices.db, the path the API used before its state" >&2
+  echo "directory moved out of the bot's writable mount. The API now reads" >&2
+  echo "state-api/devices.db. Move that file, with any -wal and -shm" >&2
+  echo "sidecars, to state-api/ if it holds the live verifiers, or delete it" >&2
+  echo "if state-api/devices.db already does. Deploying with both in place" >&2
+  echo "could start an API that refuses every device ever registered." >&2
+  exit 1
+fi
+
 deployment_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 deployment_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 candidate_path="data/candidates/terms.$deployment_id.db"
@@ -58,6 +79,10 @@ manifest_path="$manifest_dir/$source_commit.json"
 pointer_path=".deploy_commit"
 new_image_ref="wuwaterm-runtime:$source_commit"
 rollback_image_ref="wuwaterm-runtime:rollback-$deployment_id"
+# Each surface gets its own rollback tag. They normally run the same image, but
+# a host recovered by hand can have them on different ones, and restoring both
+# from a single tag would move a surface onto an image it was never running.
+rollback_api_image_ref="wuwaterm-runtime:rollback-api-$deployment_id"
 
 mkdir -p data/candidates "$backup_dir" "$manifest_dir" state
 if [ -e "$candidate_path" ]; then
@@ -91,9 +116,24 @@ if [ -f "$db_path" ]; then
   old_db_present=1
 fi
 
+# Each surface is recorded separately, so a host on a pre-api deployment
+# (empty value) is handled without pretending the container ever existed.
+# Existence is not enough either: a container left stopped by an earlier failed
+# upgrade, or stopped deliberately by the operator, still answers
+# `docker inspect`. Rollback restores the state this deployment found, so what
+# it needs to know is whether each surface was RUNNING.
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
+old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
+old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
+old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
+# Tagged per surface: a host running only one of them still has an image to
+# roll back to, and a host whose two containers are on different images keeps
+# both of them.
 if [ -n "$old_image_id" ]; then
   docker image tag "$old_image_id" "$rollback_image_ref"
+fi
+if [ -n "$old_api_image_id" ]; then
+  docker image tag "$old_api_image_id" "$rollback_api_image_ref"
 fi
 
 # The builder tag is intentionally local and mutable, so rebuild it from the
@@ -176,6 +216,33 @@ rollback_on_failure() {
   echo "deployment failed; restoring previous database, image and pointer" >&2
   rollback_failed=0
   db_binding_restored=1
+
+  # Nothing may serve while the binding is being restored. If the replacement
+  # containers were started, they are running NEW code against a database that
+  # is about to be rolled back, which is the mixed binding this rollback exists
+  # to prevent. Both surfaces therefore go down before the database is touched;
+  # only what was running before the deployment comes back afterwards.
+  containers_quiesced=1
+  if [ "$runtime_stopped" -eq 1 ]; then
+    if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
+      echo "warning: replacement containers could not be stopped before rollback" >&2
+      rollback_failed=1
+      containers_quiesced=0
+    fi
+  fi
+
+  # If a container may still be serving, rolling the database back underneath
+  # it would CREATE the mixed binding instead of preventing it. Whatever the
+  # database and pointer currently are, they match the code that is running, so
+  # they are left exactly as they are and the operator is told to intervene.
+  if [ "$containers_quiesced" -eq 0 ]; then
+    echo "warning: a serving container could not be stopped; the database and" >&2
+    echo "commit pointer are left exactly as they are and nothing is" >&2
+    echo "restarted. Stop both containers by hand, then roll back." >&2
+    echo "warning: rollback completed with errors; manual recovery is required" >&2
+    exit "$status"
+  fi
+
   if [ "$db_promoted" -eq 1 ]; then
     if [ "$old_db_present" -eq 1 ]; then
       restore_tmp="$db_path.rollback.$deployment_id"
@@ -223,34 +290,55 @@ rollback_on_failure() {
     fi
   fi
 
+  # Everything the deployment started is already stopped by this point, so this
+  # section only decides what may come BACK. Anything not started here stays
+  # down, which is the correct outcome for a host that was not running it.
   if [ "$runtime_stopped" -eq 1 ]; then
-    if [ -n "$old_image_id" ]; then
-      if [ "$db_binding_restored" -eq 1 ]; then
+    if [ "$db_binding_restored" -eq 1 ]; then
+      # Same rule for both surfaces, and each is gated on ITS OWN state: a
+      # host running only the API has no bot image, and that must not decide
+      # whether the API comes back.
+      if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
         if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
           compose up -d --no-build --force-recreate wuwaterm; then
           echo "warning: old runtime image could not be restarted" >&2
           rollback_failed=1
         fi
-      else
-        echo "warning: refusing to restart old runtime without its database" >&2
-        rollback_failed=1
-        if ! compose stop wuwaterm >/dev/null 2>&1; then
-          echo "warning: replacement runtime could not be stopped" >&2
+      fi
+      # Only bring the api surface back if this host was actually RUNNING it
+      # when the deployment started. On a first upgrade there is nothing to
+      # restore, and a container that existed but was stopped (an earlier
+      # failed upgrade, or an operator decision) must not be started here.
+      if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
+        if ! WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref" \
+          compose up -d --no-build --force-recreate wuwaterm-api; then
+          echo "warning: old api image could not be restarted" >&2
+          rollback_failed=1
         fi
       fi
     else
-      if ! compose stop wuwaterm >/dev/null 2>&1; then
-        echo "warning: replacement runtime could not be stopped" >&2
-        rollback_failed=1
-      fi
+      echo "warning: refusing to restart old runtime without its database" >&2
+      rollback_failed=1
     fi
   fi
 
-  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ]; then
+  # The binding is verified against a surface that was actually RESTORED. A
+  # stopped bot container can sit on a different image than the running API,
+  # and verifying against the one that stayed down would compare the manifest
+  # to something this rollback never brought back. With nothing restored there
+  # is nothing to verify, and an empty id would compare against nothing at all.
+  verify_image_id=""
+  if [ "$old_bot_running" = "true" ] && [ -n "$old_image_id" ]; then
+    verify_image_id="$old_image_id"
+  elif [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
+    verify_image_id="$old_api_image_id"
+  fi
+  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ] \
+    && [ -n "$verify_image_id" ]; then
     if ! python3 scripts/deployment_manifest.py verify \
       --path "$manifest_dir/$old_pointer.json" \
       --source-commit "$old_pointer" \
-      --image-id "$old_image_id" \
+      --image-id "$verify_image_id" \
       --db "$db_path"; then
       echo "warning: restored deployment binding verification failed" >&2
       rollback_failed=1
@@ -268,9 +356,16 @@ rollback_on_failure() {
 }
 trap rollback_on_failure EXIT
 
-# Candidate DB and immutable image are both verified before this stop.
-compose stop wuwaterm
+# Candidate DB and immutable image are both verified before this stop. Both
+# surfaces mount the same terminology database read-only, so both must be down
+# while it is replaced.
+#
+# The transition is recorded BEFORE the command, for the same reason
+# db_promoted is: a combined stop that fails partway may already have stopped
+# one surface, and a rollback that believes nothing was touched would leave the
+# previously running bot down without saying so.
 runtime_stopped=1
+compose stop wuwaterm wuwaterm-api
 db_promoted=1
 python3 scripts/deployment_manifest.py durable-replace \
   --source "$candidate_path" --destination "$db_path"
@@ -305,15 +400,39 @@ done
 fail_if state
 
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose up -d --no-build \
-  --force-recreate wuwaterm
+  --force-recreate wuwaterm wuwaterm-api
 fail_if start
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
   -e TELEGRAM_TEST_CHAT_ID= wuwaterm python scripts/deploy_smoke.py
+# The api surface binds loopback only, so its smoke runs inside its own
+# container and needs nothing exposed to the host. Readiness, not liveness:
+# /healthz answers while the terminology database is missing or mounted at the
+# wrong path, and publishing a deployment in that state is exactly what this
+# check exists to prevent.
+WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T wuwaterm-api \
+  python -c "import os, sys, time, urllib.error, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); url = 'http://127.0.0.1:' + port + '/readyz'; deadline = time.monotonic() + 60.0; last = 'no attempt'
+while time.monotonic() < deadline:
+    try:
+        response = urllib.request.urlopen(url, timeout=5)
+    except (urllib.error.URLError, OSError) as exc:
+        last = type(exc).__name__
+        time.sleep(1.0)
+        continue
+    if response.status == 200:
+        sys.exit(0)
+    last = 'status ' + str(response.status)
+    time.sleep(1.0)
+sys.exit('api readiness never reported ok: ' + last)"
 fail_if smoke
 
 running_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot)"
 if [ "$running_image_id" != "$image_id" ]; then
   echo "running container image does not match validated image" >&2
+  exit 1
+fi
+running_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
+if [ "$running_api_image_id" != "$image_id" ]; then
+  echo "running api container image does not match validated image" >&2
   exit 1
 fi
 
@@ -348,6 +467,8 @@ trap - EXIT
 
 echo "deployment source commit: $source_commit"
 echo "deployment image id: $image_id"
+echo "deployment bot container image id: $running_image_id"
+echo "deployment api container image id: $running_api_image_id"
 echo "deployment image digest: $image_digest"
 echo "deployment database sha256: $db_hash"
 echo "deployment manifest: $manifest_path"

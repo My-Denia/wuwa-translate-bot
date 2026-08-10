@@ -1,7 +1,7 @@
 """Revocable device principals for the HTTP adapter.
 
 Identity here is completely separate from Telegram: a device is its own
-principal with its own store (``state/api/devices.db``), so revoking API access
+principal with its own store (``state-api/devices.db``), so revoking API access
 cannot touch the bot's allowlist and vice versa.
 
 Token format::
@@ -48,6 +48,15 @@ from pathlib import Path
 
 TOKEN_SCHEME = "wtd1"
 TOKEN_PARTS = 3
+
+# The store used to default to state/api/, a child of the directory the bot
+# mounts read-write in full. It now lives in the sibling state-api/. An
+# installation that ran on the old default still holds every verifier in the
+# old file, and creating an empty store at the new path would look like a
+# clean start while silently refusing every registered device.
+LEGACY_STATE_DIR_NAME = "state"
+LEGACY_STATE_SUBDIR_NAME = "api"
+CURRENT_STATE_DIR_NAME = "state-api"
 # A supplied secret must have at least this much material. 32 URL-safe
 # characters is roughly 190 bits, far past what a hash-only store needs.
 MIN_SECRET_LENGTH = 32
@@ -160,13 +169,49 @@ def parse_token(token: str) -> tuple[str, str] | None:
     return device_id, secret
 
 
+def legacy_store_path(path: Path) -> Path | None:
+    """Where a store written before the sibling-directory move would live.
+
+    Only meaningful for the default layout: an operator who set an explicit
+    path never had the old default in the first place.
+    """
+    if path.parent.name != CURRENT_STATE_DIR_NAME:
+        return None
+    return (
+        path.parent.parent
+        / LEGACY_STATE_DIR_NAME
+        / LEGACY_STATE_SUBDIR_NAME
+        / path.name
+    )
+
+
 class DeviceStore:
     """SQLite-backed device registry. One small file, no server."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, guard_legacy_default: bool = True):
         self.path = Path(path)
+        # Only the DEFAULT layout ever had the old path. An operator who names
+        # a store explicitly means that store, even if it happens to sit in a
+        # directory called state-api, so callers that know the path was chosen
+        # turn this off.
+        self.guard_legacy_default = guard_legacy_default
 
     def initialize(self) -> None:
+        # Whether or not a store already exists here: an earlier start may
+        # have created an empty one at this path, and two stores is precisely
+        # the state in which nobody can tell which file holds the live
+        # verifiers.
+        legacy = legacy_store_path(self.path) if self.guard_legacy_default else None
+        if legacy is not None and legacy.exists():
+            raise DeviceStoreError(
+                f"a device store still exists at {legacy}, the path this "
+                f"service used before its state directory moved out of the "
+                f"bot's writable mount. It now reads {self.path}. Move that "
+                f"file (with any -wal and -shm sidecars) here if it holds the "
+                f"live verifiers, or delete it if this one does, or point "
+                f"WUWATERM_API_DEVICE_DB_PATH at the store you mean. Starting "
+                f"with both in place could refuse every device ever registered"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists()
         with self._connect() as conn:
