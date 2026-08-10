@@ -11,6 +11,7 @@ htmlcov/
 # Local WutheringData checkout and generated DBs.
 data/
 state/
+state-api/
 goal-runs/
 .deployments/
 .deploy_commit

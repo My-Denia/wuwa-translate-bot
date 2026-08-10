@@ -1019,11 +1019,19 @@ def test_compose_api_service_is_loopback_only_with_separate_state():
     assert "restart: unless-stopped" in api_section
     # Same terminology database, read-only; its own writable state directory.
     assert "../data:/app/data:ro" in api_section
-    assert "../state/api:/app/state-api" in api_section
+    # A SIBLING of the bot's state tree, never a child of it: the bot mounts
+    # the whole of ../state read-write.
+    assert "../state-api:/app/state-api" in api_section
+    assert "../state/" not in api_section
     assert "WUWATERM_API_STATE_DIR: /app/state-api" in api_section
-    # Loopback default, and no published ports anywhere in the file.
-    assert "WUWATERM_API_BIND: ${WUWATERM_API_BIND:-127.0.0.1}" in api_section
+    # The bind is fixed in this file, not interpolated: with host networking an
+    # environment knob would make a public exposure a one-line edit.
+    assert "WUWATERM_API_BIND: 127.0.0.1" in api_section
+    assert "${WUWATERM_API_BIND" not in text
     assert "ports:" not in text
+    # The bot's credentials are not this process' business.
+    for blanked in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_TEST_CHAT_ID", "OWNER_USER_ID"):
+        assert f'{blanked}: ""' in api_section, blanked
     # It must not be able to write the chat state the bot owns.
     assert "/app/state\n" not in api_section
 
@@ -1032,9 +1040,8 @@ def test_env_example_covers_the_api_surface():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     for name in (
-        "WUWATERM_API_BIND=127.0.0.1",
         "WUWATERM_API_PORT=8787",
-        "WUWATERM_API_STATE_DIR=state/api",
+        "WUWATERM_API_STATE_DIR=state-api",
         "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
         "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
         "WUWATERM_API_RATE_LIMIT_PER_MINUTE=30",
@@ -1054,15 +1061,20 @@ def test_vps_update_manages_both_surfaces_together():
     assert "compose stop wuwaterm wuwaterm-api" in text
     # Up together, from the same validated image.
     assert "--force-recreate wuwaterm wuwaterm-api" in text
-    # Smoked in-container over loopback, so nothing has to be exposed.
+    # Smoked in-container over loopback, so nothing has to be exposed, and
+    # against readiness rather than liveness: /healthz answers even when the
+    # terminology database is missing or mounted at the wrong path.
     assert "compose exec -T wuwaterm-api" in text
-    assert "/healthz" in text
+    assert "/readyz" in text
     # Read back separately, and both must match the validated image id.
     assert "running_api_image_id=" in text
     assert "running api container image does not match validated image" in text
-    # Rollback restores the api surface only when the host was running it.
+    # Rollback restores the api surface only when the host was running it, and
+    # stops a first-deployment container rather than leaving it serving from a
+    # rolled-back database.
     assert 'if [ -n "$old_api_image_id" ]; then' in text
     assert "compose up -d --no-build --force-recreate wuwaterm-api" in text
+    assert "newly created api container could not be stopped" in text
 
 
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
@@ -1090,3 +1102,20 @@ def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
     assert all("wuwaterm-api" in line for line in up_lines), up_lines
     assert "exec -T wuwaterm-api" in docker_log
     assert "deployment api container image id:" in result.stdout
+
+
+def test_api_state_directory_is_not_inside_the_bot_state_tree():
+    """The bot mounts all of state/ read-write; credentials must be outside."""
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    bot_section = compose.split("  wuwaterm:", 1)[1].split("  wuwaterm-api:", 1)[0]
+    assert "../state:/app/state" in bot_section
+    api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    assert "../state-api:/app/state-api" in api_section
+    assert ":/app/state" + chr(10) not in api_section
+
+    assert "WUWATERM_API_STATE_DIR=state-api" in env_example
+    # Runtime state, generated on the host, must never be committable.
+    assert "state-api/" in ignored

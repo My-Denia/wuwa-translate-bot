@@ -19,7 +19,9 @@ class ApiConfigError(ValueError):
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_DB_PATH = "data/terms.db"
-DEFAULT_STATE_DIR = "state/api"
+# A sibling of the bot's state directory, never a child of it: the bot
+# mounts the whole of state/ read-write.
+DEFAULT_STATE_DIR = "state-api"
 DEVICE_DB_FILENAME = "devices.db"
 
 # Deliberately smaller than the bot's: the API is a single-owner surface and a

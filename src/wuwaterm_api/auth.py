@@ -1,7 +1,7 @@
 """Revocable device principals for the HTTP adapter.
 
 Identity here is completely separate from Telegram: a device is its own
-principal with its own store (``state/api/devices.db``), so revoking API access
+principal with its own store (``state-api/devices.db``), so revoking API access
 cannot touch the bot's allowlist and vice versa.
 
 Token format::

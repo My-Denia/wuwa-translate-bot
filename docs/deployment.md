@@ -18,9 +18,15 @@ The Compose file has two image roles across three services:
 - `wuwaterm` builds the `runtime` target and runs the Telegram bot. It mounts
   `data/` at `/app/data` read-only and `state/` at `/app/state` writable.
 - `wuwaterm-api` runs the SAME runtime image with `command: ["api"]`. It mounts
-  the same `data/` read-only and its own `state/api/` at `/app/state-api`
-  writable, so the two serving processes never share writable state. It binds
-  loopback only.
+  the same `data/` read-only and its own `state-api/` at `/app/state-api`
+  writable, so the two serving processes never share writable state. That
+  directory is a SIBLING of `state/`, not a child: the bot mounts the whole of
+  `state/` read-write, so a child directory would have given the bot process
+  read-write access to the credential store. The API container also gets the
+  bot's credentials blanked, because they are not its business. It binds
+  loopback only, and that bind is fixed in the Compose file rather than read
+  from `.env`: with host networking, an environment knob would turn a public
+  exposure into a one-line edit.
 - `wuwaterm-builder` builds the `builder` target. It has the data-build
   toolchain, mounts `data/` writable, and runs `refresh-data`, `build-db`,
   and `verify-db`.
@@ -78,10 +84,25 @@ docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
 ```
 
-Only `sha256(secret)` is stored, in `state/api/devices.db`. Revoking keeps the
-row and stamps `revoked_at`, so a withdrawal stays auditable. Break-glass:
-deleting `state/api/devices.db` revokes every device at once, and the next
-start recreates an empty store.
+`device issue` reads the secret from standard input; the service never prints
+credential material. Generate it where it will be stored, then register it:
+
+```bash
+docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
+```
+
+The token is `wtd1.<device_id>.<that secret>`. Only a salted scrypt verifier is
+stored, in `state-api/devices.db` (created 0600, in a 0700 directory, together
+with its write-ahead log). Revoking keeps the row and stamps `revoked_at`, so a
+withdrawal stays auditable. Break-glass: deleting `state-api/devices.db`
+revokes every device at once, and the next start recreates an empty store.
+
+`state-api/` must exist and be writable by the container user before the first
+start; create it on the host rather than letting Docker create it root-owned:
+
+```bash
+mkdir -p state-api && chmod 700 state-api
+```
 
 ### Cost Topology
 

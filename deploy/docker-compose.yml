@@ -26,6 +26,11 @@ services:
   # separate writable state. It binds loopback only, so the host gains no new
   # public surface; the owner desktop reaches it through the existing SSH
   # entry point.
+  #
+  # Its state directory is a SIBLING of the bot's, not a child: the bot mounts
+  # the whole of ../state read-write, so a child directory would have handed
+  # the bot process read-write access to the credential store and defeated the
+  # separation this service exists to have.
   wuwaterm-api:
     build:
       context: ..
@@ -42,11 +47,22 @@ services:
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db
       WUWATERM_API_STATE_DIR: /app/state-api
-      WUWATERM_API_BIND: ${WUWATERM_API_BIND:-127.0.0.1}
+      # NOT interpolated from .env on purpose. This service uses host
+      # networking, so a value like 0.0.0.0 would publish the API on every
+      # interface with no port-publish gate in front of it. Exposing this
+      # surface is an ingress decision that belongs in this file, in review,
+      # not in an environment file an operator edits in a hurry.
+      WUWATERM_API_BIND: 127.0.0.1
       WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8787}
+      # The bot's credentials are not this process' business. env_file carries
+      # the shared model settings; these are blanked so a compromise or a stray
+      # environment dump here cannot yield the chat token or owner id.
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_TEST_CHAT_ID: ""
+      OWNER_USER_ID: ""
     volumes:
       - ../data:/app/data:ro
-      - ../state/api:/app/state-api
+      - ../state-api:/app/state-api
     command: ["api"]
 
   wuwaterm-builder:

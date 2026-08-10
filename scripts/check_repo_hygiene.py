@@ -50,7 +50,7 @@ def is_game_text_path(rel: str) -> bool:
 def is_runtime_state_path(rel: str) -> bool:
     name = Path(rel).name
     return (
-        rel.startswith("state/")
+        rel.startswith(("state/", "state-api/"))
         or name in RUNTIME_STATE_NAMES
         or name.startswith(".chat_settings.")
         or name.startswith(".channel_replies.")

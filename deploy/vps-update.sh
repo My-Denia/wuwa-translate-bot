@@ -236,10 +236,18 @@ rollback_on_failure() {
           rollback_failed=1
         fi
         # Only bring the api surface back if this host was already running it.
+        # On a first upgrade there is nothing to restore, but the replacement
+        # may already be running, so it has to be stopped rather than left
+        # behind serving from a rolled-back database.
         if [ -n "$old_api_image_id" ]; then
           if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
             compose up -d --no-build --force-recreate wuwaterm-api; then
             echo "warning: old api image could not be restarted" >&2
+            rollback_failed=1
+          fi
+        else
+          if ! compose stop wuwaterm-api >/dev/null 2>&1; then
+            echo "warning: newly created api container could not be stopped" >&2
             rollback_failed=1
           fi
         fi
@@ -324,9 +332,12 @@ fail_if start
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
   -e TELEGRAM_TEST_CHAT_ID= wuwaterm python scripts/deploy_smoke.py
 # The api surface binds loopback only, so its smoke runs inside its own
-# container and needs nothing exposed to the host.
+# container and needs nothing exposed to the host. Readiness, not liveness:
+# /healthz answers while the terminology database is missing or mounted at the
+# wrong path, and publishing a deployment in that state is exactly what this
+# check exists to prevent.
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T wuwaterm-api \
-  python -c "import os, sys, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); response = urllib.request.urlopen('http://127.0.0.1:' + port + '/healthz', timeout=10); sys.exit(0 if response.status == 200 else 1)"
+  python -c "import os, sys, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); response = urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10); sys.exit(0 if response.status == 200 else 1)"
 fail_if smoke
 
 running_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot)"
