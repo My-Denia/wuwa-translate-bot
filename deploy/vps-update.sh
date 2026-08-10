@@ -191,11 +191,25 @@ rollback_on_failure() {
   # is about to be rolled back, which is the mixed binding this rollback exists
   # to prevent. Both surfaces therefore go down before the database is touched;
   # only what was running before the deployment comes back afterwards.
+  containers_quiesced=1
   if [ "$runtime_stopped" -eq 1 ]; then
     if ! compose stop wuwaterm wuwaterm-api >/dev/null 2>&1; then
       echo "warning: replacement containers could not be stopped before rollback" >&2
       rollback_failed=1
+      containers_quiesced=0
     fi
+  fi
+
+  # If a replacement container may still be serving, rolling the database back
+  # underneath it would CREATE the mixed binding instead of preventing it. The
+  # promoted database and pointer are consistent with the code that is running,
+  # so they are left exactly as they are and the operator is told to intervene.
+  if [ "$containers_quiesced" -eq 0 ]; then
+    echo "warning: a replacement container may still be serving; the promoted" >&2
+    echo "database and commit pointer are left in place and nothing is" >&2
+    echo "restarted. Stop both containers by hand, then roll back." >&2
+    echo "warning: rollback completed with errors; manual recovery is required" >&2
+    exit "$status"
   fi
 
   if [ "$db_promoted" -eq 1 ]; then

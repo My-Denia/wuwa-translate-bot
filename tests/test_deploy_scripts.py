@@ -606,6 +606,18 @@ def deploy_harness(tmp_path):
         # One ordered stream across both fakes, so a test can assert that a
         # container stop happens BEFORE the database is touched.
         "echo \"docker $*\" >> \"$FAKE_DEPLOY_ROOT/actions.log\"\n"
+        # Fail only the SECOND stop: the deployment's own stop must succeed so
+        # the run reaches the rollback whose stop is under test.
+        "if [ \"${FAKE_ROLLBACK_STOP_FAILURE:-0}\" = 1 ]; then\n"
+        "  case \"$*\" in\n"
+        "    *' stop '*)\n"
+        "      stops=$(cat \"$FAKE_DEPLOY_ROOT/stop-count\" 2>/dev/null || echo 0)\n"
+        "      stops=$((stops + 1))\n"
+        "      echo \"$stops\" > \"$FAKE_DEPLOY_ROOT/stop-count\"\n"
+        "      if [ \"$stops\" -ge 2 ]; then exit 1; fi\n"
+        "      ;;\n"
+        "  esac\n"
+        "fi\n"
         "if [ \"${1:-}\" = inspect ]; then\n"
         # A stopped container still answers `docker inspect`, so the fake has
         # to answer the running-state query separately from the image query.
@@ -1192,6 +1204,55 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     # Nothing is started between that stop and the restored database.
     between = actions[stops_before_restore[-1] : restore_at]
     assert not [line for line in between if "up -d" in line], between
+
+
+def test_vps_update_leaves_the_binding_alone_when_it_cannot_stop_the_surfaces(
+    deploy_harness,
+):
+    """A stop that fails must abort the restoration, not proceed without it.
+
+    Rolling the database back while a replacement container may still be
+    serving would CREATE the mixed binding the rollback exists to prevent. The
+    promoted database and pointer are at least consistent with the code that is
+    running, so they stay, and the operator is told to intervene.
+    """
+    root, env, _old_hash, new_hash = deploy_harness
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+    env["FAKE_ROLLBACK_STOP_FAILURE"] = "1"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    assert "may still be serving" in result.stderr
+    assert "manual recovery is required" in result.stderr
+    # The promoted database is still the promoted one: nothing was reverted
+    # underneath a container that may still be reading it.
+    assert (
+        hashlib.sha256((root / "data" / "terms.db").read_bytes()).hexdigest()
+        == new_hash
+    )
+    # The pointer is published after the smoke, so it never moved; what
+    # matters is that the rollback did not try to move it back either.
+    assert (root / ".deploy_commit").read_text(encoding="ascii") == f"{OLD_COMMIT}\n"
+    actions = (root / "actions.log").read_text(encoding="utf-8").splitlines()
+    assert not [
+        line for line in actions if "durable-replace --source data/terms.db.rollback." in line
+    ], actions
+    # And nothing was restarted either.
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d" in line and "rollback-" in line
+    ]
+    assert not rollback_ups, rollback_ups
 
 
 def test_vps_update_stops_and_restarts_both_surfaces(deploy_harness):
