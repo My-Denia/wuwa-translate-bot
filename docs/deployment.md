@@ -8,10 +8,20 @@ checkout with an `origin` remote and a `main` ref; the updater fetches and
 requires `HEAD == origin/main`, so an exported source copy without `.git` is
 intentionally not deployable. Create `/opt/wuwaterm/current/.env` from
 `.env.example` or `deploy/env.example`, and set it to mode `600`. These two
-template files are intentionally identical and tested for drift. Runtime
-secrets are injected only into `wuwaterm` through Compose `env_file`; the
-builder has no `env_file`, and `.env` is ignored and excluded from the image
-build context.
+template files are intentionally identical and tested for drift.
+
+Both serving services read that one file through Compose `env_file`; the
+builder has no `env_file` at all, and `.env` is ignored and excluded from the
+image build context. What reaches each serving container is then narrowed by
+its own `environment:` block. `wuwaterm-api` has `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_TEST_CHAT_ID`, `OWNER_USER_ID`, `WUWATERM_REDACTION_SECRET` and the
+bot's state paths blanked, because none of them are its business. It does
+receive the model credentials — `WUWATERM_OPENAI_API_KEY` and the other
+`WUWATERM_OPENAI_*` settings — and that sharing is deliberate: both surfaces
+translate through the same upstream account, and a second key would carry the
+same power while doubling what has to be rotated. So the isolation boundary is
+specific, not total: the Telegram identity, the owner identity and the log
+redaction key stay with the bot; the model credential is shared.
 
 The Compose file has two image roles across three services:
 

@@ -1062,6 +1062,49 @@ def test_a_store_written_by_an_older_shape_is_reported_clearly(tmp_path):
     assert "older device store" in str(excinfo.value)
 
 
+def test_a_store_left_at_the_old_default_path_is_not_silently_abandoned(tmp_path):
+    """The store moved out of the bot's writable mount between builds.
+
+    An installation that ran on the old default keeps every verifier in
+    state/api/devices.db. Creating an empty store at the new path would look
+    like a clean start while every registered device stopped authenticating,
+    so the move has to be refused loudly instead.
+    """
+    legacy = tmp_path / "state" / "api" / "devices.db"
+    legacy.parent.mkdir(parents=True)
+    DeviceStore(legacy).initialize()
+    assert legacy.exists()
+
+    current = tmp_path / "state-api" / "devices.db"
+    with pytest.raises(DeviceStoreError) as excinfo:
+        DeviceStore(current).initialize()
+
+    message = str(excinfo.value)
+    assert str(legacy) in message
+    assert str(current) in message
+    assert not current.exists()
+
+
+def test_an_explicit_store_path_never_looks_for_the_old_default(tmp_path):
+    """Only the default layout ever had the old path."""
+    legacy = tmp_path / "state" / "api" / "devices.db"
+    legacy.parent.mkdir(parents=True)
+    DeviceStore(legacy).initialize()
+
+    chosen = tmp_path / "somewhere-else" / "devices.db"
+    DeviceStore(chosen).initialize()
+
+    assert chosen.exists()
+
+
+def test_the_moved_store_starts_normally_once_it_is_in_place(tmp_path):
+    """The guard must not fire when there is nothing left behind."""
+    current = tmp_path / "state-api" / "devices.db"
+    DeviceStore(current).initialize()
+
+    assert current.exists()
+
+
 def test_credential_verification_is_bounded_before_any_device_limit(
     tmp_path, sample_db
 ):

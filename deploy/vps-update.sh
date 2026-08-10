@@ -92,6 +92,9 @@ if [ -f "$db_path" ]; then
 fi
 
 old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null || true)"
+# Running, not merely present: an operator can stop the bot on purpose, and a
+# rollback that starts it again would enable a surface that was down.
+old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
 if [ -n "$old_image_id" ]; then
   docker image tag "$old_image_id" "$rollback_image_ref"
 fi
@@ -264,10 +267,14 @@ rollback_on_failure() {
   # down, which is the correct outcome for a host that was not running it.
   if [ "$runtime_stopped" -eq 1 ] && [ -n "$old_image_id" ]; then
     if [ "$db_binding_restored" -eq 1 ]; then
-      if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
-        compose up -d --no-build --force-recreate wuwaterm; then
-        echo "warning: old runtime image could not be restarted" >&2
-        rollback_failed=1
+      # Same rule for both surfaces: restore what was RUNNING, not what
+      # merely existed.
+      if [ "$old_bot_running" = "true" ]; then
+        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+          compose up -d --no-build --force-recreate wuwaterm; then
+          echo "warning: old runtime image could not be restarted" >&2
+          rollback_failed=1
+        fi
       fi
       # Only bring the api surface back if this host was actually RUNNING it
       # when the deployment started. On a first upgrade there is nothing to

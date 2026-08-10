@@ -630,7 +630,7 @@ def deploy_harness(tmp_path):
         "    *State.Running*wuwaterm-api*)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/api-running\" ;;\n"
         "    *State.Running*)\n"
-        "      echo true ;;\n"
+        "      cat \"$FAKE_DEPLOY_ROOT/bot-running\" ;;\n"
         "    *)\n"
         "      cat \"$FAKE_DEPLOY_ROOT/running-image\" ;;\n"
         "  esac\n"
@@ -739,8 +739,9 @@ def deploy_harness(tmp_path):
     python_script.chmod(0o755)
     (root / "running-image").write_text(f"{OLD_IMAGE}\n", encoding="ascii")
     # Default host state: both surfaces were up when the deployment started.
-    # A test that wants a present-but-stopped API rewrites this file.
+    # A test that wants a present-but-stopped surface rewrites these.
     (root / "api-running").write_text("true\n", encoding="ascii")
+    (root / "bot-running").write_text("true\n", encoding="ascii")
 
     old_hash = hashlib.sha256(old_db.read_bytes()).hexdigest()
     new_hash = hashlib.sha256(seed_db.read_bytes()).hexdigest()
@@ -1211,6 +1212,36 @@ def test_vps_update_stops_both_surfaces_before_restoring_the_database(
     assert not [line for line in between if "up -d" in line], between
 
 
+def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
+    """The rule is the same for both surfaces: restore what was running.
+
+    A combined stop that fails on one container still records the transition,
+    so the rollback must not read "we stopped it" as "it was up".
+    """
+    root, env, _old_hash, _new_hash = deploy_harness
+    (root / "bot-running").write_text("false\n", encoding="ascii")
+    env["WUWATERM_FAIL_STEP"] = "smoke"
+
+    result = subprocess.run(
+        ["sh", str(root / "deploy" / "vps-update.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 97, result.stdout + result.stderr
+    rollback_ups = [
+        line
+        for line in (root / "docker.log").read_text(encoding="utf-8").splitlines()
+        if "up -d --no-build --force-recreate" in line and "rollback-" in line
+    ]
+    assert rollback_ups, "the api was running and should have come back"
+    assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
+
+
 def test_vps_update_reports_a_failed_stop_before_the_database_moves(
     deploy_harness,
 ):
@@ -1355,6 +1386,29 @@ def test_documented_readback_uses_the_same_endpoint_the_updater_gates_on():
     # Liveness answers even with no terminology database mounted, so it must
     # not be what an operator is told to read back.
     assert "/healthz', timeout" not in text
+
+
+def test_the_guide_describes_the_credential_boundary_it_actually_has():
+    """The boundary is specific, not total, and saying otherwise is worse
+    than saying nothing: an operator would believe the model credential is
+    confined to the bot when both surfaces receive it."""
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "Runtime secrets are injected only into `wuwaterm`" not in text
+    assert "WUWATERM_OPENAI_API_KEY" in text
+    # Everything the guide claims is blanked must actually be blanked.
+    api_section = compose.split("  wuwaterm-api:", 1)[1].split("  wuwaterm-builder:", 1)[0]
+    for name in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_TEST_CHAT_ID",
+        "OWNER_USER_ID",
+        "WUWATERM_REDACTION_SECRET",
+    ):
+        assert f"{name}: \"\"" in api_section, name
+        assert name in text, name
+    # ...and the model settings it says are shared must NOT be blanked.
+    assert "WUWATERM_OPENAI_API_KEY:" not in api_section
 
 
 def test_documented_api_commands_use_the_configured_port():

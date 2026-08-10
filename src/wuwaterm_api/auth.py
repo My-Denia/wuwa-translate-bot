@@ -48,6 +48,15 @@ from pathlib import Path
 
 TOKEN_SCHEME = "wtd1"
 TOKEN_PARTS = 3
+
+# The store used to default to state/api/, a child of the directory the bot
+# mounts read-write in full. It now lives in the sibling state-api/. An
+# installation that ran on the old default still holds every verifier in the
+# old file, and creating an empty store at the new path would look like a
+# clean start while silently refusing every registered device.
+LEGACY_STATE_DIR_NAME = "state"
+LEGACY_STATE_SUBDIR_NAME = "api"
+CURRENT_STATE_DIR_NAME = "state-api"
 # A supplied secret must have at least this much material. 32 URL-safe
 # characters is roughly 190 bits, far past what a hash-only store needs.
 MIN_SECRET_LENGTH = 32
@@ -160,6 +169,22 @@ def parse_token(token: str) -> tuple[str, str] | None:
     return device_id, secret
 
 
+def legacy_store_path(path: Path) -> Path | None:
+    """Where a store written before the sibling-directory move would live.
+
+    Only meaningful for the default layout: an operator who set an explicit
+    path never had the old default in the first place.
+    """
+    if path.parent.name != CURRENT_STATE_DIR_NAME:
+        return None
+    return (
+        path.parent.parent
+        / LEGACY_STATE_DIR_NAME
+        / LEGACY_STATE_SUBDIR_NAME
+        / path.name
+    )
+
+
 class DeviceStore:
     """SQLite-backed device registry. One small file, no server."""
 
@@ -167,6 +192,19 @@ class DeviceStore:
         self.path = Path(path)
 
     def initialize(self) -> None:
+        if not self.path.exists():
+            legacy = legacy_store_path(self.path)
+            if legacy is not None and legacy.exists():
+                raise DeviceStoreError(
+                    f"the device store moved from {legacy} to {self.path}, so "
+                    f"the bot's writable state mount can no longer reach it, "
+                    f"and {legacy} still holds the only copy of the verifiers. "
+                    f"Move that file (with any -wal and -shm sidecars) to "
+                    f"{self.path}, or point WUWATERM_API_DEVICE_DB_PATH at it, "
+                    f"before starting. Creating an empty store here would look "
+                    f"like a clean start while every registered device stopped "
+                    f"authenticating"
+                )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists()
         with self._connect() as conn:

@@ -55,9 +55,17 @@ does not distribute generated game data or generated SQLite databases.
 - The runtime entry point accepts `bot`, `api` and `device` and still exits 64
   for every data-build command. CI asserts both halves.
 - `deploy/vps-update.sh` now stops, restarts, smokes and reads back BOTH
-  serving containers, and its rollback restores the API surface only on hosts
-  that were already running it. The API smoke runs inside its own container
-  over loopback, so nothing has to be exposed to run it.
+  serving containers. The API smoke runs inside its own container over
+  loopback, so nothing has to be exposed to run it.
+- Rollback restores what was RUNNING, not what merely existed: both surfaces
+  record their running state before the deployment, both go down before the
+  database is rolled back, and a stop that fails aborts the restoration
+  entirely rather than reverting a database underneath a container that may
+  still be serving it.
+- The device store refuses to start an empty store at the new
+  `state-api/devices.db` while an older `state/api/devices.db` still holds the
+  verifiers; that would have looked like a clean start while every registered
+  device stopped authenticating.
 - `scripts/check_non_goals.py` skips nested virtual environments and build
   output at any depth, so a per-component venv cannot drown the product gate in
   third-party matches.
