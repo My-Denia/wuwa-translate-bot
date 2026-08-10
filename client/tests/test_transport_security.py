@@ -137,6 +137,29 @@ def test_https_anywhere_and_plain_http_to_this_machine_are_accepted(address: str
         _close(client)
 
 
+def test_the_address_that_is_validated_is_the_address_that_is_used() -> None:
+    """Whitespace made the two differ.
+
+    `usable_base_url` strips before parsing, so `" https://api.example.com "`
+    is approved in its stripped form; handing httpx the raw string meant the
+    approved address and the configured one were not the same address - httpx
+    reads a leading space as the start of a relative URL.
+    """
+    padded = "  https://api.example.com  "
+    client = ApiClient(padded, token_provider=lambda: None)
+    try:
+        assert _parts(client._client.base_url) == ("https", "api.example.com", 443, "/")
+        client.update_base_url("\thttps://other.example.com\n")
+        assert _parts(client._client.base_url) == (
+            "https",
+            "other.example.com",
+            443,
+            "/",
+        )
+    finally:
+        _close(client)
+
+
 def test_a_refused_address_leaves_the_running_client_where_it_was() -> None:
     """A rejected settings change must not half-apply: the previous address
     stays in effect, so the owner keeps a working client."""

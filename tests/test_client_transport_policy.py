@@ -71,39 +71,76 @@ SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml", ".spec", ".ps1", ".txt", ".to
 #     not be a CI failure;
 #   * a FORWARD-SPEC lookahead after the flag letter, because dropping the
 #     boundary re-opened the same false-positive class from the other side:
-#     `ssh vps 'chown -R deploy:deploy /opt'`, `cp -R`, `curl -L https://…`
-#     and `-oLogLevel=ERROR` all carry an uppercase L/D/R that forwards
-#     nothing. A real forward is always followed by a port: `-L8787:`,
-#     `-L 8787:host:port`, `-D 1080`;
+#     `chown -R deploy:deploy`, `cp -R`, `curl -L https://…` and
+#     `-oLogLevel=ERROR` all carry an uppercase L/D/R that forwards nothing;
+#   * quoted segments blanked before the FLAG patterns run, because
+#     `ssh <vps> '…'` carries a remote command whose flags are not ssh's;
 #   * both spellings of the prose, since "a forwarded port" and "port
 #     forwarding" are the same instruction written two ways.
-_FORWARD_SPEC = r"(?=\d|\s*\d|\s*[\w.-]+:\d)"
-_FORWARDING_RECIPE_SOURCE = rf"""
+# `-L`/`-R` take `[bind:]port:host:hostport` - a colon-separated list ending in
+# a port - so their argument always contains a colon with a digit after it.
+# `chmod -R 755`, `cp -R state state.backup` and `chown -R deploy:deploy` do
+# not, and the shape is written loosely enough (`\S`) to cover the documented
+# bind spellings `*:8787:…` and `/run/x.sock:…` as well as bracketed IPv6.
+# `-D` takes a bare port and cannot be told apart from an ordinary flag by its
+# argument at all; what keeps it honest is where it is allowed to appear - see
+# the quote stripping below.
+_SPEC_LR = r"(?=\s*\S*:\S*\d)"
+_SPEC_D = r"(?=\s*\d)"
+
+# Wording that is a forwarding instruction wherever it appears, quoted or not.
+_RECIPE_PROSE_SOURCE = r"""
     \btunnel\w* | \bautossh\b
     | \bport[-\s]?forward\w*
     | \bLocalForward\b | \bRemoteForward\b
-    | (?-i:-N\s+-L)
-    | \bssh\s+-\w*(?-i:[LDR]){_FORWARD_SPEC}
-    | \bssh\b[^\n]*\s-\w*(?-i:[LDR]){_FORWARD_SPEC}
     | \bforward\w*\s+(the\s+)?port\b | \bforwarded\s+port\b
+"""
+
+# Flag forms. These are matched against the line with quoted segments removed,
+# because `ssh <vps> '…'` carries a REMOTE COMMAND inside those quotes and its
+# flags are not ssh's: `chmod -R 755`, `kill -USR1 1234` and
+# `curl -L 127.0.0.1:8787/readyz` are ordinary work that both reviewers
+# (correctly) refused to let this gate reject.
+_RECIPE_FLAG_SOURCE = rf"""
+    (?-i:-N\s+-L)
+    | \bssh\b[^\n]*\s-\w*(?-i:[LR]){_SPEC_LR}
+    | \bssh\b[^\n]*\s-\w*(?-i:D){_SPEC_D}
 """
 
 # The OPERATOR RUNBOOK legitimately names the administration channel - the
 # deployment and credential commands are run over it - so only the forwarding
 # half applies there. "Shell access is required to run these commands" must
 # stay sayable; teaching a forwarded port must not.
-FORWARDING_RECIPE_TOKENS = re.compile(
-    _FORWARDING_RECIPE_SOURCE, re.IGNORECASE | re.VERBOSE
-)
+RECIPE_PROSE = re.compile(_RECIPE_PROSE_SOURCE, re.IGNORECASE | re.VERBOSE)
+RECIPE_FLAGS = re.compile(_RECIPE_FLAG_SOURCE, re.IGNORECASE | re.VERBOSE)
 
 # The SHIPPED CLIENT SURFACE may not name the administration channel at all,
 # outside the one allowlisted note: the client does not use it, and a mention
 # there is how the revoked design comes back. Everything the runbook rule
-# catches, this one catches too.
-FORWARDING_TOKENS = re.compile(
-    r"\bssh\b | \bsshd\b |" + _FORWARDING_RECIPE_SOURCE,
-    re.IGNORECASE | re.VERBOSE,
-)
+# catches, this one catches too - it is the same two patterns plus the bare
+# name.
+CLIENT_SURFACE_ONLY = re.compile(r"\bssh\b | \bsshd\b", re.IGNORECASE | re.VERBOSE)
+
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _without_remote_commands(line: str) -> str:
+    """The line with quoted segments blanked.
+
+    `ssh <vps> 'chown -R deploy:deploy /opt'` runs chown's flags on the far
+    side; they are not ssh options and a forwarding scan has no business
+    reading them. Prose is matched against the ORIGINAL line, so a sentence
+    that happens to be quoted still counts.
+    """
+    return _QUOTED.sub("''", line)
+
+
+def _forwarding_hit(line: str, *, strict: bool) -> bool:
+    if RECIPE_PROSE.search(line):
+        return True
+    if RECIPE_FLAGS.search(_without_remote_commands(line)):
+        return True
+    return bool(strict and CLIENT_SURFACE_ONLY.search(line))
 
 # Which pattern applies where. Anything not listed gets the strict one - and
 # deploy/docker-compose.yml deliberately stays strict: the revoked claim lived
@@ -189,14 +226,10 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
 def _offending_lines(relative: str, text: str) -> list[str]:
     """Every line carrying a forwarding token, minus the allowlisted ones."""
     allowed = ALLOWED_OPERATIONS_NOTES.get(relative, ())
-    pattern = (
-        FORWARDING_RECIPE_TOKENS
-        if relative in RECIPE_ONLY_PATHS
-        else FORWARDING_TOKENS
-    )
+    strict = relative not in RECIPE_ONLY_PATHS
     offences = []
     for number, line in _logical_lines(text):
-        if not pattern.search(line):
+        if not _forwarding_hit(line, strict=strict):
             continue
         if line.strip() in allowed:
             continue
@@ -272,6 +305,8 @@ RECIPE_SPELLINGS = [
     "autossh -M 0 <vps>",
     "LocalForward 8787 127.0.0.1:8787",
     "RemoteForward 8787 127.0.0.1:8787",
+    "ssh -L *:8787:127.0.0.1:8787 <vps>",          # documented bind spelling
+    "ssh -L /run/wuwaterm.sock:127.0.0.1:8787 <vps>",  # socket-path forward
     "set up a port-forward from this computer",
     "the desktop reaches the service through a forwarded port",
     "try forwarding the port instead",
@@ -292,6 +327,12 @@ ORDINARY_OPERATOR_COMMANDS = [
     "ssh <vps> 'curl -L https://example.com/readyz'",
     "ssh -oLogLevel=ERROR <vps>",
     "ssh <vps> 'kill -TERM 1234'",
+    # Uppercase flags with a NUMERIC argument, inside the quoted remote
+    # command: the residue both reviewers named after the previous head.
+    "ssh <vps> 'chmod -R 755 /opt/wuwaterm'",
+    "ssh <vps> 'kill -USR1 1234'",
+    "ssh <vps> 'curl -L 127.0.0.1:8787/readyz'",
+    "ssh <vps> 'cp -R state state.backup'",
 ]
 
 
@@ -340,7 +381,9 @@ def test_the_runbook_may_still_describe_operator_access() -> None:
         "ssh -N -L 8787:127.0.0.1:8787 user@host",
         "# the owner desktop reaches it through the existing SSH entry point",
         "With the tunnel open, set the client's server address",
-        "set up a port-forward from this computer",
+        "ssh -L *:8787:127.0.0.1:8787 <vps>",          # documented bind spelling
+    "ssh -L /run/wuwaterm.sock:127.0.0.1:8787 <vps>",  # socket-path forward
+    "set up a port-forward from this computer",
         "LocalForward 8787 127.0.0.1:8787",
     ],
 )
@@ -417,14 +460,18 @@ INSECURE_TLS = re.compile(
     | CERT_NONE
     | VERIFY_NONE
     | _create_unverified_context
+    | _create_default_https_context\s*=
     | curl\s+(-\w*k\b|--insecure)
     """,
     re.VERBOSE,
 )
 
 TLS_SCANNED_TREES = (
-    ROOT / "client" / "src",
-    ROOT / "client" / "tests",
+    # The whole client tree, not client/src: client/main.py is the packaged
+    # entry point and executes before anything under src does, so a weakened
+    # default SSL context assigned there would run in the shipped application
+    # and be invisible to a src-only scan.
+    ROOT / "client",
     ROOT / "src",
     ROOT / "scripts",
 )
@@ -508,11 +555,15 @@ def test_the_tls_scan_reaches_the_operator_commands_as_well_as_the_client() -> N
     scanned = {path.relative_to(ROOT).as_posix() for path in _tls_scanned_paths()}
     for required in (
         "client/src/wuwaterm_client/api.py",
+        "client/main.py",
         "deploy/vps-update.sh",
         "deploy/entrypoint.sh",
         "docs/deployment.md",
     ):
         assert required in scanned, required
+    assert _insecure_tls_offences(
+        "client/main.py", "ssl._create_default_https_context = _unverified\n"
+    )
     assert _insecure_tls_offences("deploy/vps-update.sh", 'curl -sk "$url"\n')
     assert _insecure_tls_offences(
         "docs/deployment.md", "urlopen(url, context=ssl._create_unverified_context())\n"

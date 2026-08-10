@@ -207,6 +207,17 @@ def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -
         raise ClientError(ERROR_INSECURE_ENDPOINT)
 
 
+def _normalized(base_url: object) -> str:
+    """The exact string that is validated is the string that is used.
+
+    `usable_base_url` strips before parsing, so a value with surrounding
+    whitespace is approved in its stripped form; handing httpx the raw one
+    would mean the approved address and the configured address are not the
+    same address.
+    """
+    return base_url.strip() if isinstance(base_url, str) else base_url
+
+
 def _require_confidential_endpoint(base_url: str) -> None:
     """Refuse an address that would put the device token on the wire in the
     clear, before the transport exists and before any request is built.
@@ -241,6 +252,7 @@ class ApiClient:
         translate_timeout: float | None = None,
         _test_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        base_url = _normalized(base_url)
         _require_confidential_endpoint(base_url)
         _require_verifying_transport(_test_transport)
         self._token_provider = token_provider
@@ -282,7 +294,14 @@ class ApiClient:
         an address that is not protected in transit. The previous address
         stays in effect, so a refusal leaves a working client rather than a
         half-configured one.
+
+        The address is normalised the same way it was validated. They used to
+        differ: the check strips before parsing, so `" https://host "` passed,
+        and the RAW string then went to httpx - which reads a leading space as
+        the start of a relative URL and silently produced a base address that
+        was not the one approved.
         """
+        base_url = _normalized(base_url)
         _require_confidential_endpoint(base_url)
         self._client.base_url = httpx.URL(base_url)
 
