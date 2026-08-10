@@ -53,12 +53,18 @@ fi
 # only ever sees state-api/, so inside the container the old path does not
 # exist and that guard cannot fire. The host is the only place that can see
 # both, which makes this the only place the upgrade can be caught.
-if [ -f "state/api/devices.db" ] && [ ! -f "state-api/devices.db" ]; then
-  echo "refusing deployment: device credentials are still at" >&2
-  echo "state/api/devices.db while the API now reads state-api/devices.db." >&2
-  echo "Move that file, with any -wal and -shm sidecars, into state-api/" >&2
-  echo "first. Deploying now would start an API that refuses every device" >&2
-  echo "that was ever registered." >&2
+# The presence of the old file is enough to refuse, whether or not a new one
+# exists: an earlier attempt may already have created an empty store at the new
+# path, and then having both is precisely the state where nobody can tell which
+# one holds the live verifiers.
+if [ -f "state/api/devices.db" ]; then
+  echo "refusing deployment: a device store still exists at" >&2
+  echo "state/api/devices.db, the path the API used before its state" >&2
+  echo "directory moved out of the bot's writable mount. The API now reads" >&2
+  echo "state-api/devices.db. Move that file, with any -wal and -shm" >&2
+  echo "sidecars, to state-api/ if it holds the live verifiers, or delete it" >&2
+  echo "if state-api/devices.db already does. Deploying with both in place" >&2
+  echo "could start an API that refuses every device ever registered." >&2
   exit 1
 fi
 
@@ -73,6 +79,10 @@ manifest_path="$manifest_dir/$source_commit.json"
 pointer_path=".deploy_commit"
 new_image_ref="wuwaterm-runtime:$source_commit"
 rollback_image_ref="wuwaterm-runtime:rollback-$deployment_id"
+# Each surface gets its own rollback tag. They normally run the same image, but
+# a host recovered by hand can have them on different ones, and restoring both
+# from a single tag would move a surface onto an image it was never running.
+rollback_api_image_ref="wuwaterm-runtime:rollback-api-$deployment_id"
 
 mkdir -p data/candidates "$backup_dir" "$manifest_dir" state
 if [ -e "$candidate_path" ]; then
@@ -116,12 +126,14 @@ old_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot 2>/dev/null ||
 old_bot_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-bot 2>/dev/null || true)"
 old_api_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null || true)"
 old_api_running="$(docker inspect --format '{{.State.Running}}' wuwaterm-api 2>/dev/null || true)"
-# Both surfaces run the same image, so a host running only one of them still
-# has an image to roll back to.
+# Tagged per surface: a host running only one of them still has an image to
+# roll back to, and a host whose two containers are on different images keeps
+# both of them.
 if [ -n "$old_image_id" ]; then
   docker image tag "$old_image_id" "$rollback_image_ref"
-elif [ -n "$old_api_image_id" ]; then
-  docker image tag "$old_api_image_id" "$rollback_image_ref"
+fi
+if [ -n "$old_api_image_id" ]; then
+  docker image tag "$old_api_image_id" "$rollback_api_image_ref"
 fi
 
 # The builder tag is intentionally local and mutable, so rebuild it from the
@@ -298,7 +310,7 @@ rollback_on_failure() {
       # restore, and a container that existed but was stopped (an earlier
       # failed upgrade, or an operator decision) must not be started here.
       if [ "$old_api_running" = "true" ] && [ -n "$old_api_image_id" ]; then
-        if ! WUWATERM_RUNTIME_IMAGE="$rollback_image_ref" \
+        if ! WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref" \
           compose up -d --no-build --force-recreate wuwaterm-api; then
           echo "warning: old api image could not be restarted" >&2
           rollback_failed=1
@@ -310,11 +322,20 @@ rollback_on_failure() {
     fi
   fi
 
-  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ]; then
+  # On a host running only the API there is no bot image id to verify the
+  # restored binding against, and passing an empty one would compare the
+  # manifest to nothing at all. Both containers are the same deployment, so
+  # whichever surface this host has is the one that proves it.
+  verify_image_id="$old_image_id"
+  if [ -z "$verify_image_id" ]; then
+    verify_image_id="$old_api_image_id"
+  fi
+  if [ "$old_pointer_present" -eq 1 ] && [ -f "$manifest_dir/$old_pointer.json" ] \
+    && [ -n "$verify_image_id" ]; then
     if ! python3 scripts/deployment_manifest.py verify \
       --path "$manifest_dir/$old_pointer.json" \
       --source-commit "$old_pointer" \
-      --image-id "$old_image_id" \
+      --image-id "$verify_image_id" \
       --db "$db_path"; then
       echo "warning: restored deployment binding verification failed" >&2
       rollback_failed=1

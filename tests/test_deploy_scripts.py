@@ -1229,6 +1229,12 @@ def test_vps_update_refuses_to_deploy_over_a_store_at_the_old_path(deploy_harnes
     legacy = root / "state" / "api"
     legacy.mkdir(parents=True)
     (legacy / "devices.db").write_bytes(b"SQLite format 3\x00")
+    # Even with a store already at the new path: an earlier attempt may have
+    # created an empty one there, and then nobody can tell which file holds
+    # the live verifiers.
+    current = root / "state-api"
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "devices.db").write_bytes(b"SQLite format 3\x00")
 
     result = subprocess.run(
         ["sh", str(root / "deploy" / "vps-update.sh")],
@@ -1277,6 +1283,34 @@ def test_vps_update_restores_an_api_only_host(deploy_harness):
     ]
     assert rollback_ups, "the api was running and must come back"
     assert all(line.endswith("wuwaterm-api") for line in rollback_ups), rollback_ups
+    # Restored from the API's own rollback tag, not the bot's.
+    assert all("rollback-api-" in line for line in rollback_ups), rollback_ups
+
+
+def test_vps_update_keeps_a_rollback_image_per_surface():
+    """Two containers can be on two different images after a hand recovery.
+
+    Restoring both from one tag would move a surface onto an image it was
+    never running.
+    """
+    text = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    assert 'rollback_image_ref="wuwaterm-runtime:rollback-$deployment_id"' in text
+    assert (
+        'rollback_api_image_ref="wuwaterm-runtime:rollback-api-$deployment_id"' in text
+    )
+    assert 'docker image tag "$old_image_id" "$rollback_image_ref"' in text
+    assert 'docker image tag "$old_api_image_id" "$rollback_api_image_ref"' in text
+    bot_restart = text.index('compose up -d --no-build --force-recreate wuwaterm;')
+    api_restart = text.index('compose up -d --no-build --force-recreate wuwaterm-api;')
+    assert 'WUWATERM_RUNTIME_IMAGE="$rollback_image_ref"' in text[:bot_restart]
+    assert (
+        'WUWATERM_RUNTIME_IMAGE="$rollback_api_image_ref"'
+        in text[bot_restart:api_restart]
+    )
+    # The restored binding is verified against whichever surface this host has.
+    assert 'verify_image_id="$old_image_id"' in text
+    assert '--image-id "$verify_image_id"' in text
 
 
 def test_vps_update_does_not_start_a_bot_that_was_not_running(deploy_harness):
