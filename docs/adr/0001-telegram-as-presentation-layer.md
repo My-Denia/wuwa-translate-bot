@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-05
+- Amended by: [ADR 0009](0009-http-api-adapter.md) - Telegram is now one inbound
+  adapter of two; the layering rule is unchanged.
 
 ## Context
 
