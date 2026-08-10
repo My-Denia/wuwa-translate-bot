@@ -109,7 +109,15 @@ class SettingsDialog(QDialog):
             strings.CONFIRM_FORGET_TOKEN_MESSAGE,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            delete_token()
+            try:
+                delete_token()
+            except CredentialStoreUnavailable:
+                QMessageBox.critical(
+                    self,
+                    strings.CREDENTIAL_STORE_ERROR_TITLE,
+                    strings.CREDENTIAL_STORE_FORGET_ERROR_MESSAGE,
+                )
+                return
             self._refresh_credential_status()
 
     def _on_accepted(self) -> None:

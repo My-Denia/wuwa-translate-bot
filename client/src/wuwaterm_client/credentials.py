@@ -53,7 +53,13 @@ def delete_token() -> None:
     try:
         keyring.delete_password(SERVICE_NAME, CREDENTIAL_USERNAME)
     except keyring.errors.PasswordDeleteError:
+        # There was nothing to delete. Forgetting a credential that is not
+        # there is what the caller wanted anyway.
         pass
+    except keyring.errors.KeyringError as exc:
+        # The vault itself is unavailable, which is a different thing: the
+        # credential may still be there and the caller has to be told.
+        raise CredentialStoreUnavailable(str(exc)) from exc
 
 
 def active_backend_name() -> str:

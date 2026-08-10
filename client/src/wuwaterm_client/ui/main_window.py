@@ -55,7 +55,16 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.config = dialog.result_config()
-            self.config.save()
+            try:
+                self.config.save()
+            except OSError:
+                # The settings still take effect for this session; what the
+                # owner must not be left believing is that they were kept.
+                QMessageBox.warning(
+                    self,
+                    strings.SETTINGS_TITLE,
+                    strings.SETTINGS_NOT_SAVED_MESSAGE,
+                )
             self.api_client.update_base_url(self.config.base_url)
             # Timeouts too, or the saved settings and the running client
             # disagree until the next launch.

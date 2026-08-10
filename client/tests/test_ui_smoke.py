@@ -248,3 +248,43 @@ def test_a_status_refresh_does_not_start_while_one_is_running(qapp) -> None:
         asyncio.ensure_future = original
 
     assert started == []
+
+
+def test_settings_that_cannot_be_written_still_apply_and_say_so(
+    qapp, monkeypatch
+) -> None:
+    """A save that fails must not be silent, and must not lose the session."""
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from wuwaterm_client.config import ClientConfig
+    from wuwaterm_client.ui import main_window as main_window_module
+
+    warned: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[1]))
+    )
+    monkeypatch.setattr(main_window_module, "has_token", lambda: True)
+
+    window = MainWindow(ClientConfig(base_url="http://127.0.0.1:8787"))
+    changed = ClientConfig(base_url="http://127.0.0.1:9999", request_timeout_seconds=42.0)
+
+    def refuse_to_save(self, base_dir=None):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(ClientConfig, "save", refuse_to_save)
+
+    class _AcceptedDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def result_config(self):
+            return changed
+
+    monkeypatch.setattr(main_window_module, "SettingsDialog", _AcceptedDialog)
+    window._on_settings_clicked()
+
+    assert warned, "the owner must be told the settings were not kept"
+    assert window.api_client._timeout == 42.0

@@ -117,3 +117,24 @@ def test_a_store_that_cannot_be_written_is_reported_not_raised(monkeypatch) -> N
 
     with pytest.raises(credentials.CredentialStoreUnavailable):
         credentials.store_token("wtd1.device.secret")
+
+
+def test_forgetting_reports_a_vault_that_is_unavailable(monkeypatch) -> None:
+    """Nothing to delete and cannot reach the vault are different outcomes."""
+    import keyring
+    import keyring.errors
+
+    from wuwaterm_client import credentials
+
+    def missing(*args, **kwargs):
+        raise keyring.errors.PasswordDeleteError("no such entry")
+
+    monkeypatch.setattr(keyring, "delete_password", missing)
+    credentials.delete_token()  # forgetting what is not there is fine
+
+    def unavailable(*args, **kwargs):
+        raise keyring.errors.KeyringError("vault unavailable")
+
+    monkeypatch.setattr(keyring, "delete_password", unavailable)
+    with pytest.raises(credentials.CredentialStoreUnavailable):
+        credentials.delete_token()

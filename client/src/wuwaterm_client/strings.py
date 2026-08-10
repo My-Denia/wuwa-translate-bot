@@ -96,6 +96,14 @@ CREDENTIAL_STORE_ERROR_MESSAGE = (
     "The Windows Credential Manager could not be used, so the device "
     "token was not stored. Try again once it is available."
 )
+CREDENTIAL_STORE_FORGET_ERROR_MESSAGE = (
+    "The Windows Credential Manager could not be used, so the device "
+    "token may still be stored. Try again once it is available."
+)
+SETTINGS_NOT_SAVED_MESSAGE = (
+    "These settings are in effect for this session but could not be "
+    "written to disk, so they will not survive a restart."
+)
 SETTINGS_INVALID_BASE_URL_TITLE = "Server address"
 SETTINGS_INVALID_BASE_URL_MESSAGE = (
     "That server address cannot be used. Plain http:// is accepted only "
