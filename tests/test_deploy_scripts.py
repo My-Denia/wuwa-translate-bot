@@ -1066,6 +1066,11 @@ def test_vps_update_manages_both_surfaces_together():
     # terminology database is missing or mounted at the wrong path.
     assert "compose exec -T wuwaterm-api" in text
     assert "/readyz" in text
+    # compose up returns before the server binds its socket, so a single shot
+    # would fail the deployment on a connection refusal that only meant
+    # "not yet". The smoke waits, and says why it gave up.
+    assert "api readiness never reported ok" in text
+    assert "deadline = time.monotonic()" in text
     # Read back separately, and both must match the validated image id.
     assert "running_api_image_id=" in text
     assert "running api container image does not match validated image" in text

@@ -337,7 +337,19 @@ WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
 # wrong path, and publishing a deployment in that state is exactly what this
 # check exists to prevent.
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T wuwaterm-api \
-  python -c "import os, sys, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); response = urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10); sys.exit(0 if response.status == 200 else 1)"
+  python -c "import os, sys, time, urllib.error, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); url = 'http://127.0.0.1:' + port + '/readyz'; deadline = time.monotonic() + 60.0; last = 'no attempt'
+while time.monotonic() < deadline:
+    try:
+        response = urllib.request.urlopen(url, timeout=5)
+    except (urllib.error.URLError, OSError) as exc:
+        last = type(exc).__name__
+        time.sleep(1.0)
+        continue
+    if response.status == 200:
+        sys.exit(0)
+    last = 'status ' + str(response.status)
+    time.sleep(1.0)
+sys.exit('api readiness never reported ok: ' + last)"
 fail_if smoke
 
 running_image_id="$(docker inspect --format '{{.Image}}' wuwaterm-bot)"
