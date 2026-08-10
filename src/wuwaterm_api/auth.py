@@ -184,7 +184,11 @@ class DeviceStore:
                     f"missing {sorted(missing)}; remove the file and register "
                     f"the devices again"
                 )
-        self._restrict_permissions()
+        if not existed:
+            # A creation-time action, not a per-request one: re-applying it on
+            # the read path would be redundant work on the hot path and would
+            # silently override an operator's own choice.
+            self._restrict_permissions()
 
     def _restrict_permissions(self) -> None:
         """Keep verifier material off the world-readable path.
@@ -317,10 +321,16 @@ class DeviceStore:
         device_id, secret = parsed
         try:
             self.initialize()
-        except DeviceStoreError:
-            # Loud at startup, uniform on the request path.
+        except (DeviceStoreError, sqlite3.Error):
+            # Loud at startup, uniform on the request path: a store this
+            # process cannot read is one more indistinguishable rejection, not
+            # a different status a caller could probe for.
             return None
-        with self._connect() as conn:
+        try:
+            conn = self._connect()
+        except sqlite3.Error:
+            return None
+        with conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
             ).fetchone()

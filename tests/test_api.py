@@ -1170,3 +1170,24 @@ def test_every_file_carrying_verifier_material_is_restricted(tmp_path):
             continue
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert not mode & 0o077, (path, oct(mode))
+
+
+def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
+    """No seam may answer differently from every other rejection."""
+    settings = build_settings(tmp_path, sample_db)
+    settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.device_db_path.write_bytes(b"this is not a database at all")
+    app = create_app(settings, device_store=DeviceStore(settings.device_db_path))
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.deadbeef.%s" % ("x" * 40)),
+        )
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
