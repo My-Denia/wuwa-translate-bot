@@ -26,7 +26,9 @@ does not distribute generated game data or generated SQLite databases.
   none can reach a log, a terminal recording or a captured command output
   through it.
 - Stable error envelope with enumerated codes, request ids, per-device request
-  limits, a body-size cap and a per-request time budget.
+  limits, a streaming body-size cap, and a time budget applied to both the body
+  read and the handler. Credential verification is itself bounded, so the
+  deliberately expensive check cannot become the load.
 - Committed contract snapshot `docs/api/openapi.json` with a drift gate
   (`scripts/check_api_contract.py`), which also re-applies the repo's product
   token bans to that JSON artifact.

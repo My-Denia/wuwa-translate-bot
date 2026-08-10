@@ -1054,3 +1054,74 @@ def test_a_store_written_by_an_older_shape_is_reported_clearly(tmp_path):
         DeviceStore(path).initialize()
 
     assert "older device store" in str(excinfo.value)
+
+
+def test_credential_verification_is_bounded_before_any_device_limit(
+    tmp_path, sample_db
+):
+    """The deliberately expensive check must not become the load itself."""
+    app, store = build_client_app(tmp_path, sample_db, auth_max_concurrency=1)
+    issue_device(store, "owner desktop")
+    state = {"in_flight": 0, "peak": 0}
+    real = DeviceStore.authenticate
+
+    def watched(self, token):
+        state["in_flight"] += 1
+        state["peak"] = max(state["peak"], state["in_flight"])
+        try:
+            return real(self, token)
+        finally:
+            state["in_flight"] -= 1
+
+    DeviceStore.authenticate = watched
+    try:
+
+        async def hammer():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test", timeout=30.0
+            ) as client:
+                return await asyncio.gather(
+                    *[
+                        client.post(
+                            "/v1/translations",
+                            json={"text": "声骸"},
+                            headers=bearer("wtd1.deadbeef.%s" % ("x" * 40)),
+                        )
+                        for _ in range(6)
+                    ]
+                )
+
+        responses = run(hammer())
+    finally:
+        DeviceStore.authenticate = real
+
+    assert [item.status_code for item in responses] == [401] * 6
+    assert state["peak"] == 1, state["peak"]
+
+
+def test_an_unusable_store_is_one_more_uniform_rejection(tmp_path, sample_db):
+    """Loud at startup, uniform on the request path."""
+    import sqlite3
+
+    settings = build_settings(tmp_path, sample_db)
+    settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.device_db_path) as conn:
+        conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY)")
+    app = create_app(settings, device_store=DeviceStore(settings.device_db_path))
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.deadbeef.%s" % ("x" * 40)),
+        )
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+    # The operator still gets the real reason where it has an audience.
+    with pytest.raises(DeviceStoreError):
+        DeviceStore(settings.device_db_path).initialize()

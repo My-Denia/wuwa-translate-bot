@@ -160,6 +160,7 @@ class DeviceStore:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        existed = self.path.exists()
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             # CREATE TABLE IF NOT EXISTS cannot add a column to a store written
@@ -175,6 +176,12 @@ class DeviceStore:
                     f"missing {sorted(missing)}; remove the file and register "
                     f"the devices again"
                 )
+        if not existed:
+            # Credential material, even hashed, is not world-readable.
+            try:
+                self.path.chmod(0o600)
+            except OSError:  # pragma: no cover - filesystem without POSIX modes
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
@@ -271,11 +278,11 @@ class DeviceStore:
         """Return the live device for ``token``, or None. READ ONLY.
 
         None covers every rejection reason on purpose: unknown device, wrong
-        secret, malformed token and revoked device are indistinguishable to the
-        caller, so the endpoint cannot be used to enumerate device ids. A store
-        that does not exist yet is one more indistinguishable rejection rather
-        than a database error, so a fresh install answers 401 like any other
-        unknown credential.
+        secret, malformed token, revoked device and an unusable store are all
+        indistinguishable to the caller, so the endpoint cannot be used to
+        enumerate device ids or to probe the server's state. An operator who
+        needs to know WHY a store is unusable gets that at startup, where the
+        message has an audience.
 
         Usage is deliberately NOT recorded here: a caller that is about to be
         refused by a rate limit must not be able to drive an unbounded stream
@@ -285,7 +292,11 @@ class DeviceStore:
         if parsed is None:
             return None
         device_id, secret = parsed
-        self.initialize()
+        try:
+            self.initialize()
+        except DeviceStoreError:
+            # Loud at startup, uniform on the request path.
+            return None
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)

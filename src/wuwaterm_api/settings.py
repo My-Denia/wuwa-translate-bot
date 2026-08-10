@@ -30,6 +30,11 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 45.0
 DEFAULT_RATE_LIMIT_PER_MINUTE = 30
 DEFAULT_MAX_BODY_BYTES = 32 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
+# Verifying a presented credential costs a deliberate ~16 MiB scrypt
+# derivation, and it happens BEFORE any per-device limit can apply. Bound how
+# many of those can run at once so an unauthenticated caller cannot turn the
+# credential check itself into the load.
+DEFAULT_AUTH_MAX_CONCURRENCY = 2
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -77,6 +82,7 @@ class ApiSettings:
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -129,5 +135,11 @@ class ApiSettings:
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 minimum=1.0,
                 maximum=600.0,
+            ),
+            auth_max_concurrency=_env_int(
+                "WUWATERM_API_AUTH_MAX_CONCURRENCY",
+                DEFAULT_AUTH_MAX_CONCURRENCY,
+                minimum=1,
+                maximum=64,
             ),
         )

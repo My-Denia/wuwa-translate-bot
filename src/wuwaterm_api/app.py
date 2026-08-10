@@ -342,7 +342,13 @@ async def authenticated_device(
     if presented is None or presented.scheme.lower() != "bearer":
         raise ApiError(ERROR_UNAUTHORIZED)
     store: DeviceStore = request.app.state.device_store
-    device = await asyncio.to_thread(store.authenticate, presented.credentials.strip())
+    # Verifying a credential is deliberately expensive, and it happens before
+    # any per-device limit can apply. Bound the number of derivations running
+    # at once so the check itself cannot become the load.
+    async with request.app.state.auth_slots:
+        device = await asyncio.to_thread(
+            store.authenticate, presented.credentials.strip()
+        )
     if device is None:
         LOGGER.info(
             "auth rejected path=%s request_id=%s",
@@ -434,6 +440,7 @@ def create_app(
         limit=resolved.rate_limit_per_minute
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
+    app.state.auth_slots = asyncio.Semaphore(resolved.auth_max_concurrency)
 
     # Added last == outermost: the request id wraps everything, so even a
     # failure produced by an inner middleware carries it. The body read and the
