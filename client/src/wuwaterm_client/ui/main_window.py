@@ -80,5 +80,9 @@ class MainWindow(QMainWindow):
             token = dialog.token()
             if token:
                 store_token(token)
+                # The status view read the credential state when it was
+                # built, which was before this. Without the refresh it keeps
+                # reporting a missing credential for the whole session.
+                self.status_view.refresh_credential_state()
                 return True
         return False

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QFormLayout, QLabel, QPushButton, QVBoxLayout, QWi
 from .. import strings
 from ..api import ApiClient, MetaResult
 from ..credentials import active_backend_name, has_token
-from ..errors import ClientError, message_for
+from ..errors import ClientError, error_status
 
 
 class StatusView(QWidget):
@@ -50,6 +50,11 @@ class StatusView(QWidget):
 
         self._refresh_credential_labels()
 
+    def refresh_credential_state(self) -> None:
+        """Public: the credential can change outside this view (first run,
+        Settings), and the labels are only read when something asks."""
+        self._refresh_credential_labels()
+
     def _refresh_credential_labels(self) -> None:
         self.keyring_backend_value.setText(active_backend_name())
         stored = has_token()
@@ -69,7 +74,7 @@ class StatusView(QWidget):
         try:
             meta = await self._api_client.get_meta()
         except ClientError as exc:
-            self.status_label.setText(message_for(exc.code))
+            self.status_label.setText(error_status(exc))
         else:
             self._show_meta(meta)
             self.status_label.setText("")

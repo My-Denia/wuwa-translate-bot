@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from .. import strings
 from ..api import ApiClient, TermsResult
-from ..errors import ClientError, message_for
+from ..errors import ClientError, error_status
 
 _COLUMNS = (
     strings.TERMS_COLUMN_ZH,
@@ -64,6 +64,12 @@ class TermsView(QWidget):
         layout.addWidget(self.status_label)
 
     def _on_search_clicked(self) -> None:
+        # The button is disabled while a search runs, but pressing Enter in
+        # the query field calls this directly. Without the guard each press
+        # starts another request and overwrites _task, so replies can land out
+        # of order and the table ends up showing an older query's results.
+        if self._task is not None and not self._task.done():
+            return
         query = self.query_edit.text().strip()
         if not query:
             return
@@ -76,7 +82,7 @@ class TermsView(QWidget):
             result = await self._api_client.lookup_terms(query)
         except ClientError as exc:
             self.table.setRowCount(0)
-            self.status_label.setText(message_for(exc.code))
+            self.status_label.setText(error_status(exc))
         else:
             self._show_result(result)
         finally:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 from pathlib import Path
 
@@ -39,10 +40,25 @@ def config_path(base_dir: Path | None = None) -> Path:
 
 
 def _sane_timeout(value: object, fallback: float) -> float:
-    """A timeout from disk, clamped, or the default if it is not a number."""
+    """A timeout from disk, clamped, or the default if it is not a number.
+
+    Python's JSON parser accepts `NaN` and `Infinity`, and `min`/`max` pass
+    NaN straight through, so a non-finite value would reach httpx as a
+    deadline that never expires. Finiteness is checked, not assumed.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return fallback
-    return float(min(max(float(value), MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
+    number = float(value)
+    if not math.isfinite(number):
+        return fallback
+    return float(min(max(number, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
+
+
+def _sane_base_url(value: object, fallback: str) -> str:
+    """Annotations are not runtime validation: a list here would reach httpx."""
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    return value.strip()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,6 +89,10 @@ class ClientConfig:
         ):
             if name in filtered:
                 filtered[name] = _sane_timeout(filtered[name], fallback)
+        if "base_url" in filtered:
+            filtered["base_url"] = _sane_base_url(
+                filtered["base_url"], defaults.base_url
+            )
         try:
             return cls(**filtered)
         except TypeError:

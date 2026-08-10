@@ -129,7 +129,15 @@ class ApiClient:
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
         self._client = httpx.AsyncClient(
-            base_url=base_url, timeout=timeout, transport=transport
+            base_url=base_url,
+            timeout=timeout,
+            transport=transport,
+            # The supported address is a loopback port on this machine, the
+            # local end of an SSH tunnel. httpx trusts HTTP_PROXY by default,
+            # so a machine with a corporate proxy configured and no NO_PROXY
+            # entry for 127.0.0.1 would send every request - bearer credential
+            # included - to that proxy instead of into the tunnel.
+            trust_env=False,
         )
 
     @classmethod
@@ -206,14 +214,55 @@ class ApiClient:
             code = payload["error"]["code"]
             request_id = payload.get("request_id")
         except (ValueError, KeyError, TypeError):
-            return ClientError(ERROR_UNKNOWN, status_code=response.status_code)
+            return ClientError(
+                self._code_for_status(response.status_code, ERROR_UNKNOWN),
+                status_code=response.status_code,
+            )
         if not isinstance(code, str):
-            return ClientError(ERROR_UNKNOWN, status_code=response.status_code)
+            return ClientError(
+                self._code_for_status(response.status_code, ERROR_UNKNOWN),
+                status_code=response.status_code,
+            )
         return ClientError(
-            code,
+            self._code_for_status(response.status_code, code),
             request_id=request_id if isinstance(request_id, str) else None,
             status_code=response.status_code,
         )
+
+    @staticmethod
+    def _code_for_status(status_code: int, code: str) -> str:
+        """The service reports its own deadline as 504 with code `internal`.
+
+        The contract says so deliberately: the status is what distinguishes a
+        server-side timeout from a genuine failure, and reusing `internal`
+        keeps the code enumeration closed. Rendering "something went wrong on
+        the server" for a timeout would misdescribe it to the one person who
+        can act on it, so the status wins here.
+        """
+        if status_code == 504:
+            return ERROR_TIMEOUT
+        return code
+
+    @staticmethod
+    def _parsed(build, payload):
+        """Build a result from a body that is only supposed to be ours.
+
+        A 2xx from an unrelated local service - a proxy, another app on the
+        port - parses as JSON or not at all, and either way it must arrive as
+        the client's own error state rather than as a KeyError from inside a
+        view's coroutine.
+        """
+        try:
+            return build(payload)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ClientError(ERROR_UNKNOWN) from exc
+
+    @staticmethod
+    def _json(response: httpx.Response):
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ClientError(ERROR_UNKNOWN) from exc
 
     async def translate(
         self, text: str, *, to: str | None = None
@@ -227,13 +276,13 @@ class ApiClient:
             json=body,
             timeout=self._translate_timeout,
         )
-        return TranslationResult.from_json(response.json())
+        return self._parsed(TranslationResult.from_json, self._json(response))
 
     async def lookup_terms(self, query: str) -> TermsResult:
         response = await self._request("GET", "/v1/terms", params={"q": query})
-        return TermsResult.from_json(response.json())
+        return self._parsed(TermsResult.from_json, self._json(response))
 
     async def get_meta(self) -> MetaResult:
         response = await self._request("GET", "/v1/meta")
-        return MetaResult.from_json(response.json())
+        return self._parsed(MetaResult.from_json, self._json(response))
 

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from .. import strings
 from ..api import ApiClient, TranslationResult
-from ..errors import ERROR_CANCELLED, ClientError, message_for
+from ..errors import ERROR_CANCELLED, ClientError, error_status
 
 DIRECTION_AUTO = "auto"
 DIRECTION_TO_EN = "en"
@@ -144,4 +144,4 @@ class TranslateView(QWidget):
 
     def _show_error(self, exc: ClientError) -> None:
         self.result_edit.setPlainText("")
-        self.status_label.setText(message_for(exc.code))
+        self.status_label.setText(error_status(exc))

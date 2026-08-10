@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 from wuwaterm_client.config import (
+    DEFAULT_BASE_URL,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_TRANSLATE_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
     MIN_TIMEOUT_SECONDS,
     ClientConfig,
@@ -103,3 +105,25 @@ def test_a_non_numeric_timeout_falls_back_to_the_default(tmp_path) -> None:
     config = ClientConfig.load(tmp_path)
 
     assert config.request_timeout_seconds == DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def test_a_non_finite_timeout_falls_back_to_the_default(tmp_path) -> None:
+    """Python's JSON parser accepts NaN, and min/max pass it through."""
+    (tmp_path / "config.json").write_text(
+        '{"request_timeout_seconds": NaN, "translate_timeout_seconds": Infinity}',
+        encoding="utf-8",
+    )
+
+    config = ClientConfig.load(tmp_path)
+
+    assert config.request_timeout_seconds == DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert config.translate_timeout_seconds == DEFAULT_TRANSLATE_TIMEOUT_SECONDS
+
+
+def test_a_base_url_of_the_wrong_type_falls_back_to_the_default(tmp_path) -> None:
+    """Annotations are not runtime validation: a list would reach httpx."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"base_url": ["http://127.0.0.1:8787"]}), encoding="utf-8"
+    )
+
+    assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL

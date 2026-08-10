@@ -13,7 +13,7 @@ import pytest
 
 from wuwaterm_client import errors, strings
 from wuwaterm_client.api import ApiClient
-from wuwaterm_client.errors import ClientError
+from wuwaterm_client.errors import ERROR_TIMEOUT, ERROR_UNKNOWN, ClientError
 
 
 def _client(handler, **kwargs) -> ApiClient:
@@ -316,3 +316,88 @@ def test_a_request_without_a_stored_credential_sends_no_auth_header() -> None:
 
     asyncio.run(scenario())
     assert captured["authorization"] is None
+
+
+def test_a_server_side_deadline_is_reported_as_a_timeout() -> None:
+    """The service reports its own deadline as 504 with code `internal`.
+
+    The contract says the status is what distinguishes that from a genuine
+    failure, so rendering "something went wrong on the server" would
+    misdescribe it to the only person who can act on it.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            504,
+            json={
+                "error": {"code": "internal", "message": "timed out"},
+                "request_id": "req-504",
+            },
+        )
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    error = asyncio.run(scenario())
+    assert error.code == ERROR_TIMEOUT
+    assert error.request_id == "req-504"
+
+
+def test_a_successful_body_that_is_not_ours_becomes_a_client_error() -> None:
+    """A proxy or an unrelated local service can answer 200 with anything."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>hello from something else</html>")
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_a_successful_body_missing_fields_becomes_a_client_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": True})
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.lookup_terms("x")
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_the_client_does_not_trust_environment_proxies() -> None:
+    """The supported address is the local end of an SSH tunnel.
+
+    httpx trusts HTTP_PROXY by default, so a machine with a proxy configured
+    and no NO_PROXY entry for 127.0.0.1 would send every request - bearer
+    credential included - to that proxy instead of into the tunnel.
+    """
+    client = ApiClient("http://127.0.0.1:8787")
+    try:
+        assert client._client.trust_env is False
+    finally:
+        asyncio.run(client.aclose())

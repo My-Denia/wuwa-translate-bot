@@ -76,3 +76,16 @@ class ClientError(Exception):
         self.status_code = status_code
         self.message = message_for(code)
         super().__init__(f"{code}: {self.message}")
+
+
+def error_status(exc: "ClientError") -> str:
+    """One line for a status bar: the mapped message, plus the server's own
+    request id when there is one.
+
+    The id is the only handle the owner has when asking what happened on the
+    other side; dropping it turns a traceable failure into an anecdote.
+    """
+    message = message_for(exc.code)
+    if exc.request_id:
+        return f"{message} | {strings.REQUEST_ID_LABEL.format(request_id=exc.request_id)}"
+    return message
