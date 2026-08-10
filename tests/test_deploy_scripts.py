@@ -1153,3 +1153,24 @@ def test_documented_readback_uses_the_same_endpoint_the_updater_gates_on():
     # Liveness answers even with no terminology database mounted, so it must
     # not be what an operator is told to read back.
     assert "/healthz', timeout" not in text
+
+
+def test_documented_api_commands_use_the_configured_port():
+    """The port is an option, so no operator command may assume the default.
+
+    A readback pinned to 8787 reports a connection failure after a perfectly
+    successful deployment on any host that set WUWATERM_API_PORT to something
+    else, and a tunnel pinned to 8787 forwards to a closed remote port.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    updater = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
+
+    # No documented URL may carry a literal port; the updater does not.
+    assert "http://127.0.0.1:8787" not in text
+    assert "http://127.0.0.1:8787" not in updater
+    # The readback reads the port the serving container was actually given,
+    # exactly as the updater's readiness smoke does.
+    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in text
+    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in updater
+    # The tunnel's remote end is discovered, not assumed.
+    assert "printenv WUWATERM_API_PORT" in text

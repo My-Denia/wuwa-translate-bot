@@ -65,8 +65,13 @@ docker compose -f deploy/docker-compose.yml up -d
 for an owner desktop to reach it today is the SSH entry point that already
 exists for operating the host:
 
+The remote end of the tunnel must be the port that deployment actually
+configured, so read it from the running container rather than assuming the
+default; the local end is your own choice.
+
 ```bash
-ssh -N -L 8787:127.0.0.1:8787 <vps>
+api_port="$(ssh <vps> 'cd /opt/wuwaterm/current && docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT')"
+ssh -N -L "8787:127.0.0.1:${api_port}" <vps>
 ```
 
 Exposing the API on a public hostname would be a new ingress decision (DNS,
@@ -202,7 +207,7 @@ docker inspect --format '{{.Image}}' wuwaterm-bot
 docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api \
-  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8787/readyz', timeout=10).status)"
+  python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
 ```
 
 The pointer must equal the intended source SHA exactly; BOTH running image IDs
