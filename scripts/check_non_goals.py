@@ -13,20 +13,26 @@ FORBIDDEN = {
     "alias layer": re.compile(r"\balias(?:es)?\b", re.IGNORECASE),
     "free-text listener": re.compile(r"\bMessageHandler\b"),
 }
+# scripts/check_api_contract.py re-applies these same product pins to the one
+# committed .json artifact (this scanner only reads text suffixes), so it must
+# carry every marker verbatim.
 ALLOWED = {
     "webhook": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "README.md",
         "goal-runs/wuwa-vps-group-hardening/plan.md",
     },
     "inline mode": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "README.md",
         "goal-runs/wuwa-vps-group-hardening/plan.md",
     },
     "alias layer": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "AGENTS.md",
@@ -35,6 +41,7 @@ ALLOWED = {
         "goal-runs/wuwa-vps-group-hardening/execution-log.md",
     },
     "free-text listener": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "goal-runs/wuwa-vps-group-hardening/plan.md",
@@ -72,13 +79,24 @@ def check_single_channel_listener() -> list[str]:
     return failures
 
 
+# Directory names that never contain product source, at any depth. Nested
+# virtual environments (the desktop client keeps its own) and build outputs
+# would otherwise drown the report in third-party matches and make the gate
+# fail on files this repository does not author.
+SKIPPED_DIR_NAMES = frozenset(
+    {".venv", "venv", "site-packages", "node_modules", "dist", "build", ".git"}
+)
+
+
 def iter_files() -> list[Path]:
     files: list[Path] = []
     for path in ROOT.rglob("*"):
         if not path.is_file():
             continue
         rel = path.relative_to(ROOT).as_posix()
-        if rel.startswith((".venv/", "data/", "goal-runs/")):
+        if rel.startswith(("data/", "goal-runs/")):
+            continue
+        if SKIPPED_DIR_NAMES.intersection(path.relative_to(ROOT).parts[:-1]):
             continue
         if path.suffix in TEXT_SUFFIXES or path.name in {"Dockerfile"}:
             files.append(path)

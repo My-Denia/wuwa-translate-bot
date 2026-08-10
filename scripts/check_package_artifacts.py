@@ -59,10 +59,23 @@ FORBIDDEN_NAME_PREFIXES = (
 )
 FORBIDDEN_NAME_MARKERS = ("wutheringdata", "credential")
 
+# The public wheel deliberately ships BOTH adapters: the Telegram bot and the
+# HTTP adapter package. Only generated data, game data and runtime state are
+# out of bounds for a distribution, and neither adapter carries those. Listing
+# the HTTP modules here keeps that decision explicit: if a packaging change
+# ever drops wuwaterm_api from the wheel, this gate fails instead of silently
+# shipping a `wuwaterm-api` entry point that cannot import its own package.
 REQUIRED_WHEEL_MEMBERS = (
     "wuwaterm/__init__.py",
     "wuwaterm/cli.py",
     "wuwaterm/bot.py",
+    "wuwaterm/application.py",
+    "wuwaterm_api/__init__.py",
+    "wuwaterm_api/app.py",
+    "wuwaterm_api/auth.py",
+    "wuwaterm_api/cli.py",
+    "wuwaterm_api/errors.py",
+    "wuwaterm_api/settings.py",
 )
 REQUIRED_SDIST_MEMBERS = (
     "pyproject.toml",
@@ -70,8 +83,18 @@ REQUIRED_SDIST_MEMBERS = (
     "src/wuwaterm/__init__.py",
     "src/wuwaterm/cli.py",
     "src/wuwaterm/bot.py",
+    "src/wuwaterm/application.py",
+    "src/wuwaterm_api/__init__.py",
+    "src/wuwaterm_api/app.py",
+    "src/wuwaterm_api/auth.py",
+    "src/wuwaterm_api/cli.py",
+    "src/wuwaterm_api/errors.py",
+    "src/wuwaterm_api/settings.py",
 )
-ENTRY_POINT_LINE = "wuwaterm = wuwaterm.cli:main"
+ENTRY_POINT_LINES = (
+    "wuwaterm = wuwaterm.cli:main",
+    "wuwaterm-api = wuwaterm_api.cli:main",
+)
 
 
 def declared_version(pyproject_path: Path | None = None) -> str:
@@ -135,12 +158,15 @@ def audit_wheel(path: Path, expected_version: str) -> list[str]:
         entry_points_name = f"{dist_info}/entry_points.txt"
         if entry_points_name not in members:
             failures.append(f"{path.name}: missing {entry_points_name}")
-        elif ENTRY_POINT_LINE not in archive.read(entry_points_name).decode(
-            "utf-8", errors="replace"
-        ):
-            failures.append(
-                f"{path.name}: entry_points.txt lacks {ENTRY_POINT_LINE!r}"
+        else:
+            entry_points = archive.read(entry_points_name).decode(
+                "utf-8", errors="replace"
             )
+            for line in ENTRY_POINT_LINES:
+                if line not in entry_points:
+                    failures.append(
+                        f"{path.name}: entry_points.txt lacks {line!r}"
+                    )
     return failures
 
 
