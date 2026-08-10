@@ -982,3 +982,32 @@ def test_a_slow_body_is_bounded_by_the_request_time_budget(tmp_path, sample_db):
 
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "internal"
+
+
+def test_stored_verifier_is_salted_and_slow_to_search(tmp_path):
+    """Operator-chosen secrets need a KDF, not a bare digest."""
+    import hashlib
+
+    from wuwaterm_api import auth as auth_module
+
+    store = DeviceStore(tmp_path / "devices.db")
+    secret = "the-same-secret-for-both-devices-0123456789"
+    first = store.issue("device one", None, secret=secret)
+    second = store.issue("device two", None, secret=secret)
+
+    rows = {}
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "devices.db") as conn:
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute("SELECT device_id, salt, token_hash FROM devices"):
+            rows[row["device_id"]] = (bytes(row["salt"]), bytes(row["token_hash"]))
+
+    # Same secret, different salt, therefore different stored verifiers.
+    assert rows[first.device_id][0] != rows[second.device_id][0]
+    assert rows[first.device_id][1] != rows[second.device_id][1]
+    # And the stored value is not a bare digest of the secret.
+    assert hashlib.sha256(secret.encode()).digest() not in {
+        value for _salt, value in rows.values()
+    }
+    assert auth_module.SCRYPT_N >= 1 << 14

@@ -15,10 +15,12 @@ output, out of terminal scrollback and out of anything that could capture,
 format or persist it — a property worth more than the small convenience of
 having the server mint the value for you.
 
-Because the store keeps only a hash, the secret must carry its own entropy: a
-supplied value shorter than ``MIN_SECRET_LENGTH`` is refused. A hash-only store
-needs no password KDF at that size, since there is nothing to slow down that a
-search over ~190 bits would not already defeat. Comparison is constant time.
+Because the operator chooses the secret, this store cannot assume the entropy
+a machine-generated value would have had. It therefore refuses anything shorter
+than ``MIN_SECRET_LENGTH`` **and** derives the stored value with ``scrypt`` and
+a per-device salt rather than a bare digest, so a stolen store cannot be
+searched cheaply even if an operator picked something guessable. Comparison is
+constant time.
 
 Revocation sets ``revoked_at`` and keeps the row, so an operator can still see
 that a device existed and when it was withdrawn.
@@ -50,10 +52,21 @@ SCOPE_META = "meta"
 KNOWN_SCOPES = frozenset({SCOPE_TRANSLATE, SCOPE_META})
 DEFAULT_SCOPES = (SCOPE_TRANSLATE, SCOPE_META)
 
+# scrypt parameters. 2**14 blocks with r=8 is ~16 MiB and a few tens of
+# milliseconds per verification: comfortably inside a per-device request budget
+# measured in tens per minute, and expensive enough that a stolen store is not
+# worth grinding.
+SCRYPT_N = 1 << 14
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_DKLEN = 32
+SALT_BYTES = 16
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
     device_id    TEXT PRIMARY KEY,
     device_name  TEXT NOT NULL,
+    salt         BLOB NOT NULL,
     token_hash   BLOB NOT NULL,
     scopes       TEXT NOT NULL,
     created_at   TEXT NOT NULL,
@@ -88,8 +101,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _hash_secret(secret: str) -> bytes:
-    return hashlib.sha256(secret.encode("utf-8")).digest()
+def _derive(secret: str, salt: bytes) -> bytes:
+    """Derive the stored verifier for an operator-chosen secret."""
+    return hashlib.scrypt(
+        secret.encode("utf-8"),
+        salt=salt,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        dklen=SCRYPT_DKLEN,
+    )
 
 
 def normalize_scopes(scopes: object) -> tuple[str, ...]:
@@ -162,16 +183,18 @@ class DeviceStore:
         resolved = normalize_scopes(scopes)
         device_id = secrets.token_hex(8)
         created_at = _now()
+        salt = secrets.token_bytes(SALT_BYTES)
         self.initialize()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO devices(device_id, device_name, token_hash, scopes,"
-                " created_at, revoked_at, last_used_at)"
-                " VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+                "INSERT INTO devices(device_id, device_name, salt, token_hash,"
+                " scopes, created_at, revoked_at, last_used_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
                 (
                     device_id,
                     name,
-                    _hash_secret(material),
+                    salt,
+                    _derive(material, salt),
                     ",".join(resolved),
                     created_at,
                 ),
@@ -238,11 +261,15 @@ class DeviceStore:
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
             ).fetchone()
             if row is None:
-                # Still spend a comparison so a missing device and a wrong
+                # Still spend a derivation so a missing device and a wrong
                 # secret take a similar amount of work.
-                hmac.compare_digest(_hash_secret(secret), b"\x00" * 32)
+                hmac.compare_digest(
+                    _derive(secret, b"\x00" * SALT_BYTES), b"\x00" * SCRYPT_DKLEN
+                )
                 return None
-            if not hmac.compare_digest(_hash_secret(secret), bytes(row["token_hash"])):
+            if not hmac.compare_digest(
+                _derive(secret, bytes(row["salt"])), bytes(row["token_hash"])
+            ):
                 return None
             if row["revoked_at"] is not None:
                 return None
