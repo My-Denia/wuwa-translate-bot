@@ -173,6 +173,28 @@ TLS_SCANNED_TREES = (
     ROOT / "scripts",
 )
 
+# Two lines name weakened verification in order to keep it out: the comment
+# that explains the hazard, and the negative test that builds an unverified
+# transport and asserts the client refuses it. Pinned verbatim, like the
+# operations note above, so an exemption is a decision and not a side effect.
+ALLOWED_INSECURE_TLS_LINES: dict[str, tuple[str, ...]] = {
+    "client/src/wuwaterm_client/api.py": (
+        "`AsyncHTTPTransport(verify=False)` would otherwise slip past a guarantee",
+    ),
+    "client/tests/test_transport_security.py": (
+        "unverified = httpx.AsyncHTTPTransport(verify=False)",
+    ),
+}
+
+
+def _insecure_tls_offences(relative: str, text: str) -> list[str]:
+    allowed = ALLOWED_INSECURE_TLS_LINES.get(relative, ())
+    offences = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if INSECURE_TLS.search(line) and line.strip() not in allowed:
+            offences.append(f"{relative}:{number}: {line.strip()}")
+    return offences
+
 
 def test_nothing_turns_certificate_verification_off() -> None:
     offences: list[str] = []
@@ -180,17 +202,37 @@ def test_nothing_turns_certificate_verification_off() -> None:
     for tree in TLS_SCANNED_TREES:
         for path in sorted(tree.rglob("*.py")):
             scanned += 1
-            for number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
-                if INSECURE_TLS.search(line):
-                    offences.append(
-                        f"{path.relative_to(ROOT).as_posix()}:{number}: {line.strip()}"
-                    )
+            offences.extend(
+                _insecure_tls_offences(
+                    path.relative_to(ROOT).as_posix(),
+                    path.read_text(encoding="utf-8"),
+                )
+            )
     assert scanned, "the scan found no Python files, which would pass vacuously"
     assert not offences, "certificate verification may not be weakened:\n" + "\n".join(
         offences
     )
+
+
+def test_the_tls_scanner_catches_a_real_disabling_line() -> None:
+    """Including in the two files that hold an exemption: the exemption is
+    one pinned line, not a licence for the file."""
+    assert _insecure_tls_offences(
+        "client/src/wuwaterm_client/api.py",
+        "        self._client = httpx.AsyncClient(verify=False)\n",
+    ) == ["client/src/wuwaterm_client/api.py:1: self._client = httpx.AsyncClient(verify=False)"]
+    assert _insecure_tls_offences("src/wuwaterm/sentence.py", "ctx.check_hostname = False\n")
+
+
+def test_the_tls_exemptions_still_describe_real_lines() -> None:
+    """An exemption whose line is gone is dead configuration."""
+    for relative, lines in ALLOWED_INSECURE_TLS_LINES.items():
+        present = {
+            line.strip()
+            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        }
+        for allowed in lines:
+            assert allowed in present, f"{relative}: {allowed}"
 
 
 def test_the_client_asks_httpx_for_verification_in_writing() -> None:

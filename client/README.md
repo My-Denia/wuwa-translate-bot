@@ -66,12 +66,19 @@ and finishes when the response arrives. Connections are pooled and reused;
 when a pooled connection has been closed by the other side, the next request
 establishes a new one.
 
-- **Two deadlines, both configurable.** `request_timeout_seconds` (default
-  10s, Settings → Request timeout) applies to term lookups and status refreshes;
-  `translate_timeout_seconds` (default 60s) applies to `POST /v1/translations`,
-  which may be waiting on a translation model. Each covers the whole
-  request — connect, send, and read the response. Values from the settings
-  dialog and from a hand-edited config file are clamped to 1–600 seconds.
+- **Two timeouts, both configurable.** `request_timeout_seconds` (default
+  10s, Settings → Request timeout) applies to term lookups and status
+  refreshes; `translate_timeout_seconds` (default 60s) applies to
+  `POST /v1/translations`, which may be waiting on a translation model. Values
+  from the settings dialog and from a hand-edited config file are clamped to
+  1–600 seconds.
+- **They are per-operation limits, not a total deadline.** `httpx` applies the
+  value separately to connecting, writing, reading and waiting for a pooled
+  connection, so it bounds how long the client waits *without progress*, not
+  the wall-clock length of the whole call: a server that keeps sending can
+  legitimately keep a request open past the configured number. The service
+  enforces its own request deadline on its side and answers 504 when it
+  expires, which is what bounds a slow translation in practice.
 - **A timeout is reported, never retried.** The request stops and the view
   shows "The request timed out." This client does not retry automatically:
   a translation request that has already reached the service may have spent

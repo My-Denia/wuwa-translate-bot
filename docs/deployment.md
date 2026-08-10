@@ -73,22 +73,35 @@ docker compose -f deploy/docker-compose.yml up -d
 `WUWATERM_API_BIND` (default `127.0.0.1`) on `WUWATERM_API_PORT`
 (default `8787`), and the Compose file publishes no ports.
 
-A desktop client reaches the service at **the configured secure endpoint**:
-one stable base address, served over TLS, which the deployment publishes and
-which routes to this loopback port. Which endpoint that is has not been
-selected yet — it is chosen from the inspected facts of the target host, and
-is recorded in the architecture documentation once it is. Until then no
-deployment step here publishes the API to anything.
+**Remote client access is not available in this topology yet, and this page
+does not describe a way to obtain it.** Following this guide gives you a
+service reachable only from the host itself (loopback) — deliberately, because
+the transport a desktop client will use has not been selected. Until it is,
+the supported uses are the on-host readbacks below and a client running on the
+same machine as a development service. A desktop on another machine has no
+address to configure, and inventing one here (a forwarded port, an open port,
+a new route) is exactly the decision this project stopped making by default.
 
-Two properties hold whichever endpoint is selected, and neither is a
+When it is selected, a client will reach the service at
+**the configured secure endpoint**: one stable base address, served over TLS,
+which the deployment publishes and routes to this loopback port. The selection is
+made from inspected facts of the target host, is an owner-gated decision, and
+is recorded in the architecture documentation together with its rollback.
+
+Two properties will hold whichever endpoint is selected, and neither is a
 consequence of the network arrangement:
 
 - **The API contract does not encode the network path.** The base address is
   pure client configuration; moving the service from one endpoint to another
   changes no request, response or contract byte.
-- **Every request is authenticated at the application layer.** Reaching the
-  endpoint is never sufficient: the device credential below is required on
-  every call, so being on the right network is not an authorization.
+- **Every `/v1` operation is authenticated at the application layer.**
+  Reaching the endpoint is never sufficient: the device credential below is
+  required on every `/v1` call, so being on the right network is not an
+  authorization. The two probes `GET /healthz` and `GET /readyz` are
+  deliberately unauthenticated (they answer `ok`/`ready` and expose nothing
+  else), as is `GET /openapi.json`; whether those three are reachable from
+  outside the host is part of the endpoint decision, not something the
+  application enforces.
 
 Publishing the API on a public hostname is an ingress decision (DNS, TLS, a
 reverse-proxy route) and is owner-gated: it is not part of this topology

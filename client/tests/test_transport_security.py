@@ -50,6 +50,11 @@ def _close(client: ApiClient) -> None:
     asyncio.run(client.aclose())
 
 
+def _parts(url: httpx.URL) -> tuple[str, str, int]:
+    """Scheme, host and port - the parts an address comparison is about."""
+    return (url.scheme, url.host, url.port or (443 if url.scheme == "https" else 80))
+
+
 @pytest.mark.parametrize("address", REFUSED_ADDRESSES)
 def test_the_transport_refuses_an_address_it_cannot_protect(address: str) -> None:
     """Refused where the transport is built, not only where it is typed.
@@ -76,9 +81,7 @@ def test_https_anywhere_and_plain_http_to_this_machine_are_accepted(address: str
     assert endpoint_is_confidential(address) is True
     client = ApiClient(address, token_provider=lambda: None)
     try:
-        expected = httpx.URL(address)
-        assert client._client.base_url.scheme == expected.scheme
-        assert client._client.base_url.host == expected.host
+        assert _parts(client._client.base_url) == _parts(httpx.URL(address))
     finally:
         _close(client)
 
@@ -91,10 +94,13 @@ def test_a_refused_address_leaves_the_running_client_where_it_was() -> None:
         with pytest.raises(ClientError) as raised:
             client.update_base_url("http://198.51.100.7:8787")
         assert raised.value.code == ERROR_INSECURE_ENDPOINT
-        assert str(client._client.base_url).startswith(LOOPBACK)
+        # Compared per component rather than by string prefix: a prefix test
+        # on a URL is the classic incomplete check, and it would also pass
+        # for an address that merely starts the same way.
+        assert _parts(client._client.base_url) == _parts(httpx.URL(LOOPBACK))
 
         client.update_base_url("https://api.example.com")
-        assert str(client._client.base_url).startswith("https://api.example.com")
+        assert _parts(client._client.base_url) == ("https", "api.example.com", 443)
     finally:
         _close(client)
 
@@ -161,3 +167,38 @@ def test_the_client_exposes_no_way_to_turn_verification_off() -> None:
     parameters = inspect.signature(ApiClient.__init__).parameters
     for suspicious in ("verify", "insecure", "allow_insecure", "ssl_verify", "no_verify"):
         assert suspicious not in parameters, suspicious
+
+
+def test_an_injected_transport_may_not_bring_weakened_tls() -> None:
+    """The one remaining way in: `transport=` is honoured by httpx INSTEAD of
+    `verify=True`, so a transport built with verification off would have made
+    the guarantee false through an argument that does not mention TLS."""
+    unverified = httpx.AsyncHTTPTransport(verify=False)
+    try:
+        with pytest.raises(ClientError) as raised:
+            ApiClient("https://api.example.com", transport=unverified)
+        assert raised.value.code == ERROR_INSECURE_ENDPOINT
+    finally:
+        asyncio.run(unverified.aclose())
+
+
+def test_a_verifying_transport_is_still_accepted() -> None:
+    """The check must discriminate, not ban the parameter: a real transport
+    that does verify is exactly what production would build."""
+    verifying = httpx.AsyncHTTPTransport(verify=True)
+    client = ApiClient("https://api.example.com", transport=verifying,
+                       token_provider=lambda: None)
+    _close(client)
+
+
+def test_a_transport_whose_configuration_cannot_be_read_is_refused() -> None:
+    """Unprovable is treated as unsafe: a transport this client cannot
+    inspect could be doing anything with the credential."""
+
+    class _Opaque(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):  # pragma: no cover
+            raise AssertionError("never reached")
+
+    with pytest.raises(ClientError) as raised:
+        ApiClient("https://api.example.com", transport=_Opaque())
+    assert raised.value.code == ERROR_INSECURE_ENDPOINT

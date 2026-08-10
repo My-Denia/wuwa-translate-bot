@@ -234,7 +234,8 @@ def test_an_unprotected_address_is_refused_on_screen_and_changes_nothing(
     assert warned, "the owner must be told the address was refused"
     assert warned[-1][2] == strings.ERROR_MSG_INSECURE_ENDPOINT
     # Nothing half-applied: not the address, not the timeout, not the file.
-    assert str(window.api_client._client.base_url).startswith("http://127.0.0.1:8787")
+    live = window.api_client._client.base_url
+    assert (live.scheme, live.host, live.port) == ("http", "127.0.0.1", 8787)
     assert window.config.base_url == "http://127.0.0.1:8787"
     assert window.api_client._timeout != 42.0
     assert saved == []

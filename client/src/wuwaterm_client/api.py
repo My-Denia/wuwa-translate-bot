@@ -9,6 +9,7 @@ service's response (docs/api/openapi.json).
 from __future__ import annotations
 
 import asyncio
+import ssl
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -160,6 +161,32 @@ class MetaResult:
         )
 
 
+def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -> None:
+    """A caller-supplied transport may not bring weakened TLS with it.
+
+    `verify=True` below configures the transport this client BUILDS. When one
+    is passed in instead, that argument is ignored by httpx and the injected
+    transport's own SSL configuration is what runs - so
+    `AsyncHTTPTransport(verify=False)` would otherwise slip past a guarantee
+    that says no argument can weaken verification.
+
+    A mock transport sends nothing over a network and is the reason the
+    parameter exists at all. Anything else must prove it verifies: its SSL
+    context has to require a certificate and check the host name, and a
+    transport whose configuration cannot be read is refused rather than
+    trusted.
+    """
+    if transport is None or isinstance(transport, httpx.MockTransport):
+        return
+    context = getattr(getattr(transport, "_pool", None), "_ssl_context", None)
+    if (
+        not isinstance(context, ssl.SSLContext)
+        or context.verify_mode is not ssl.CERT_REQUIRED
+        or not context.check_hostname
+    ):
+        raise ClientError(ERROR_INSECURE_ENDPOINT)
+
+
 def _require_confidential_endpoint(base_url: str) -> None:
     """Refuse an address that would put the device token on the wire in the
     clear, before the transport exists and before any request is built.
@@ -188,6 +215,7 @@ class ApiClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         _require_confidential_endpoint(base_url)
+        _require_verifying_transport(transport)
         self._token_provider = token_provider
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout

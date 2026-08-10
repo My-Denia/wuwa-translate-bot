@@ -1554,4 +1554,11 @@ def test_the_guide_does_not_teach_host_administration_as_the_client_path():
         assert recipe not in text, recipe
     # The replacement wording is present, not merely the removal.
     assert "configured secure endpoint" in text
-    assert "Every request is authenticated at the application layer" in text
+    assert "Every `/v1` operation is authenticated at the application layer" in text
+    # The guide must not point at an endpoint that does not exist yet: until
+    # the transport is selected it says so, rather than sending the reader to
+    # invent a route.
+    assert "Remote client access is not available in this topology yet" in text
+    # ...and the claim stays true about the routes that really are open.
+    for unauthenticated in ("GET /healthz", "GET /readyz", "GET /openapi.json"):
+        assert unauthenticated in text, unauthenticated
