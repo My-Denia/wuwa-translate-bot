@@ -579,9 +579,15 @@ ALLOWED_INSECURE_TLS_LINES: dict[str, tuple[str, ...]] = {
 
 
 def _insecure_tls_offences(relative: str, text: str) -> list[str]:
+    """Continuations joined first, exactly as the wording gate does.
+
+    `curl --silent \\` on one line and `-k https://…` on the next is one
+    command, and reading physical lines would have let it through the scan of
+    the shell scripts this gate had just gained.
+    """
     allowed = ALLOWED_INSECURE_TLS_LINES.get(relative, ())
     offences = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in _logical_lines(text):
         if INSECURE_TLS.search(line) and line.strip() not in allowed:
             offences.append(f"{relative}:{number}: {line.strip()}")
     return offences
@@ -653,6 +659,11 @@ def test_the_tls_scan_reaches_the_operator_commands_as_well_as_the_client() -> N
         "client/main.py", "ssl._create_default_https_context = _unverified\n"
     )
     assert _insecure_tls_offences("deploy/vps-update.sh", 'curl -sk "$url"\n')
+    # A continued command is one command here too, exactly as the wording gate
+    # reads it - and a shell script is where a continuation actually appears.
+    assert _insecure_tls_offences(
+        "deploy/vps-update.sh", 'curl --silent \\\n  -k "$url"\n'
+    ) == ['deploy/vps-update.sh:1: curl --silent -k "$url"']
     assert _insecure_tls_offences(
         "docs/deployment.md", "urlopen(url, context=ssl._create_unverified_context())\n"
     )
