@@ -111,6 +111,10 @@ class TermsResult:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "TermsResult":
+        # A string or an object is iterable too, and would produce nonsense
+        # matches instead of an error.
+        if not isinstance(data["matches"], list):
+            raise ValueError("matches is not a list")
         return cls(
             query=_as_str(data["query"], "query"),
             matches=tuple(
@@ -143,13 +147,12 @@ class MetaResult:
         return cls(
             service_version=_as_str(data["service_version"], "service_version"),
             api_version=_as_str(data["api_version"], "api_version"),
-            schema_version=_as_optional_str(
-                data.get("schema_version"), "schema_version"
-            ),
-            source_profile=_as_optional_str(
-                data.get("source_profile"), "source_profile"
-            ),
-            source_commit=_as_optional_str(data.get("source_commit"), "source_commit"),
+            # Nullable, but REQUIRED by the contract: a body that omits them
+            # is not this service's, and .get() would have made it look like
+            # one with unknown provenance.
+            schema_version=_as_optional_str(data["schema_version"], "schema_version"),
+            source_profile=_as_optional_str(data["source_profile"], "source_profile"),
+            source_commit=_as_optional_str(data["source_commit"], "source_commit"),
             term_count=_as_int(data["term_count"], "term_count"),
             llm_configured=_as_bool(data["llm_configured"], "llm_configured"),
             request_id=_as_str(data["request_id"], "request_id"),

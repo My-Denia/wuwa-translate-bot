@@ -226,3 +226,25 @@ def test_cancelling_before_the_task_starts_restores_the_buttons(qapp) -> None:
     assert view.translate_button.isEnabled()
     assert not view.cancel_button.isEnabled()
     assert view.status_label.text() == message_for("cancelled")
+
+
+def test_a_status_refresh_does_not_start_while_one_is_running(qapp) -> None:
+    """The button is disabled inside the coroutine, which has not run yet."""
+    import asyncio
+
+    view = StatusView(_dummy_client())
+
+    class _Pending:
+        def done(self) -> bool:
+            return False
+
+    view._task = _Pending()
+    started = []
+    original = asyncio.ensure_future
+    try:
+        asyncio.ensure_future = lambda *args, **kwargs: started.append(args) or _Pending()
+        view._on_refresh_clicked()
+    finally:
+        asyncio.ensure_future = original
+
+    assert started == []

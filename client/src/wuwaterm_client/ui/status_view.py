@@ -66,6 +66,11 @@ class StatusView(QWidget):
         self.credential_status_value.setText(credential_status)
 
     def _on_refresh_clicked(self) -> None:
+        # The button is disabled inside the coroutine, which does not run
+        # until the loop gets a turn. Two activations before that start two
+        # refreshes whose replies can land in either order.
+        if self._task is not None and not self._task.done():
+            return
         self._task = asyncio.ensure_future(self._run_refresh())
 
     async def _run_refresh(self) -> None:

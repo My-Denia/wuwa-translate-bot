@@ -445,3 +445,57 @@ def test_a_result_field_of_the_wrong_type_becomes_a_client_error() -> None:
         raise AssertionError("expected a ClientError")
 
     assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_a_matches_field_that_is_not_a_list_becomes_a_client_error() -> None:
+    """A string or an object is iterable too, and would produce nonsense."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"query": "x", "matches": "not-a-list", "request_id": "r"}
+        )
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.lookup_terms("x")
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN
+
+
+def test_metadata_the_contract_requires_must_be_present() -> None:
+    """Nullable is not optional: those fields are required by the contract."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "service_version": "0.2.1",
+                "api_version": "v1",
+                "schema_version": "2",
+                # source_profile omitted
+                "source_commit": "c",
+                "term_count": 1,
+                "llm_configured": False,
+                "request_id": "req-meta",
+            },
+        )
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN

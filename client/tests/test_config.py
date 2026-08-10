@@ -161,3 +161,10 @@ def test_plain_http_is_only_accepted_for_this_machine() -> None:
     assert not usable_base_url("http://api.example.invalid")
     # TLS anywhere is fine.
     assert usable_base_url("https://api.example.invalid")
+
+
+def test_a_base_address_may_not_carry_a_query_or_fragment() -> None:
+    """Joining a request path onto it drops them, so the setting would lie."""
+    assert usable_base_url("https://api.example.invalid/prefix")
+    assert not usable_base_url("https://api.example.invalid/?x=1")
+    assert not usable_base_url("https://api.example.invalid/#part")

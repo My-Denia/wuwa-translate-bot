@@ -95,6 +95,12 @@ def usable_base_url(value: object) -> bool:
     # hand-edited address is exactly how that happens by accident.
     if parsed.scheme == "http" and not _is_loopback(parsed.hostname):
         return False
+    # A base address is a scheme, a host, a port and an optional path prefix.
+    # A query or fragment on it is silently dropped when a request path is
+    # joined onto it, so accepting one stores a setting that does not mean
+    # what it says.
+    if parsed.query or parsed.fragment:
+        return False
     return True
 
 
