@@ -10,11 +10,9 @@ import re
 import tempfile
 import time
 import traceback
-from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Deque
 from urllib.parse import urlparse
 
 from telegram import ChatMember, Message, MessageEntity, Update
@@ -29,13 +27,27 @@ from telegram.ext import (
     filters,
 )
 
+from .application import (
+    MarkupTranslation,
+    SlidingWindowRateLimiter as PerChatRateLimiter,
+    TranslationJob,
+    TranslationOutcome,
+    error_code_for_llm_reason,
+    translate_request,
+    translate_request_async,
+)
+
+# Re-exported on purpose, not used inside this module: the fuzzy gate now has
+# exactly one definition (in the application layer) and this import is the
+# whole of bot.py's relationship with it. Keeping the name reachable here is
+# what lets existing callers and tests keep importing it from wuwaterm.bot.
+from .application import _fuzzy_dictionary_answer  # noqa: F401
 from .channel import channel_post_handler, send_with_flood_retry
 from .channel_reply_index import ChannelReplyIndex
 from .channel_reply_schema import ChannelReplyPayloadError, parse_channel_reply_payload
 from .channel_runtime import ChannelRuntime
 from .lookup import TermService
 from .logging_utils import redact_id, safe_error_type, safe_text_len
-from .normalize import has_cjk, normalize_ascii
 from .sentence import (
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -63,7 +75,6 @@ from .telegram_text import (
 )
 from .translation_policy import (
     HTML_CONTENT_FAILURE_REASONS,
-    LLM_FAILURE_NOTICES,
     LLM_INPUT_CHAR_LIMIT,
 )
 
@@ -164,7 +175,6 @@ REVOKE_USAGE = (
     "Usage (owner only): /revoke in a group to remove it; /revoke <chat_id> in "
     "private to remove by id."
 )
-SHORT_QUERY_RE = re.compile(r"^[^\s。！？!?，,；;：:\n]{1,32}$")
 # Inline rich text: the /command prefix and leading direction flags are cut
 # off the raw message text so the remaining tail's formatting entities can be
 # preserved. Flags mirror _parse_translation_args (lowercase only).
@@ -396,24 +406,6 @@ def _validate_llm_config_env() -> None:
         raise BotConfigError(
             "WUWATERM_OPENAI_BASE_URL must be an absolute HTTP(S) URL"
         )
-
-
-class PerChatRateLimiter:
-    def __init__(self, limit: int = 10, window_seconds: float = 60.0):
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self._events: dict[int, Deque[float]] = defaultdict(deque)
-
-    def allow(self, chat_id: int, now: float | None = None) -> bool:
-        now = time.monotonic() if now is None else now
-        events = self._events[chat_id]
-        cutoff = now - self.window_seconds
-        while events and events[0] <= cutoff:
-            events.popleft()
-        if len(events) >= self.limit:
-            return False
-        events.append(now)
-        return True
 
 
 class AdminStatusCache:
@@ -1096,7 +1088,7 @@ async def _translation_command(
     service: TermService = context.application.bot_data[SERVICE_KEY]
     translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
     config: BotConfig = context.application.bot_data[CONFIG_KEY]
-    translated = await translate_request_async(
+    translated = await telegram_translation_reply(
         service,
         translator,
         request,
@@ -1599,10 +1591,57 @@ def format_term_reply(service: TermService, query: str) -> str:
     return translate_query(service, translator, query)
 
 
-def _resolve_to_chinese(prepared: str, forced_to_chinese: bool | None) -> bool:
-    if forced_to_chinese is not None:
-        return forced_to_chinese
-    return not has_cjk(prepared)
+def _telegram_text(outcome: TranslationOutcome) -> str:
+    """Telegram wording for a protocol-neutral outcome.
+
+    The bilingual dictionary-miss flag is Telegram's published wording, so the
+    application layer only reports the boolean and the flag text stays here.
+    """
+    if outcome.dictionary_miss:
+        return f"{outcome.text}\n\n{DICT_MISS_FLAG}"
+    return outcome.text
+
+
+def _telegram_reply(outcome: TranslationOutcome) -> TranslationReply:
+    text = _telegram_text(outcome)
+    if outcome.markup_used:
+        if _validate_telegram_html(text):
+            return TranslationReply(text, parse_mode="HTML")
+        return TranslationReply(_strip_telegram_html(text))
+    return TranslationReply(text)
+
+
+def _telegram_llm_splitter(text: str, limit: int) -> list[str]:
+    """UTF-16 aware splitter so Telegram length semantics stay unchanged."""
+    return split_telegram_text(text, limit=limit)
+
+
+def _telegram_markup_translator(translator: SentenceTranslator):
+    """Adapter hook: translate Telegram HTML with its markup preserved."""
+
+    async def translate_markup(markup: str, *, to_chinese: bool) -> MarkupTranslation:
+        if not _llm_configured():
+            # Without an LLM there is no markup-preserving call to make; the
+            # plain path yields exactly the same term-locked text.
+            return MarkupTranslation(fallback_to_plain=True)
+        try:
+            translated = await translator.translate_html_async(
+                markup, to_chinese=to_chinese
+            )
+        except LLMTranslationError as exc:
+            reason = getattr(exc, "reason", "translation_unavailable")
+            LOGGER.warning("tr html translation failed reason=%s", reason)
+            if reason not in HTML_CONTENT_FAILURE_REASONS:
+                return MarkupTranslation(
+                    message=exc.user_message,
+                    error_code=error_code_for_llm_reason(reason),
+                )
+            # The model broke the placeholder structure (or returned nothing).
+            # A plain retry drops formatting but still answers the command.
+            return MarkupTranslation(fallback_to_plain=True)
+        return MarkupTranslation(text=translated)
+
+    return translate_markup
 
 
 def translate_query(
@@ -1612,26 +1651,13 @@ def translate_query(
     *,
     forced_to_chinese: bool | None = None,
 ) -> str:
-    prepared = translator.prepare_text(query)
-    if not prepared:
-        return "Nothing to translate after removing metadata."
-    # Direction is auto-detected by default; explicit command flags override it.
-    # Dictionary and LLM honor the same target direction.
-    to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
-    result = service.lookup_exact(prepared, limit=5)
-    if result.exact and result.best:
-        official = result.best.entry.zh if to_chinese else result.best.entry.en
-        if official:
-            return official
-    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
-    if fuzzy_answer:
-        return fuzzy_answer
-    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
-        return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
-    translated = translator.translate(prepared, to_chinese=to_chinese)
-    if _should_append_dict_miss(prepared, translator, translated):
-        translated = f"{translated}\n\n{DICT_MISS_FLAG}"
-    return translated
+    """Telegram-facing plain-text wrapper over the shared pipeline."""
+    outcome = translate_request(
+        service,
+        translator,
+        TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
+    )
+    return _telegram_text(outcome)
 
 
 async def translate_query_async(
@@ -1641,112 +1667,37 @@ async def translate_query_async(
     *,
     forced_to_chinese: bool | None = None,
 ) -> str:
-    prepared = translator.prepare_text(query)
-    if not prepared:
-        return "Nothing to translate after removing metadata."
-    # Direction is auto-detected by default; explicit command flags override it.
-    # Dictionary and LLM honor the same target direction.
-    to_chinese = _resolve_to_chinese(prepared, forced_to_chinese)
-    result = service.lookup_exact(prepared, limit=5)
-    if result.exact and result.best:
-        official = result.best.entry.zh if to_chinese else result.best.entry.en
-        if official:
-            return official
-    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
-    if fuzzy_answer:
-        return fuzzy_answer
-    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
-        return f"Input is too long for translation ({LLM_INPUT_CHAR_LIMIT} character limit)."
-    translated = await translator.translate_async(prepared, to_chinese=to_chinese)
-    if _should_append_dict_miss(prepared, translator, translated):
-        translated = f"{translated}\n\n{DICT_MISS_FLAG}"
-    return translated
+    """Async Telegram-facing plain-text wrapper over the shared pipeline."""
+    outcome = await translate_request_async(
+        service,
+        translator,
+        TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
+        splitter=_telegram_llm_splitter,
+    )
+    return _telegram_text(outcome)
 
 
-async def translate_request_async(
+async def telegram_translation_reply(
     service: TermService,
     translator: SentenceTranslator,
     request: TranslationRequest,
     *,
     input_limit: int = LLM_INPUT_CHAR_LIMIT,
 ) -> TranslationReply:
-    prepared = translator.prepare_text(request.text)
-    if not prepared:
-        return TranslationReply("Nothing to translate after removing metadata.")
-    # Direction is auto-detected from the visible text unless the command
-    # supplies an explicit target. Dictionary and LLM use the same direction.
-    to_chinese = _resolve_to_chinese(prepared, request.forced_to_chinese)
-    result = service.lookup_exact(prepared, limit=5)
-    if result.exact and result.best:
-        official = result.best.entry.zh if to_chinese else result.best.entry.en
-        if official:
-            return TranslationReply(official)
-    fuzzy_answer = _fuzzy_dictionary_answer(service, prepared, to_chinese=to_chinese)
-    if fuzzy_answer:
-        return TranslationReply(fuzzy_answer)
-    if len(prepared) > input_limit:
-        return TranslationReply(
-            f"Input is too long for translation ({input_limit} character limit)."
-        )
-    # Only trusted callers have an input_limit above LLM_INPUT_CHAR_LIMIT.
-    # Split internally so owner/admin requests keep the public per-call bound.
-    if len(prepared) > LLM_INPUT_CHAR_LIMIT:
-        translated = await _translate_long_plain_text(
-            translator, prepared, to_chinese=to_chinese
-        )
-        return TranslationReply(translated)
-    if request.html:
-        if not _llm_configured():
-            translated = translator.translate(prepared, to_chinese=to_chinese)
-            if _should_append_dict_miss(prepared, translator, translated):
-                translated = f"{translated}\n\n{DICT_MISS_FLAG}"
-            return TranslationReply(translated)
-        try:
-            translated = await translator.translate_html_async(
-                request.html, to_chinese=to_chinese
-            )
-        except LLMTranslationError as exc:
-            LOGGER.warning(
-                "tr html translation failed reason=%s",
-                getattr(exc, "reason", "translation_unavailable"),
-            )
-            if getattr(exc, "reason", "") not in HTML_CONTENT_FAILURE_REASONS:
-                return TranslationReply(exc.user_message)
-            # The model broke the placeholder structure (or returned nothing).
-            # A plain retry drops formatting but still answers the command.
-            return TranslationReply(
-                await translate_query_async(
-                    service,
-                    translator,
-                    prepared,
-                    forced_to_chinese=request.forced_to_chinese,
-                )
-            )
-        if _should_append_dict_miss(prepared, translator, translated):
-            translated = f"{translated}\n\n{DICT_MISS_FLAG}"
-        if _validate_telegram_html(translated):
-            return TranslationReply(translated, parse_mode="HTML")
-        return TranslationReply(_strip_telegram_html(translated))
-    return TranslationReply(
-        await translate_query_async(
-            service,
-            translator,
-            prepared,
+    """Run the shared pipeline with the Telegram markup and splitter hooks."""
+    outcome = await translate_request_async(
+        service,
+        translator,
+        TranslationJob(
+            text=request.text,
+            markup=request.html,
             forced_to_chinese=request.forced_to_chinese,
-        )
+        ),
+        input_limit=input_limit,
+        markup_translator=_telegram_markup_translator(translator),
+        splitter=_telegram_llm_splitter,
     )
-
-
-async def _translate_long_plain_text(
-    translator: SentenceTranslator, text: str, *, to_chinese: bool
-) -> str:
-    translated_chunks: list[str] = []
-    for chunk in split_telegram_text(text, limit=LLM_INPUT_CHAR_LIMIT):
-        translated = await translator.translate_async(chunk, to_chinese=to_chinese)
-        if translated in LLM_FAILURE_NOTICES:
-            return translated
-        translated_chunks.append(translated)
-    return "\n".join(translated_chunks)
+    return _telegram_reply(outcome)
 
 
 def _translation_input_limit(
@@ -1759,60 +1710,6 @@ def _translation_input_limit(
             else config.channel_text_limit
         )
     return LLM_INPUT_CHAR_LIMIT
-
-
-def _is_ascii_fuzzy_query(text: str) -> bool:
-    return bool(text) and text.isascii() and SHORT_QUERY_RE.match(text) is not None
-
-
-# Fuzzy pinyin answers a /tr query directly only for trustworthy match shapes.
-# Prefix/substring hits score >=80 even for 2-3 letter queries, so common
-# English words get hijacked ("he" is inside "shenghai" -> Echo); those
-# reasons additionally require a 4+ letter query. "exact" appears when an
-# exact hit had an empty requested-side official and lookup() fell through.
-_FUZZY_TRUSTED_REASONS = frozenset({"exact", "pinyin", "pinyin-abbrev"})
-_FUZZY_LENGTH_GATED_REASONS = frozenset({"pinyin-prefix", "pinyin-substring"})
-_FUZZY_MIN_GATED_QUERY_LEN = 4
-
-
-def _fuzzy_dictionary_answer(
-    service: TermService, prepared: str, *, to_chinese: bool
-) -> str | None:
-    if not _is_ascii_fuzzy_query(prepared):
-        return None
-    fuzzy = service.lookup(prepared, limit=5)
-    best = fuzzy.best
-    if best is None or best.score < 80.0:
-        return None
-    query_ascii = normalize_ascii(prepared)
-    if best.reason not in _FUZZY_TRUSTED_REASONS and not (
-        best.reason in _FUZZY_LENGTH_GATED_REASONS
-        and len(query_ascii) >= _FUZZY_MIN_GATED_QUERY_LEN
-    ):
-        # An exact abbreviation hit can be reported as "pinyin-prefix" when
-        # the abbreviation is also a prefix of the full pinyin ("sh" for
-        # "shenghai"); the abbreviation feature stays trusted either way.
-        if not (query_ascii and best.entry.pinyin_abbrev == query_ascii):
-            return None
-    return best.entry.zh if to_chinese else best.entry.en
-
-
-def _is_short_query(text: str) -> bool:
-    return SHORT_QUERY_RE.match(text) is not None
-
-
-def _has_locked_terms(translator: SentenceTranslator, text: str) -> bool:
-    return bool(translator.lock_terms(text).locks)
-
-
-def _should_append_dict_miss(
-    prepared: str, translator: SentenceTranslator, translated: str
-) -> bool:
-    return (
-        translated not in LLM_FAILURE_NOTICES
-        and _is_short_query(prepared)
-        and not _has_locked_terms(translator, prepared)
-    )
 
 
 async def _reply_direction_usage(

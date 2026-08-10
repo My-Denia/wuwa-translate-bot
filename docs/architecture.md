@@ -90,7 +90,8 @@ Intended layers (modular monolith — [ADR 0002](adr/0002-modular-monolith.md)):
 ```
 cli (bootstrap)
   ├─► bot / channel          presentation (python-telegram-bot)
-  │     ├─► lookup / sentence / normalize / translation_policy   domain
+  │     ├─► application                                          shared pipeline
+  │     │     └─► lookup / sentence / normalize / translation_policy   domain
   │     ├─► settings / channel_reply_* / channel_runtime         local infra
   │     └─► telegram_html / telegram_text                        presentation helpers
   ├─► builder / data_source / db (write) / build_pinyin           builder path
@@ -101,6 +102,7 @@ cli (bootstrap)
 |-------|---------|-----------------|
 | Domain core | `lookup`, `normalize`, `models` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
+| Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Presentation | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
 | Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -108,10 +110,21 @@ cli (bootstrap)
 | Builder | `builder`, `data_source`, `build_pinyin` | `bot`, `channel` |
 | Bootstrap | `cli` | may wire both runtime and builder entrypoints |
 
+The application layer holds the dictionary-first pipeline exactly once
+(prepare → direction → exact hit → trusted fuzzy hit → length gate → chunked,
+term-locked LLM call) and knows nothing about Telegram. The two adapter-shaped
+steps are injected by the caller: a markup translator (Telegram HTML) and a
+text splitter (Telegram's UTF-16 aware splitter). Adapters receive a
+`TranslationOutcome` (`kind`, `text`, direction, `dictionary_miss`,
+`error_code`) and own their own wording, so protocol-specific notices never
+leak downward.
+
 Observed edges (static imports among `src/wuwaterm/*.py`):
 
 - `bot` → `channel` (handler registration + flood retry); `channel` → `bot`
   only under `TYPE_CHECKING` for `BotConfig` (no runtime cycle).
+- `bot` → `application` (shared pipeline + rate limiter); `application` imports
+  no presentation module and no Telegram SDK, enforced by the boundary guard.
 - `sentence` → `lookup`, `normalize`, `telegram_html`, `httpx`.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
@@ -126,7 +139,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py` plus existing
 | Coupling | Status | Notes |
 |----------|--------|-------|
 | Large `bot.py` (config, auth, rate limit, translate orchestration, migration, polling) | Accepted concentration | Documented; not mass-split in this formalization |
-| `translate_query*` lives in presentation module | Accepted | Domain still reached via `TermService` / `SentenceTranslator`; CLI uses the same domain modules |
+| `translate_query*` in `bot.py` are thin wrappers over `application` | Resolved | The pipeline itself lives in `application.py`; `bot.py` only adds Telegram wording, HTML parse mode and the UTF-16 splitter |
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
 | `sentence` → `telegram_html` | Accepted | HTML term-lock is part of Telegram-HTML translation fidelity |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |

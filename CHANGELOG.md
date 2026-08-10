@@ -3,6 +3,17 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Maintainer Architecture
+
+- New protocol-neutral application layer (`src/wuwaterm/application.py`) owns
+  the dictionary-first translation pipeline exactly once. `bot.py` keeps the
+  Telegram wording, HTML parse mode and UTF-16 splitter and delegates the
+  pipeline; no intentional Telegram behaviour change.
+- Boundary guard gains an `Application` layer that may not import presentation
+  modules or the Telegram SDK, even under `TYPE_CHECKING`.
+
 ## 0.2.1 - 2026-08-06
 
 Maintenance release packaging post-v0.2.0 production hardening already merged

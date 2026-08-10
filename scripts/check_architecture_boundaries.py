@@ -5,6 +5,9 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models
   domain+LLM:      sentence  (may use telegram_html; must not import bot/channel)
+  application:     application  (protocol-neutral pipeline shared by every
+                   inbound adapter; must not import any presentation module,
+                   the Telegram SDK, or builder modules)
   shared policy:   translation_policy, runtime_keys, constants
   presentation:    bot, channel, telegram_html, telegram_text
   local state:     settings, channel_reply_index, channel_reply_schema,
@@ -16,8 +19,9 @@ Intended layers (must stay aligned with docs/architecture.md):
 Rules enforced here (all against real src/wuwaterm package modules, including
 nested subpackages discovered via rglob):
 
-1. Domain core and pure helpers must not import presentation or Telegram SDK
-   even under TYPE_CHECKING (only ``channel`` may TYPE_CHECKING-import bot).
+1. Domain core, the application layer and pure helpers must not import
+   presentation or the Telegram SDK even under TYPE_CHECKING (only ``channel``
+   may TYPE_CHECKING-import bot).
 2. sentence must not import bot or channel (runtime or type-only).
 3. Presentation must not import builder-path modules (builder, data_source,
    build_pinyin) or bootstrap ``cli`` (cli pulls the builder graph).
@@ -45,6 +49,10 @@ PACKAGE = ROOT / "src" / "wuwaterm"
 
 DOMAIN_CORE = frozenset({"lookup", "normalize", "models"})
 DOMAIN_LLM = frozenset({"sentence"})
+# Protocol-neutral orchestration shared by every inbound adapter. It sits above
+# domain/LLM and below presentation: adapters import it, it imports none of
+# them.
+APPLICATION = frozenset({"application"})
 SHARED = frozenset({"translation_policy", "runtime_keys", "constants"})
 PRESENTATION = frozenset({"bot", "channel", "telegram_html", "telegram_text"})
 LOCAL_STATE = frozenset(
@@ -61,10 +69,14 @@ BUILDER = frozenset({"builder", "data_source", "build_pinyin"})
 BOOTSTRAP = frozenset({"cli"})
 
 # Modules that must never depend on Telegram presentation or the Bot SDK.
-NO_TELEGRAM_PRESENTATION = DOMAIN_CORE | SHARED | LOCAL_STATE | STORAGE | BUILDER
+NO_TELEGRAM_PRESENTATION = (
+    DOMAIN_CORE | APPLICATION | SHARED | LOCAL_STATE | STORAGE | BUILDER
+)
 
 # Modules that must never pull builder-only graph into the bot edge.
-NO_BUILDER_IMPORTS = PRESENTATION | DOMAIN_CORE | DOMAIN_LLM | SHARED | LOCAL_STATE
+NO_BUILDER_IMPORTS = (
+    PRESENTATION | DOMAIN_CORE | DOMAIN_LLM | APPLICATION | SHARED | LOCAL_STATE
+)
 
 # Who may import build_pinyin at all (including lazy imports).
 BUILD_PINYIN_ALLOWED_IMPORTERS = frozenset({"db", "builder", "build_pinyin"})
@@ -74,6 +86,7 @@ BUILD_PINYIN_ALLOWED_IMPORTERS = frozenset({"db", "builder", "build_pinyin"})
 ALL_CLASSIFIED = (
     DOMAIN_CORE
     | DOMAIN_LLM
+    | APPLICATION
     | SHARED
     | PRESENTATION
     | LOCAL_STATE
