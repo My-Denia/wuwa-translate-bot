@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -333,6 +334,22 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
+def _verify_credential(slots, store: DeviceStore, token: str):
+    """Verify one credential under a bounded number of concurrent attempts.
+
+    Verifying is deliberately expensive and happens before any per-device limit
+    can apply, so the check itself must not become the load. The bound is held
+    and released inside the worker thread: an awaiting request that is
+    cancelled — by the time budget, or by a client that walked away — cannot
+    leave a slot behind, because the thread always runs to completion.
+    """
+    slots.acquire()
+    try:
+        return store.authenticate(token)
+    finally:
+        slots.release()
+
+
 async def authenticated_device(
     request: Request,
     presented: Annotated[
@@ -342,13 +359,12 @@ async def authenticated_device(
     if presented is None or presented.scheme.lower() != "bearer":
         raise ApiError(ERROR_UNAUTHORIZED)
     store: DeviceStore = request.app.state.device_store
-    # Verifying a credential is deliberately expensive, and it happens before
-    # any per-device limit can apply. Bound the number of derivations running
-    # at once so the check itself cannot become the load.
-    async with request.app.state.auth_slots:
-        device = await asyncio.to_thread(
-            store.authenticate, presented.credentials.strip()
-        )
+    device = await asyncio.to_thread(
+        _verify_credential,
+        request.app.state.auth_slots,
+        store,
+        presented.credentials.strip(),
+    )
     if device is None:
         LOGGER.info(
             "auth rejected path=%s request_id=%s",
@@ -440,7 +456,7 @@ def create_app(
         limit=resolved.rate_limit_per_minute
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
-    app.state.auth_slots = asyncio.Semaphore(resolved.auth_max_concurrency)
+    app.state.auth_slots = threading.BoundedSemaphore(resolved.auth_max_concurrency)
 
     # Added last == outermost: the request id wraps everything, so even a
     # failure produced by an inner middleware carries it. The body read and the

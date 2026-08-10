@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -1191,3 +1192,48 @@ def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_db):
+    """The bound is held inside the worker thread, so it cannot be stranded."""
+    app, store = build_client_app(
+        tmp_path, sample_db, auth_max_concurrency=1, request_timeout_seconds=1.0
+    )
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.authenticate
+
+    def slow(self, presented):
+        time.sleep(3.0)
+        return real(self, presented)
+
+    DeviceStore.authenticate = slow
+    try:
+        timed_out = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.authenticate = real
+
+    assert timed_out.status_code == 504
+    # The worker always runs to completion, so once it finishes the slot is
+    # free again. Without the worker-thread bound it would stay stranded and
+    # every later request would time out waiting for it.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if app.state.auth_slots.acquire(blocking=False):
+            app.state.auth_slots.release()
+            break
+        time.sleep(0.05)
+    else:  # pragma: no cover - only on a real leak
+        raise AssertionError("verification slot was never released")
+
+    recovered = run(
+        call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
+    )
+    assert recovered.status_code == 200

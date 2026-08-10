@@ -327,10 +327,14 @@ class DeviceStore:
             # a different status a caller could probe for.
             return None
         try:
-            conn = self._connect()
+            return self._verify(device_id, secret)
         except sqlite3.Error:
+            # Any store this process cannot read is one more indistinguishable
+            # rejection, at every seam and not just at open time.
             return None
-        with conn:
+
+    def _verify(self, device_id: str, secret: str) -> Device | None:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
             ).fetchone()
