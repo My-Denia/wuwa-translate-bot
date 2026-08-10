@@ -188,15 +188,20 @@ def legacy_store_path(path: Path) -> Path | None:
 class DeviceStore:
     """SQLite-backed device registry. One small file, no server."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, guard_legacy_default: bool = True):
         self.path = Path(path)
+        # Only the DEFAULT layout ever had the old path. An operator who names
+        # a store explicitly means that store, even if it happens to sit in a
+        # directory called state-api, so callers that know the path was chosen
+        # turn this off.
+        self.guard_legacy_default = guard_legacy_default
 
     def initialize(self) -> None:
         # Whether or not a store already exists here: an earlier start may
         # have created an empty one at this path, and two stores is precisely
         # the state in which nobody can tell which file holds the live
         # verifiers.
-        legacy = legacy_store_path(self.path)
+        legacy = legacy_store_path(self.path) if self.guard_legacy_default else None
         if legacy is not None and legacy.exists():
             raise DeviceStoreError(
                 f"a device store still exists at {legacy}, the path this "

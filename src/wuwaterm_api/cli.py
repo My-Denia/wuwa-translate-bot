@@ -32,7 +32,10 @@ def _serve(args: argparse.Namespace) -> int:
     from .app import create_app
 
     settings = ApiSettings.from_env()
-    store = DeviceStore(settings.device_db_path)
+    store = DeviceStore(
+        settings.device_db_path,
+        guard_legacy_default=settings.device_db_is_default,
+    )
     store.initialize()
     app = create_app(settings, device_store=store)
     uvicorn.run(
@@ -56,7 +59,10 @@ def _read_secret(stream) -> str:
 
 def _device_issue(args: argparse.Namespace) -> int:
     settings = ApiSettings.from_env()
-    store = DeviceStore(settings.device_db_path)
+    store = DeviceStore(
+        settings.device_db_path,
+        guard_legacy_default=settings.device_db_is_default,
+    )
     device = store.issue(args.name, args.scopes, secret=_read_secret(sys.stdin))
     print(f"device_id: {device.device_id}")
     print(f"device_name: {device.device_name}")
@@ -71,7 +77,10 @@ def _device_issue(args: argparse.Namespace) -> int:
 
 def _device_list(args: argparse.Namespace) -> int:
     settings = ApiSettings.from_env()
-    store = DeviceStore(settings.device_db_path)
+    store = DeviceStore(
+        settings.device_db_path,
+        guard_legacy_default=settings.device_db_is_default,
+    )
     devices = store.list_devices()
     if not devices:
         print("no devices")
@@ -88,7 +97,10 @@ def _device_list(args: argparse.Namespace) -> int:
 
 def _device_revoke(args: argparse.Namespace) -> int:
     settings = ApiSettings.from_env()
-    store = DeviceStore(settings.device_db_path)
+    store = DeviceStore(
+        settings.device_db_path,
+        guard_legacy_default=settings.device_db_is_default,
+    )
     device = store.revoke(args.device_id)
     print(f"revoked {device.device_id} at {device.revoked_at}")
     return 0
