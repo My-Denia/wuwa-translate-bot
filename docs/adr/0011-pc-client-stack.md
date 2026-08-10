@@ -23,8 +23,12 @@ Build `client/` as a separate project in this repository, with its own
 
 **Stack, as built:**
 
-- **Python 3.12** (`requires-python = ">=3.12"`); the build uses a pinned
-  CPython 3.12 interpreter in `client/.venv`.
+- **Python 3.12-compatible**, not pinned. `requires-python = ">=3.12"` is a
+  floor, so 3.13 and later satisfy it; `build.ps1` checks that `client/.venv`
+  exists and can import PySide6 and PyInstaller, but never checks the
+  interpreter's version; and CI selects the `3.12` series without pinning a
+  patch release. 3.12 is what is developed and tested against, and it is what
+  the venv instruction in `build.ps1` suggests — nothing enforces it.
 - **PySide6** (`>=6.7,<7`) for the GUI, with **qasync** (`>=0.27,<1`) driving
   asyncio on the Qt event loop, so HTTP work and the UI share one loop and an
   in-flight request can be cancelled from a button.
@@ -47,19 +51,32 @@ Build `client/` as a separate project in this repository, with its own
 **Contract boundary, as built:**
 
 - **The client holds no translation logic.** `client/src/wuwaterm_client/api.py`
-  issues requests and parses responses; every displayed field is a direct
-  pass-through of the wire schema. There is no dictionary lookup, no direction
-  detection, no term locking, no chunking and no local cache of terms. Direction
-  is a request parameter (`to`), not a client decision: "Auto" simply omits it.
-- **The client holds no Telegram concepts.** Every user-facing literal lives in
-  `client/src/wuwaterm_client/strings.py`;
-  `client/tests/test_ui_strings_source.py` statically asserts that the `ui/`
-  widgets pass no other display text, so the strings module is the single place
-  where such a concept could appear.
+  issues requests and parses responses. There is no dictionary lookup, no
+  direction detection, no term locking, no chunking and no local cache of terms.
+  Direction is a request parameter (`to`), not a client decision: "Auto" simply
+  omits it. What the client *does* add is presentation: `TermsView` formats
+  `score` to two decimals, `StatusView` renders a null profile or commit as an
+  unknown-value label and `llm_configured` as yes/no text, and `TranslateView`
+  maps `kind` to a label and `dictionary_miss` to a note. Those are display
+  decisions about values the server chose; no value shown is one the client
+  computed, looked up or translated.
+- **The client holds no Telegram concepts.** Every user-facing literal is meant
+  to live in `client/src/wuwaterm_client/strings.py`, and
+  `client/tests/test_ui_strings_source.py` enforces part of that statically: it
+  fails a string constant or f-string passed **directly** as an argument to one
+  of twenty named text-setting methods on `ui/` widgets. It does not see a
+  literal buried in an expression — `setText(" | ".join(parts))` in
+  `TranslateView` is exactly that shape, and it passes — nor a literal handed to
+  a widget constructor. So the gate reliably catches the obvious way a Telegram
+  word would arrive, and review still has to catch the rest.
 - **The credential lives only in the OS credential store.**
   `client/src/wuwaterm_client/credentials.py` is the only module that touches
-  the token and delegates entirely to `keyring`. The config file never contains
-  it — `config.py` does not see it, and
+  `keyring`, and it delegates entirely to it. It is **not** the only module that
+  handles the token value: the first-run and token dialogs collect it,
+  `main_window.py` and `settings_dialog.py` hand it to `store_token`, and
+  `api.py` reads it back to build the bearer header. The boundary that holds is
+  "one module talks to the credential store", not "one module ever sees the
+  secret". The config file never contains it — `config.py` does not see it, and
   `client/tests/test_config.py::test_config_file_never_contains_the_credential`
   pins that. Lifecycle: first-run dialog on launch when nothing is stored
   (masked entry), Settings → enter/change token, Settings → forget token
@@ -114,9 +131,13 @@ separation, the packaging entry point, and widget construction smoke tests.
 
 ## Consequences
 
-- Positive: the dictionary-first guarantee has exactly one implementation. A
-  behavior question is answered by reading the server, never by comparing two
-  clients.
+- Positive: **this client adds no second implementation of anything.** A
+  question about translation behavior on the desktop is answered by reading the
+  server, never by reading the client. (Scoped deliberately: it is not a claim
+  that the repository has exactly one implementation. The linked-channel adapter
+  keeps its own direction and exact-lookup sequence and does not call
+  `application` — see [ADR 0009](0009-http-api-adapter.md) and
+  `docs/architecture.md`, "Current coupling".)
 - Positive: a contract change is visible as a diff in `docs/api/openapi.json`
   before the client is touched, because the drift gate runs server-side.
 - Positive: forgetting a machine is an OS-level action the owner can also

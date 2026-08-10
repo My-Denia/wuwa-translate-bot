@@ -134,8 +134,20 @@ presentation, domain, and builder modules (see [Architecture](architecture.md)).
 | Device credential issue / revoke round trip, and a real client request over the SSH tunnel | no | no | yes |
 
 CI never touches the VPS, never holds a device credential, and never opens a
-tunnel. Everything in the "VPS only" column is an owner-attended step recorded
-at deploy time, not an automated gate.
+tunnel. The "VPS only" column is not uniform, though, and the difference
+matters when something goes wrong:
+
+- **Run and recorded by `deploy/vps-update.sh`**: the in-container `/readyz`
+  wait, the image-id and `.deploy_commit` readback, and the bot smoke
+  (`scripts/deploy_smoke.py`, invoked with `TELEGRAM_TEST_CHAT_ID` blanked so
+  the updater path sends no diagnostic message). A failure here aborts the
+  deployment and triggers the transactional rollback, and the outcome lands in
+  `.deployments/<commit>.json`.
+- **Manual operator validation, not recorded anywhere by the updater**: the
+  device issue/revoke round trip and a real client request over the SSH tunnel.
+  Nothing automates them and nothing fails if they are skipped; they are how an
+  operator convinces themselves the surface works end to end, and the record is
+  whatever the operator writes down.
 
 ## Windows Reference
 

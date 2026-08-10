@@ -372,11 +372,18 @@ Six routes, not five. Three carry a credential, three do not:
 `_register_routes`, and it is easy to forget when reasoning about the trust
 boundary. It is deliberate: `openapi_url="/openapi.json"` is kept while
 `docs_url` and `redoc_url` are both `None`, so the machine-readable contract is
-served but no interactive documentation UI is. It discloses the same bytes that
-are already committed at `docs/api/openapi.json` in a public repository, so it
-adds no disclosure — but it is an unauthenticated route reachable by anything
-that can reach the loopback port, and it is part of the surface an ingress
-decision would expose.
+served but no interactive documentation UI is. It discloses the same *document*
+that is already committed at `docs/api/openapi.json` in a public repository, so
+it adds no disclosure — not the same bytes, though: the snapshot is written with
+sorted keys and two-space indentation while the endpoint serializes through
+FastAPI, so do not checksum one against the other. It is an unauthenticated
+route reachable by anything that can reach the loopback port, and it is part of
+the surface an ingress decision would expose.
+
+One more thing a client should know: the router's trailing-slash redirect is the
+documented exception to the error envelope. `GET /healthz/` answers `307` with a
+`Location` header and an empty body rather than the JSON envelope, because that
+response never reaches an exception handler ([ADR 0009](adr/0009-http-api-adapter.md)).
 
 ### Request-id coverage
 
@@ -533,8 +540,9 @@ aids for a single writer, not a cluster protocol.
 | Telegram API | NetworkError, RetryAfter, BadRequest | Flood retry helper; HTML parse fallback to plain; missing reply target handling; process keeps polling (`restart: unless-stopped`) |
 | LLM HTTP | Timeout, 4xx/5xx, empty content | `LLMTranslationError` mapped to a stable `error_code`; Telegram renders its notice, HTTP answers `llm_unavailable` / `llm_budget_exhausted`; placeholders not left raw when restore fails closed |
 | SQLite terms DB | Missing/corrupt file | Startup/use fails when `TermService` cannot read; `GET /readyz` answers 503; deploy keeps previous DB on failed promotion |
-| Device credential store — at startup | Missing / corrupt / older shape | `cli._serve` calls `DeviceStore.initialize()` **before** uvicorn binds. Missing is recreated empty and the service starts. Corrupt or older-shape aborts startup with the explaining message on the operator's terminal: there is no listener, so there is no request to answer. Nothing degrades silently |
-| Device credential store — after startup | Becomes unreadable, deleted, or corrupted while serving | Every request answers a uniform `unauthorized` (401), whatever the underlying cause: `DeviceStore.authenticate` folds every store error into "no device". The reason is not on the wire by design; the operator CLI is where a store is diagnosed |
+| Device credential store — at startup | Missing / older shape / unreadable | `cli._serve` calls `DeviceStore.initialize()` **before** uvicorn binds. Missing is recreated empty and the service starts. An older-shape store raises `DeviceStoreError`, which `cli.main` catches and prints as a curated `error: …`. A file that is not a valid SQLite database at all raises `sqlite3.DatabaseError`, which `cli.main` does not catch, so it aborts on a raw traceback instead. Either way there is no listener and therefore no request to answer — nothing degrades silently |
+| Device credential store — while serving, during authentication | Becomes unreadable, deleted, or corrupted | A uniform `unauthorized` (401), whatever the underlying cause: `DeviceStore.authenticate` folds every store error into "no device". The reason is not on the wire by design; the operator CLI is where a store is diagnosed |
+| Device credential store — while serving, after authentication | Store fails on the `last_used_at` write | Not a 401. `record_use` runs unguarded after a credential has already verified, so a store that breaks in that window surfaces as the generic `internal` (500), not as `unauthorized`. The uniform-rejection property covers the verification path, not the bookkeeping write that follows it |
 | Filesystem state | Disk full, lock errors, durability errors | Settings/reply-index raise typed errors; startup migration refuses overwrite of existing targets |
 | SSH tunnel down (desktop client) | Connect refused / timeout | Client renders its own offline or timeout state; the service is unaffected |
 | Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for **both** serving containers |
@@ -576,15 +584,22 @@ Dictionary-before-LLM: [ADR 0006](adr/0006-dictionary-first-before-llm.md).
 contract and nothing more**:
 
 - It contains no translation logic: no dictionary lookup, no direction
-  detection, no term locking, no chunking. Every displayed field is a
-  pass-through of a response documented in `docs/api/openapi.json`
-  (`client/src/wuwaterm_client/api.py`).
-- It contains no Telegram concepts. All user-facing text lives in
-  `client/src/wuwaterm_client/strings.py`, statically checked by
-  `client/tests/test_ui_strings_source.py`.
+  detection, no term locking, no chunking. Every value it displays comes from a
+  response documented in `docs/api/openapi.json`
+  (`client/src/wuwaterm_client/api.py`); it formats and labels those values for
+  the screen — a rounded score, a yes/no for `llm_configured`, a label for
+  `kind` — but computes none of them.
+- It contains no Telegram concepts. User-facing text is meant to live in
+  `client/src/wuwaterm_client/strings.py`, and
+  `client/tests/test_ui_strings_source.py` enforces the common case statically:
+  a literal passed directly to one of the named text-setting methods fails. A
+  literal buried inside an expression handed to such a method, or passed to a
+  widget constructor, is not covered ([ADR 0011](adr/0011-pc-client-stack.md)).
 - It stores exactly one credential, in the Windows Credential Manager via
-  `keyring`; the config file holds only `base_url` and timeouts
-  (`client/tests/test_config.py`).
+  `keyring`, and `credentials.py` is the only module that talks to the
+  credential store — though the dialogs, the settings view and the API wrapper
+  all handle the token value itself. The config file holds only `base_url` and
+  timeouts (`client/tests/test_config.py`).
 - It is never published to any package index, and it is not part of the
   `wuwaterm` wheel: packaging only reads `src/`, `client/pyproject.toml`
   carries `Private :: Do Not Upload`, and

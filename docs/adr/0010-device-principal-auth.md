@@ -35,7 +35,10 @@ Authenticate a **revocable device principal** per client machine.
 - **Supplied material is validated, not trusted.** It must be printable ASCII
   with no spaces or control characters, so a credential that registers cleanly
   can always be sent in a request header; and at least `MIN_SECRET_LENGTH` (32)
-  characters, so an operator cannot register something trivially guessable.
+  characters. That second rule is a **length floor, not an entropy check**:
+  thirty-two repeated characters register exactly as cleanly as thirty-two
+  random ones. Nothing here can make a bad choice good — which is precisely why
+  the derivation below is `scrypt` rather than a digest.
 - **At rest: salted `scrypt`, not a bare digest.** Each device gets a fresh
   16-byte salt; the verifier is `scrypt(secret, salt, n=2**14, r=8, p=1,
   dklen=32)` — roughly 16 MiB and tens of milliseconds per verification.
@@ -46,15 +49,19 @@ Authenticate a **revocable device principal** per client machine.
   (default 2) caps how many can run at once. The bound is held and released
   inside the worker thread, so a request cancelled by the time budget or by a
   client that walked away cannot leave a slot behind.
-- **Uniform rejection.** Unknown device, wrong secret, malformed token, revoked
-  device and a store that became unusable *while serving* are all
-  indistinguishable to the caller (`unauthorized`), so the endpoint cannot be
-  used to enumerate device ids or to probe the server's state. A store that is
-  already unusable at startup never reaches this path: `cli._serve` initializes
-  it before uvicorn binds, so a corrupt or older-shape store stops the process
-  with an explaining message instead of serving 401s. An operator who needs to
-  know *why* a store is unusable gets it there or from the CLI, where the
-  message has an audience.
+- **Uniform rejection, on the verification path.** Unknown device, wrong secret,
+  malformed token, revoked device and a store that becomes unusable *while
+  serving* are all indistinguishable to the caller (`unauthorized`), so the
+  endpoint cannot be used to enumerate device ids or to probe the server's
+  state. Two boundaries on that property, both deliberate to state:
+  a store that is already unusable at startup never reaches this path at all —
+  `cli._serve` initializes it before uvicorn binds, so an older-shape store
+  stops the process with a curated message and an unreadable file stops it with
+  a raw error, either way before anything is served; and a store that fails on
+  the `last_used_at` write *after* a credential has verified surfaces as
+  `internal`, not `unauthorized`, because `record_use` is not on the rejection
+  path. An operator who needs to know *why* a store is unusable gets it at
+  startup or from the CLI, where the message has an audience.
 - **Scopes** are `translate` (`POST /v1/translations`) and `meta`
   (`GET /v1/terms`, `GET /v1/meta`); both are granted by default. A missing
   scope is `forbidden`, distinct from `unauthorized`.

@@ -53,15 +53,27 @@ layer.
   sit outside the prefix and take no credential: `GET /healthz` and
   `GET /readyz`, because a probe must not be versioned with the product surface,
   and `GET /openapi.json`, which FastAPI generates from `openapi_url`. The
-  schema route is kept deliberately — it serves the same bytes as the committed
-  `docs/api/openapi.json` — while `docs_url` and `redoc_url` are both set to
-  `None`, so no interactive documentation UI is served. Six routes in total;
-  that is the whole inbound surface.
+  schema route is kept deliberately — it serves the same *document* as the
+  committed `docs/api/openapi.json`, though not the same bytes: the snapshot is
+  written by `check_api_contract.render()` with `indent=2, sort_keys=True`,
+  while the endpoint serializes through FastAPI's own JSON response, so
+  whitespace and key order differ and a checksum comparison against the
+  committed file will not match. Meanwhile `docs_url` and `redoc_url` are both
+  set to `None`, so no interactive documentation UI is served. Six routes in
+  total; that is the whole inbound surface.
 - **Plain text only.** The application layer's markup translator is an
   adapter-injected seam; this adapter injects none, so Telegram HTML cannot
   reach the HTTP contract by construction rather than by review.
 - **One stable error envelope**, `{"error": {"code", "message"}, "request_id"}`,
-  for every non-2xx response including framework-raised routing failures. The
+  for every non-2xx response that reaches an exception handler — including the
+  framework-raised routing failures (404, 405) and validation errors, which are
+  the ones a client is most likely to meet and the ones a bare framework would
+  have answered in its own shape. The documented exception is the router's
+  trailing-slash redirect: `GET /healthz/`, `/readyz/` or `/v1/meta/` returns a
+  307 with a `Location` header and an empty body, because `redirect_slashes` is
+  left at its default and that response never passes through a handler. Clients
+  should follow redirects or use the exact paths; they must not assume every
+  non-2xx body parses as the envelope. The
   code set is closed and enumerated in the schema: `unauthorized`, `forbidden`,
   `rate_limited`, `payload_too_large`, `invalid_request`, `input_too_long`,
   `llm_unavailable`, `llm_budget_exhausted`, `internal`. Codes come from
@@ -126,8 +138,14 @@ credentials) is decided in [ADR 0010](0010-device-principal-auth.md) and
 - Negative: the `api` extra adds FastAPI and uvicorn to the runtime image, so
   the runtime image is larger than a Telegram-only one.
 - Constraint: no markup, no Telegram vocabulary and no chat identifiers in the
-  HTTP contract or the snapshot; `scripts/check_api_contract.py` enforces the
-  product token bans over the artifact.
+  HTTP contract or the snapshot. Only part of that is machine-checked:
+  `scripts/check_api_contract.py` re-applies the same four product token bans
+  `scripts/check_non_goals.py` uses — the callback-registration family, the
+  inline-mode handler, the name-mapping term and the free-text listener — to the
+  artifact, and nothing more. Markup, Telegram vocabulary in general and
+  chat-identifier fields are held by review and by the plain-text-only
+  construction: a `<b>` inside a description, or a chat-identifier property,
+  would pass the contract gate today.
 
 ## Evidence
 
