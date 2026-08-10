@@ -13,20 +13,26 @@ FORBIDDEN = {
     "alias layer": re.compile(r"\balias(?:es)?\b", re.IGNORECASE),
     "free-text listener": re.compile(r"\bMessageHandler\b"),
 }
+# scripts/check_api_contract.py re-applies these same product pins to the one
+# committed .json artifact (this scanner only reads text suffixes), so it must
+# carry every marker verbatim.
 ALLOWED = {
     "webhook": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "README.md",
         "goal-runs/wuwa-vps-group-hardening/plan.md",
     },
     "inline mode": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "README.md",
         "goal-runs/wuwa-vps-group-hardening/plan.md",
     },
     "alias layer": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "AGENTS.md",
@@ -35,6 +41,7 @@ ALLOWED = {
         "goal-runs/wuwa-vps-group-hardening/execution-log.md",
     },
     "free-text listener": {
+        "scripts/check_api_contract.py",
         "scripts/check_non_goals.py",
         "tests/test_non_goals.py",
         "goal-runs/wuwa-vps-group-hardening/plan.md",

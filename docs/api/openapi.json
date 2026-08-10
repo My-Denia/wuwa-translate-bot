@@ -1,0 +1,707 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorDetailBody": {
+        "properties": {
+          "code": {
+            "description": "Enumerated, stable failure classification.",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "description": "Short operator-facing text.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetailBody",
+        "type": "object"
+      },
+      "ErrorResponseBody": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetailBody"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "title": "ErrorResponseBody",
+        "type": "object"
+      },
+      "HealthResponseBody": {
+        "properties": {
+          "status": {
+            "enum": [
+              "ok",
+              "ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "HealthResponseBody",
+        "type": "object"
+      },
+      "MetaResponseBody": {
+        "properties": {
+          "api_version": {
+            "title": "Api Version",
+            "type": "string"
+          },
+          "llm_configured": {
+            "title": "Llm Configured",
+            "type": "boolean"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          },
+          "service_version": {
+            "title": "Service Version",
+            "type": "string"
+          },
+          "source_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Commit"
+          },
+          "source_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Profile"
+          },
+          "term_count": {
+            "title": "Term Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "service_version",
+          "api_version",
+          "schema_version",
+          "source_profile",
+          "source_commit",
+          "term_count",
+          "llm_configured",
+          "request_id"
+        ],
+        "title": "MetaResponseBody",
+        "type": "object"
+      },
+      "TermMatchBody": {
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "en": {
+            "title": "En",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "zh": {
+            "title": "Zh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zh",
+          "en",
+          "category",
+          "score",
+          "reason"
+        ],
+        "title": "TermMatchBody",
+        "type": "object"
+      },
+      "TermsResponseBody": {
+        "properties": {
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/TermMatchBody"
+            },
+            "title": "Matches",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "matches",
+          "request_id"
+        ],
+        "title": "TermsResponseBody",
+        "type": "object"
+      },
+      "TranslationRequestBody": {
+        "properties": {
+          "text": {
+            "description": "Source text to translate. Plain text only.",
+            "title": "Text",
+            "type": "string"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "zh"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Force the target language. Omit or send null to auto-detect from the source text.",
+            "title": "To"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "TranslationRequestBody",
+        "type": "object"
+      },
+      "TranslationResponseBody": {
+        "properties": {
+          "dictionary_miss": {
+            "description": "True when a short query was answered by the model with no official term locked, so the answer is not authoritative.",
+            "title": "Dictionary Miss",
+            "type": "boolean"
+          },
+          "direction": {
+            "description": "Target language used.",
+            "enum": [
+              "en",
+              "zh"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Which stage answered: noop (nothing translatable), exact (official dictionary hit), fuzzy (trusted pinyin hit) or llm.",
+            "enum": [
+              "noop",
+              "exact",
+              "fuzzy",
+              "llm"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "text": {
+            "description": "Translated text.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "direction",
+          "dictionary_miss",
+          "request_id"
+        ],
+        "title": "TranslationResponseBody",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Read-only translation surface for the Wuthering Waves terminology service.\n\nThe same dictionary-first pipeline answers here and in the chat adapter:\nofficial dictionary hit first, then a trusted pinyin hit, then a term-locked\nmodel call. Responses are plain text; rich-text markup is never part of this\ncontract.\n\nAuthentication is a bearer device token issued by the operator. There is no\nregistration endpoint: tokens are created out of band and can be revoked.",
+    "title": "wuwaterm API",
+    "version": "0.2.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "description": "Liveness. Answers as long as the process is serving; no auth.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Readiness: the terminology database is readable right now. No auth.",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Translation unavailable"
+          }
+        },
+        "summary": "Readyz",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/v1/meta": {
+      "get": {
+        "description": "Service and data provenance. No paths, no secrets, no chat ids.",
+        "operationId": "read_meta_v1_meta_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Translation unavailable"
+          }
+        },
+        "summary": "Read Meta",
+        "tags": [
+          "dictionary"
+        ]
+      }
+    },
+    "/v1/terms": {
+      "get": {
+        "description": "Exact dictionary candidates for a query. Official strings only.",
+        "operationId": "read_terms_v1_terms_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TermsResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Translation unavailable"
+          }
+        },
+        "summary": "Read Terms",
+        "tags": [
+          "dictionary"
+        ]
+      }
+    },
+    "/v1/translations": {
+      "post": {
+        "description": "Translate plain text through the shared dictionary-first pipeline.",
+        "operationId": "create_translation_v1_translations_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TranslationRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranslationResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Translation unavailable"
+          }
+        },
+        "summary": "Create Translation",
+        "tags": [
+          "translation"
+        ]
+      }
+    }
+  }
+}

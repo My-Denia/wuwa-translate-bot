@@ -14,6 +14,27 @@ does not distribute generated game data or generated SQLite databases.
 - Boundary guard gains an `Application` layer that may not import presentation
   modules or the Telegram SDK, even under `TYPE_CHECKING`.
 
+### HTTP Adapter (new)
+
+- New `wuwaterm_api` package: a versioned, plain-text HTTP surface
+  (`POST /v1/translations`, `GET /v1/terms`, `GET /v1/meta`, `GET /healthz`,
+  `GET /readyz`) served by the same dictionary-first pipeline as the bot.
+- Revocable device credentials in their own store (`state/api/devices.db`),
+  issued and withdrawn by an operator through the new `wuwaterm-api device`
+  commands. Only a hash of each secret is stored.
+- Stable error envelope with enumerated codes, request ids, per-device request
+  limits, a body-size cap and a per-request time budget.
+- Committed contract snapshot `docs/api/openapi.json` with a drift gate
+  (`scripts/check_api_contract.py`), which also re-applies the repo's product
+  token bans to that JSON artifact.
+- The published wheel now ships the `wuwaterm_api` package and a
+  `wuwaterm-api` entry point; `scripts/check_package_artifacts.py` requires
+  both, so packaging drift stays caught. The `api` extra carries FastAPI and
+  uvicorn; the core dependency set is unchanged.
+- API budgets are per process and separate from the bot's: its own translator
+  instance, its own model concurrency cap (default 2) and its own per-minute
+  call budget (default 30).
+
 ## 0.2.1 - 2026-08-06
 
 Maintenance release packaging post-v0.2.0 production hardening already merged

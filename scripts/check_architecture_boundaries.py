@@ -31,6 +31,12 @@ nested subpackages discovered via rglob):
 6. Builder modules must not import bot or channel.
 7. Every discovered shipped module must belong to a layer set (no silent
    unclassified files, including future nested packages).
+8. The HTTP adapter package ``src/wuwaterm_api`` may import ONLY
+   ``wuwaterm.application``, ``wuwaterm.models``,
+   ``wuwaterm.translation_policy`` and ``wuwaterm.logging_utils`` — never the
+   bot, channel, lookup, sentence, db, telegram_* or builder modules, never
+   the ``wuwaterm`` package root, and never the Telegram SDK. This is the
+   machine-checkable form of "the API cannot bypass the shared pipeline".
 
 Companion gates (not duplicated here):
 - scripts/check_non_goals.py — delivery-mode and channel-listener product pins
@@ -46,6 +52,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "wuwaterm"
+
+# The HTTP adapter is a separate shipped package. It is allowed to reach the
+# shared application layer and the protocol-neutral helpers, and nothing else
+# inside wuwaterm. This allowlist is the machine-checkable form of "the API
+# cannot bypass the shared translation pipeline": if it could import lookup,
+# sentence, db or bot directly it could grow a second, divergent pipeline.
+API_PACKAGE = ROOT / "src" / "wuwaterm_api"
+API_ALLOWED_WUWATERM_MODULES = frozenset(
+    {"application", "models", "translation_policy", "logging_utils"}
+)
 
 DOMAIN_CORE = frozenset({"lookup", "normalize", "models"})
 DOMAIN_LLM = frozenset({"sentence"})
@@ -312,9 +328,88 @@ def _is_telegram_sdk(name: str) -> bool:
     return name == "telegram" or name.startswith("telegram.")
 
 
+def _api_wuwaterm_imports(path: Path) -> list[tuple[str, int]]:
+    """Return (imported wuwaterm target, lineno) for one adapter module.
+
+    ``wuwaterm`` on its own is reported as the empty string: importing the
+    package root is too broad to classify, so it is refused. Relative imports
+    stay inside ``wuwaterm_api`` and are not reported.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            module = node.module or ""
+            if module == "wuwaterm":
+                for entry in node.names:
+                    found.append((entry.name.split(".", 1)[0], node.lineno))
+            elif module.startswith("wuwaterm."):
+                found.append((module[len("wuwaterm.") :].split(".", 1)[0], node.lineno))
+        elif isinstance(node, ast.Import):
+            for entry in node.names:
+                name = entry.name
+                if name == "wuwaterm":
+                    found.append(("", node.lineno))
+                elif name.startswith("wuwaterm."):
+                    found.append(
+                        (name[len("wuwaterm.") :].split(".", 1)[0], node.lineno)
+                    )
+    return found
+
+
+def _api_external_imports(path: Path) -> list[tuple[str, int]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                continue
+            found.append((node.module, node.lineno))
+        elif isinstance(node, ast.Import):
+            for entry in node.names:
+                found.append((entry.name, node.lineno))
+    return found
+
+
+def check_api_package() -> list[str]:
+    """Fail closed on anything the HTTP adapter must not reach.
+
+    TYPE_CHECKING is not an exemption here either: a type-only import of the
+    bot would still document a dependency the adapter is not allowed to have.
+    """
+    failures: list[str] = []
+    if not API_PACKAGE.is_dir():
+        return failures
+    for path in sorted(API_PACKAGE.rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        for target, lineno in _api_wuwaterm_imports(path):
+            if not target:
+                failures.append(
+                    f"{rel}:{lineno}: must import specific wuwaterm modules "
+                    f"({', '.join(sorted(API_ALLOWED_WUWATERM_MODULES))}), "
+                    f"not the wuwaterm package root"
+                )
+            elif target not in API_ALLOWED_WUWATERM_MODULES:
+                failures.append(
+                    f"{rel}:{lineno}: wuwaterm_api may only import "
+                    f"{sorted(API_ALLOWED_WUWATERM_MODULES)} from wuwaterm; "
+                    f"found wuwaterm.{target}"
+                )
+        for name, lineno in _api_external_imports(path):
+            if _is_telegram_sdk(name):
+                failures.append(
+                    f"{rel}:{lineno}: wuwaterm_api must not import the Telegram "
+                    f"SDK ({name})"
+                )
+    return failures
+
+
 def check() -> list[str]:
     modules, collisions = _discover_modules()
     failures: list[str] = list(collisions)
+    failures.extend(check_api_package())
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:

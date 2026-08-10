@@ -25,6 +25,7 @@ jobs:
       - run: python scripts/check_repo_hygiene.py
       - run: python scripts/check_non_goals.py
       - run: python scripts/check_architecture_boundaries.py
+      - run: python scripts/check_api_contract.py
       - run: python -m pytest
 
   lock:
@@ -56,13 +57,17 @@ jobs:
           python -m venv "$RUNNER_TEMP/venv-wheel"
           "$RUNNER_TEMP/venv-wheel/bin/pip" install --no-cache-dir dist/*.whl
           "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
           "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
       - name: Install sdist into a clean venv and smoke it
         run: |
           python -m venv "$RUNNER_TEMP/venv-sdist"
           "$RUNNER_TEMP/venv-sdist/bin/pip" install --no-cache-dir dist/*.tar.gz
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
 
   deploy-boundary:
     name: docker runtime/builder boundary

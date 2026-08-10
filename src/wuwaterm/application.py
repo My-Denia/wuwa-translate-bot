@@ -181,6 +181,9 @@ class MarkupTranslation:
 
 MarkupTranslator = Callable[..., Awaitable[MarkupTranslation]]
 TextSplitter = Callable[[str, int], Sequence[str]]
+# Called (synchronously) immediately before each LLM request, after the
+# concurrency slot is held. Raise LLMTranslationError to refuse the call.
+LlmCallGuard = Callable[[], None]
 
 
 # --------------------------------------------------------------------------
@@ -370,12 +373,16 @@ async def _translate_long_plain_text(
     *,
     to_chinese: bool,
     splitter: TextSplitter,
+    before_llm_call: LlmCallGuard | None = None,
 ) -> TranslationOutcome:
     translated_chunks: list[str] = []
     for chunk in splitter(text, LLM_INPUT_CHAR_LIMIT):
         try:
             translated = await translator.translate_async(
-                chunk, to_chinese=to_chinese, propagate_errors=True
+                chunk,
+                to_chinese=to_chinese,
+                propagate_errors=True,
+                before_llm_call=before_llm_call,
             )
         except LLMTranslationError as exc:
             return _llm_failure_outcome(exc, to_chinese)
@@ -386,11 +393,18 @@ async def _translate_long_plain_text(
 
 
 async def _translate_plain_async(
-    translator: SentenceTranslator, prepared: str, *, to_chinese: bool
+    translator: SentenceTranslator,
+    prepared: str,
+    *,
+    to_chinese: bool,
+    before_llm_call: LlmCallGuard | None = None,
 ) -> TranslationOutcome:
     try:
         translated = await translator.translate_async(
-            prepared, to_chinese=to_chinese, propagate_errors=True
+            prepared,
+            to_chinese=to_chinese,
+            propagate_errors=True,
+            before_llm_call=before_llm_call,
         )
     except LLMTranslationError as exc:
         return _llm_failure_outcome(exc, to_chinese)
@@ -410,6 +424,7 @@ async def translate_request_async(
     input_limit: int = LLM_INPUT_CHAR_LIMIT,
     markup_translator: MarkupTranslator | None = None,
     splitter: TextSplitter | None = None,
+    before_llm_call: LlmCallGuard | None = None,
 ) -> TranslationOutcome:
     """Run the shared dictionary-first pipeline for one job."""
     stage = _dictionary_stage(service, translator, request, input_limit)
@@ -425,6 +440,7 @@ async def translate_request_async(
             prepared,
             to_chinese=to_chinese,
             splitter=splitter or split_plain_text,
+            before_llm_call=before_llm_call,
         )
 
     if request.markup and markup_translator is not None:
@@ -459,7 +475,12 @@ async def translate_request_async(
                 error_code=code,
             )
 
-    return await _translate_plain_async(translator, prepared, to_chinese=to_chinese)
+    return await _translate_plain_async(
+        translator,
+        prepared,
+        to_chinese=to_chinese,
+        before_llm_call=before_llm_call,
+    )
 
 
 def translate_request(
@@ -605,6 +626,51 @@ def probe_database(service: TermService) -> bool:
 # --------------------------------------------------------------------------
 # Per-principal request budget
 # --------------------------------------------------------------------------
+
+
+LLM_BUDGET_EXHAUSTED_REASON = "budget"
+
+
+class LlmCallBudget:
+    """Rolling per-minute cap on LLM calls made by ONE process.
+
+    Used as the ``before_llm_call`` guard: it is invoked synchronously right
+    before each outbound LLM request, after the concurrency slot is held, so a
+    refusal costs no upstream call. Like every other budget in this codebase it
+    is process-local — two processes do not share it, and the documented total
+    is the sum of the per-process caps.
+    """
+
+    def __init__(
+        self,
+        calls_per_minute: int,
+        *,
+        window_seconds: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if calls_per_minute < 1:
+            raise ValueError("calls_per_minute must be at least 1")
+        self.calls_per_minute = calls_per_minute
+        self.window_seconds = window_seconds
+        self._clock = clock
+        self._calls: Deque[float] = deque()
+
+    def __call__(self) -> None:
+        now = self._clock()
+        cutoff = now - self.window_seconds
+        while self._calls and self._calls[0] <= cutoff:
+            self._calls.popleft()
+        if len(self._calls) >= self.calls_per_minute:
+            raise LLMTranslationError(
+                "llm call budget exhausted for this process",
+                reason=LLM_BUDGET_EXHAUSTED_REASON,
+            )
+        self._calls.append(now)
+
+    def in_window(self) -> int:
+        """Calls counted in the current window (diagnostics only)."""
+        cutoff = self._clock() - self.window_seconds
+        return sum(1 for moment in self._calls if moment > cutoff)
 
 
 class SlidingWindowRateLimiter:

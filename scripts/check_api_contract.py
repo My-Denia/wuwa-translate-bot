@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Pin the HTTP contract: regenerate the OpenAPI document and byte-compare.
+
+The committed snapshot `docs/api/openapi.json` is the machine-readable
+contract clients build against, so it must never drift silently from the code.
+
+This gate also re-runs the repo's non-goal token bans over the snapshot.
+`scripts/check_non_goals.py` only scans text suffixes and does NOT include
+`.json`, so without this check the one committed JSON artifact would be the
+single file in the repo where a banned marker could hide.
+
+Usage:
+    python scripts/check_api_contract.py            # verify (CI + local gate)
+    python scripts/check_api_contract.py --write    # refresh the snapshot
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SNAPSHOT = ROOT / "docs" / "api" / "openapi.json"
+
+# Same product pins as scripts/check_non_goals.py, applied to the JSON artifact.
+FORBIDDEN = {
+    "webhook": re.compile(r"\b(set_webhook|run_webhook|WEBHOOK_URL|webhook_url)\b"),
+    "inline mode": re.compile(r"\bInlineQueryHandler\b"),
+    "name-mapping layer": re.compile(r"\balias(?:es)?\b", re.IGNORECASE),
+    "free-text listener": re.compile(r"\bMessageHandler\b"),
+}
+
+
+def render() -> str:
+    """Generate the OpenAPI document from the live application."""
+    sys.path.insert(0, str(ROOT / "src"))
+    with tempfile.TemporaryDirectory() as tmp:
+        # Never touch a real device store or a real terminology database while
+        # rendering a static document.
+        os.environ["WUWATERM_API_DEVICE_DB_PATH"] = str(Path(tmp) / "devices.db")
+        os.environ.setdefault("WUWATERM_DB_PATH", "data/terms.db")
+        from wuwaterm_api.app import create_app
+
+        document = create_app().openapi()
+    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def check_tokens(text: str) -> list[str]:
+    failures: list[str] = []
+    for label, pattern in FORBIDDEN.items():
+        if pattern.search(text):
+            failures.append(
+                f"{label} marker found in {SNAPSHOT.relative_to(ROOT).as_posix()}"
+            )
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="write the regenerated document to the snapshot path",
+    )
+    args = parser.parse_args(argv)
+
+    generated = render()
+    failures = check_tokens(generated)
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        print(
+            "refusing to write a snapshot containing a banned product marker",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.write:
+        SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        SNAPSHOT.write_text(generated, encoding="utf-8")
+        print(f"wrote {SNAPSHOT.relative_to(ROOT).as_posix()}")
+        return 0
+
+    if not SNAPSHOT.is_file():
+        print(f"missing contract snapshot: {SNAPSHOT}", file=sys.stderr)
+        return 1
+    committed = SNAPSHOT.read_text(encoding="utf-8")
+    failures = check_tokens(committed)
+    if committed != generated:
+        failures.append(
+            "OpenAPI contract drift: the committed snapshot does not match the "
+            "generated document. Run `python scripts/check_api_contract.py "
+            "--write` and review the diff before committing."
+        )
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    print("api contract ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

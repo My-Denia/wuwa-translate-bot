@@ -393,3 +393,73 @@ def test_duplicate_module_keys_fail_closed(tmp_path: Path, monkeypatch):
     assert any("duplicate module key 'foo'" in c for c in collisions)
     failures = cab.check()
     assert any("duplicate module key" in f for f in failures)
+
+
+def test_shipped_api_package_respects_its_narrow_allowlist():
+    from scripts import check_architecture_boundaries as cab
+
+    assert cab.API_PACKAGE.is_dir()
+    assert cab.check_api_package() == []
+
+
+def test_api_package_may_not_reach_past_the_application_layer(
+    tmp_path: Path, monkeypatch
+):
+    """The API must not be able to grow its own copy of the pipeline."""
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm_api"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "routes.py").write_text(
+        "from wuwaterm.application import translate_request_async\n"
+        "from wuwaterm.lookup import TermService\n"
+        "from wuwaterm.sentence import SentenceTranslator\n"
+        "import wuwaterm.bot\n"
+        "import telegram\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "API_PACKAGE", pkg)
+    monkeypatch.setattr(cab, "ROOT", tmp_path)
+
+    failures = cab.check_api_package()
+
+    joined = "\n".join(failures)
+    assert "wuwaterm.lookup" in joined
+    assert "wuwaterm.sentence" in joined
+    assert "wuwaterm.bot" in joined
+    assert "Telegram SDK" in joined
+    assert "wuwaterm.application" not in joined
+
+
+def test_api_package_may_not_import_the_package_root(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm_api"
+    pkg.mkdir(parents=True)
+    (pkg / "broad.py").write_text("import wuwaterm\n", encoding="utf-8")
+    monkeypatch.setattr(cab, "API_PACKAGE", pkg)
+    monkeypatch.setattr(cab, "ROOT", tmp_path)
+
+    failures = cab.check_api_package()
+
+    assert any("not the wuwaterm package root" in f for f in failures), failures
+
+
+def test_api_package_type_only_imports_are_not_exempt(tmp_path: Path, monkeypatch):
+    from scripts import check_architecture_boundaries as cab
+
+    pkg = tmp_path / "wuwaterm_api"
+    pkg.mkdir(parents=True)
+    (pkg / "typed.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from wuwaterm.bot import BotConfig\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cab, "API_PACKAGE", pkg)
+    monkeypatch.setattr(cab, "ROOT", tmp_path)
+
+    failures = cab.check_api_package()
+
+    assert any("wuwaterm.bot" in f for f in failures), failures

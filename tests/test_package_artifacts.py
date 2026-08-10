@@ -18,7 +18,11 @@ DIST_INFO = f"wuwaterm-{VERSION}.dist-info"
 SDIST_ROOT = f"wuwaterm-{VERSION}"
 
 WHEEL_METADATA = f"Metadata-Version: 2.1\nName: wuwaterm\nVersion: {VERSION}\n"
-ENTRY_POINTS = "[console_scripts]\nwuwaterm = wuwaterm.cli:main\n"
+ENTRY_POINTS = (
+    "[console_scripts]\n"
+    "wuwaterm = wuwaterm.cli:main\n"
+    "wuwaterm-api = wuwaterm_api.cli:main\n"
+)
 
 
 def build_wheel(
@@ -33,6 +37,11 @@ def build_wheel(
         "wuwaterm/__init__.py": "",
         "wuwaterm/cli.py": "def main():\n    return 0\n",
         "wuwaterm/bot.py": "",
+        "wuwaterm/application.py": "",
+        "wuwaterm_api/__init__.py": "",
+        "wuwaterm_api/app.py": "",
+        "wuwaterm_api/auth.py": "",
+        "wuwaterm_api/cli.py": "",
         f"{dist_info}/METADATA": WHEEL_METADATA,
         f"{dist_info}/entry_points.txt": ENTRY_POINTS,
         f"{dist_info}/RECORD": "",
@@ -60,6 +69,11 @@ def build_sdist(
         f"{root}/src/wuwaterm/__init__.py": "",
         f"{root}/src/wuwaterm/cli.py": "",
         f"{root}/src/wuwaterm/bot.py": "",
+        f"{root}/src/wuwaterm/application.py": "",
+        f"{root}/src/wuwaterm_api/__init__.py": "",
+        f"{root}/src/wuwaterm_api/app.py": "",
+        f"{root}/src/wuwaterm_api/auth.py": "",
+        f"{root}/src/wuwaterm_api/cli.py": "",
     }
     members.update(extra or {})
     for name in omit or set():

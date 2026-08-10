@@ -19,13 +19,22 @@ dependencies = [
 build = [
   "pypinyin>=0.54,<1",
 ]
+# HTTP adapter. Kept out of the core dependency set so the Telegram runtime
+# still installs with httpx + python-telegram-bot only.
+api = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+]
 dev = [
   "pypinyin>=0.54,<1",
   "pytest>=8.0,<9",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
 ]
 
 [project.scripts]
 wuwaterm = "wuwaterm.cli:main"
+wuwaterm-api = "wuwaterm_api.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
