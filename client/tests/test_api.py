@@ -401,3 +401,23 @@ def test_the_client_does_not_trust_environment_proxies() -> None:
         assert client._client.trust_env is False
     finally:
         asyncio.run(client.aclose())
+
+
+def test_a_credential_that_cannot_be_a_header_is_reported_as_unusable() -> None:
+    """A pasted character outside ASCII would raise from inside a coroutine."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be attempted")
+
+    client = _client(handler, token_provider=lambda: "wtd1.device.sécret")
+
+    async def scenario() -> ClientError:
+        try:
+            await client.get_meta()
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == errors.ERROR_UNAUTHORIZED

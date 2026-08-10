@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import strings
-from ..config import DEFAULT_BASE_URL, ClientConfig
+from ..config import DEFAULT_BASE_URL, ClientConfig, usable_base_url
 from ..credentials import active_backend_name, delete_token, has_token, store_token
 from .token_dialog import TokenDialog
 
@@ -56,7 +56,7 @@ class SettingsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             self,
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_accepted)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
@@ -97,6 +97,23 @@ class SettingsDialog(QDialog):
         if confirm == QMessageBox.StandardButton.Yes:
             delete_token()
             self._refresh_credential_status()
+
+    def _on_accepted(self) -> None:
+        """A saved address that cannot be used is worse than no change.
+
+        An address like `http://127.0.0.1:notaport` is accepted by a plain
+        text field and then fails on every request until the operator works
+        out that the setting itself is wrong.
+        """
+        if not usable_base_url(self.base_url_edit.text()):
+            QMessageBox.warning(
+                self,
+                strings.SETTINGS_INVALID_BASE_URL_TITLE,
+                strings.SETTINGS_INVALID_BASE_URL_MESSAGE,
+            )
+            self.base_url_edit.setFocus()
+            return
+        self.accept()
 
     def result_config(self) -> ClientConfig:
         base_url = self.base_url_edit.text().strip() or DEFAULT_BASE_URL

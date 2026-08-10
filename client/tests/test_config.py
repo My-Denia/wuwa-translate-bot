@@ -13,6 +13,7 @@ from wuwaterm_client.config import (
     MIN_TIMEOUT_SECONDS,
     ClientConfig,
     config_path,
+    usable_base_url,
 )
 
 
@@ -124,6 +125,26 @@ def test_a_base_url_of_the_wrong_type_falls_back_to_the_default(tmp_path) -> Non
     """Annotations are not runtime validation: a list would reach httpx."""
     (tmp_path / "config.json").write_text(
         json.dumps({"base_url": ["http://127.0.0.1:8787"]}), encoding="utf-8"
+    )
+
+    assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL
+
+
+def test_an_address_that_cannot_be_used_is_recognized() -> None:
+    """The port is the case a text field will not catch on its own."""
+    assert usable_base_url("http://127.0.0.1:8787")
+    assert usable_base_url("https://example.invalid/api")
+    assert not usable_base_url("http://127.0.0.1:notaport")
+    assert not usable_base_url("127.0.0.1:8787")
+    assert not usable_base_url("ftp://127.0.0.1")
+    assert not usable_base_url("http://")
+    assert not usable_base_url("")
+    assert not usable_base_url(None)
+
+
+def test_an_unusable_saved_address_falls_back_to_the_default(tmp_path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"base_url": "http://127.0.0.1:notaport"}), encoding="utf-8"
     )
 
     assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL

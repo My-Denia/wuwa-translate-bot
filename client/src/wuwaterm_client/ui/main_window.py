@@ -63,6 +63,10 @@ class MainWindow(QMainWindow):
                 self.config.request_timeout_seconds,
                 self.config.translate_timeout_seconds,
             )
+        # Whether or not the dialog was accepted: entering, changing or
+        # forgetting a token inside it writes to the credential store
+        # immediately, and Cancel does not undo that.
+        self.status_view.refresh_credential_state()
 
     def _on_about_clicked(self) -> None:
         QMessageBox.information(self, strings.MENU_ABOUT, strings.ABOUT_TEXT)

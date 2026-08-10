@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from wuwaterm_client.api import ApiClient  # noqa: E402
 from wuwaterm_client.config import ClientConfig  # noqa: E402
+from wuwaterm_client.errors import message_for  # noqa: E402
 from wuwaterm_client.ui.first_run_dialog import FirstRunDialog  # noqa: E402
 from wuwaterm_client.ui.main_window import MainWindow  # noqa: E402
 from wuwaterm_client.ui.settings_dialog import SettingsDialog  # noqa: E402
@@ -186,3 +187,42 @@ def test_storing_a_first_run_credential_refreshes_the_status_view(
     assert window.ensure_credential() is True
     assert stored["token"] == "wtd1.device.secret"
     assert refreshed == [True]
+
+
+def test_settings_refuse_an_address_that_cannot_be_used(qapp, monkeypatch) -> None:
+    """A saved address that fails every request is worse than no change."""
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from wuwaterm_client.config import ClientConfig
+    from wuwaterm_client.ui import settings_dialog as settings_module
+
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+
+    dialog = SettingsDialog(ClientConfig(base_url="http://127.0.0.1:8787"))
+    dialog.base_url_edit.setText("http://127.0.0.1:notaport")
+    dialog._on_accepted()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+
+    dialog.base_url_edit.setText("http://127.0.0.1:9999")
+    dialog._on_accepted()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_cancelling_before_the_task_starts_restores_the_buttons(qapp) -> None:
+    """A task cancelled before its first step never runs its own body."""
+    import asyncio
+
+    view = TranslateView(_dummy_client())
+    view.input_edit.setPlainText("Jinhsi")
+
+    async def scenario() -> None:
+        view._on_translate_clicked()
+        # No await in between: the task has been scheduled and has not run.
+        view._on_cancel_clicked()
+        await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+
+    assert view.translate_button.isEnabled()
+    assert not view.cancel_button.isEnabled()
+    assert view.status_label.text() == message_for("cancelled")

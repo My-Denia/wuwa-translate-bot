@@ -99,6 +99,16 @@ class TranslateView(QWidget):
         self._task = asyncio.ensure_future(
             self._run_translate(text, self._selected_direction())
         )
+        # A task cancelled before its first step never runs its own body, so
+        # the coroutine's own finally never executes and the buttons would
+        # stay in the busy state for good. The callback runs either way.
+        self._task.add_done_callback(self._on_task_finished)
+
+    def _on_task_finished(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            self._show_error(ClientError(ERROR_CANCELLED))
+        self._set_idle()
+        self._task = None
 
     def _on_cancel_clicked(self) -> None:
         if self._task is not None:

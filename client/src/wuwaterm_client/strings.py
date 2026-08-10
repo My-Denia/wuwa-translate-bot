@@ -91,6 +91,11 @@ SETTINGS_CHANGE_TOKEN_BUTTON = "Change token..."
 SETTINGS_FORGET_TOKEN_BUTTON = "Forget token"
 SETTINGS_TOKEN_STATUS_STORED = "A device credential is stored."
 SETTINGS_TOKEN_STATUS_MISSING = "No device credential is stored."
+SETTINGS_INVALID_BASE_URL_TITLE = "Server address"
+SETTINGS_INVALID_BASE_URL_MESSAGE = (
+    "That server address cannot be used. Enter an http:// or https:// "
+    "address with a host, for example http://127.0.0.1:8787."
+)
 
 CONFIRM_FORGET_TOKEN_TITLE = "Forget device credential"
 CONFIRM_FORGET_TOKEN_MESSAGE = (

@@ -20,6 +20,7 @@ from .errors import (
     ERROR_CANCELLED,
     ERROR_OFFLINE,
     ERROR_TIMEOUT,
+    ERROR_UNAUTHORIZED,
     ERROR_UNKNOWN,
     ClientError,
 )
@@ -169,6 +170,16 @@ class ApiClient:
         token = self._token_provider()
         if not token:
             return {}
+        try:
+            token.encode("ascii")
+        except UnicodeEncodeError:
+            # A pasted credential can carry a character that cannot go in a
+            # header at all, and httpx would raise from inside whichever
+            # coroutine happened to be running. The service refuses such a
+            # secret at registration, so a stored one is a paste error: report
+            # it as the credential being unusable, which is also the message
+            # that tells the owner where to fix it.
+            raise ClientError(ERROR_UNAUTHORIZED) from None
         return {"Authorization": f"{_BEARER_PREFIX}{token}"}
 
     async def _request(
