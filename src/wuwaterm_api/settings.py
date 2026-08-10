@@ -7,6 +7,7 @@ are reported without echoing the raw value (it may contain a secret).
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,44 @@ from pathlib import Path
 
 class ApiConfigError(ValueError):
     """Raised when the environment cannot produce a usable configuration."""
+
+
+def validate_loopback_bind(value: str) -> str:
+    """Return ``value`` if it is a numeric loopback address, else raise.
+
+    This API is a single-owner surface that must never listen where a remote
+    host can reach it. The bind is therefore required to be a numeric loopback
+    literal (``127.0.0.1``, any ``127.0.0.0/8`` address, or ``::1``). Refused:
+
+    * ``0.0.0.0`` and ``::`` — every interface, the exact exposure hazard;
+    * any routable address — a public or LAN interface;
+    * any hostname, including ``localhost`` — it is not numeric and could
+      resolve, now or later by DNS the operator does not control, to a
+      non-loopback interface. Only an address that is loopback by inspection,
+      never by resolution, is accepted.
+
+    The offending value is not echoed: settings never reflect a raw environment
+    value back, and the fix is the same regardless of what was set.
+    """
+    candidate = (value or "").strip()
+    host = (
+        candidate[1:-1]
+        if candidate.startswith("[") and candidate.endswith("]")
+        else candidate
+    )
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        raise ApiConfigError(
+            "the API bind must be a numeric loopback address such as "
+            "127.0.0.1 or ::1"
+        ) from None
+    if not address.is_loopback:
+        raise ApiConfigError(
+            "the API bind must be a loopback address such as 127.0.0.1 or ::1; "
+            "binding any other interface would expose this single-owner surface"
+        )
+    return candidate
 
 
 DEFAULT_BIND = "127.0.0.1"
@@ -37,6 +76,11 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
 # many of those can run at once so an unauthenticated caller cannot turn the
 # credential check itself into the load.
 DEFAULT_AUTH_MAX_CONCURRENCY = 2
+# A total in-flight request ceiling handed to uvicorn. The bounded auth
+# executor already sheds credential-verification load; this is the coarser
+# belt-and-suspenders that stops any request class from opening unbounded
+# concurrent work on the single shared worker pool.
+DEFAULT_MAX_CONCURRENT_REQUESTS = 64
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -89,6 +133,7 @@ class ApiSettings:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
+    max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -102,8 +147,10 @@ class ApiSettings:
                 else state_dir / DEVICE_DB_FILENAME
             ),
             device_db_is_default=not (device_db and device_db.strip()),
-            bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
-            or DEFAULT_BIND,
+            bind=validate_loopback_bind(
+                (os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
+                or DEFAULT_BIND
+            ),
             port=_env_int(
                 "WUWATERM_API_PORT", DEFAULT_PORT, minimum=1, maximum=65535
             ),
@@ -148,5 +195,11 @@ class ApiSettings:
                 DEFAULT_AUTH_MAX_CONCURRENCY,
                 minimum=1,
                 maximum=64,
+            ),
+            max_concurrent_requests=_env_int(
+                "WUWATERM_API_MAX_CONCURRENT_REQUESTS",
+                DEFAULT_MAX_CONCURRENT_REQUESTS,
+                minimum=1,
+                maximum=4096,
             ),
         )

@@ -398,14 +398,40 @@ class DeviceStore:
                 return None
         return _row_to_device(row)
 
-    def record_use(self, device_id: str, *, now: str | None = None) -> None:
-        """Stamp last_used_at for an ADMITTED request."""
+    def record_use(self, device_id: str, *, now: str | None = None) -> int:
+        """Stamp last_used_at for an ADMITTED request; return affected rows.
+
+        The UPDATE only touches a row that is still active, so the returned
+        count is 1 for a live device and 0 for one revoked (or removed) between
+        verification and this write. The caller treats a count other than 1 as
+        a revocation that committed in-flight and rejects the request, closing
+        the window where a snapshot taken at verify time would otherwise be
+        served after the device was withdrawn.
+        """
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE devices SET last_used_at = ? WHERE device_id = ?"
                 " AND revoked_at IS NULL",
                 (now or _now(), device_id),
             )
+            return cursor.rowcount
+
+    def is_active(self, device_id: str) -> bool:
+        """Whether ``device_id`` is registered and not revoked, right now.
+
+        READ ONLY, and cheap: a single indexed lookup, run at the request-time
+        TOCTOU seams. Any store this process cannot read is treated as "not
+        active", the same uniform rejection every other seam gives.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT revoked_at FROM devices WHERE device_id = ?",
+                    (device_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            return False
+        return row is not None and row["revoked_at"] is None
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:

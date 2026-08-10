@@ -23,10 +23,15 @@ import argparse
 import sys
 
 from .auth import DeviceStore, DeviceStoreError
-from .settings import ApiConfigError, ApiSettings
+from .settings import ApiConfigError, ApiSettings, validate_loopback_bind
 
 
 def _serve(args: argparse.Namespace) -> int:
+    # A --host override goes through the SAME loopback guard the environment
+    # bind does, before anything is built or bound: the override must not be a
+    # hole that reopens the public-interface exposure the setting closes.
+    host = validate_loopback_bind(args.host) if args.host is not None else None
+
     import uvicorn
 
     from .app import create_app
@@ -40,10 +45,15 @@ def _serve(args: argparse.Namespace) -> int:
     app = create_app(settings, device_store=store)
     uvicorn.run(
         app,
-        host=args.host or settings.bind,
+        host=host or settings.bind,
         port=args.port or settings.port,
         log_level=args.log_level,
         access_log=False,
+        # A total in-flight ceiling so no request class can open unbounded
+        # concurrent work on the shared worker pool. The bounded auth executor
+        # sheds credential-verification load specifically; this is the coarser
+        # bound over everything.
+        limit_concurrency=settings.max_concurrent_requests,
     )
     return 0
 

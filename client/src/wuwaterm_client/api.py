@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .config import ClientConfig, usable_base_url
+from .config import ClientConfig, endpoint_is_confidential, usable_base_url
 from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
@@ -341,6 +341,32 @@ class ApiClient:
             raise ClientError(ERROR_UNAUTHORIZED) from None
         return {"Authorization": f"{_BEARER_PREFIX}{token}"}
 
+    def _guard_request_target(self, url: str) -> None:
+        """Refuse to send this request anywhere but the configured origin.
+
+        `httpx` resolves the request `url` against `base_url`, and an ABSOLUTE
+        url overrides the base entirely - origin and all. Every caller in this
+        client passes a fixed relative path, but the Bearer credential is
+        attached unconditionally a line below, so an absolute (or otherwise
+        origin-changing) url would put the token on the wire to another host,
+        in the clear if it were plain http. The resolved origin is therefore
+        re-validated against the SAME confidential-endpoint policy the
+        constructor used, and required to be the origin the client was built
+        for, BEFORE any header is attached. The base origin was already proven
+        confidential at construction; this stops a per-request url from moving
+        the target off it.
+        """
+        target = self._client.base_url.join(url)
+        base = self._client.base_url
+        same_origin = (
+            target.scheme == base.scheme
+            and target.host == base.host
+            and target.port == base.port
+        )
+        origin = f"{target.scheme}://{target.netloc.decode('ascii')}"
+        if not same_origin or not endpoint_is_confidential(origin):
+            raise ClientError(ERROR_INSECURE_ENDPOINT)
+
     async def _request(
         self,
         method: str,
@@ -349,6 +375,7 @@ class ApiClient:
         timeout: float | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
+        self._guard_request_target(url)
         try:
             response = await self._client.request(
                 method,

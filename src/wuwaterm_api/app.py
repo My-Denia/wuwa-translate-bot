@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -73,7 +72,6 @@ _ROUTING_ERROR_CODES = {
 LOGGER = logging.getLogger("wuwaterm_api")
 
 REQUEST_ID_HEADER = "X-Request-Id"
-_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 TERM_QUERY_MAX_LENGTH = 200
 
@@ -211,11 +209,20 @@ def _new_request_id() -> str:
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Accept a caller-supplied request id when it is safe; otherwise mint one."""
+    """Attach a freshly minted request id; never trust an inbound one.
+
+    A caller-supplied ``X-Request-Id`` used to be accepted when it matched a
+    charset that ALSO matches the token shape ``wtd1.<id>.<secret>``, and it was
+    then echoed into the auth-reject log line and into the HTTP error envelope.
+    A request could therefore route its own credential straight into the logs
+    and into a response body. The correlation id is now always generated
+    server-side and the inbound header is ignored entirely, so nothing a caller
+    sends can be logged or echoed. The generated id is still returned in the
+    response header for correlation.
+    """
 
     async def dispatch(self, request: Request, call_next):
-        supplied = request.headers.get(REQUEST_ID_HEADER, "")
-        request_id = supplied if _REQUEST_ID_RE.match(supplied) else _new_request_id()
+        request_id = _new_request_id()
         request.state.request_id = request_id
         response = await call_next(request)
         response.headers[REQUEST_ID_HEADER] = request_id
@@ -335,19 +342,41 @@ def _request_id(request: Request) -> str:
 
 
 def _verify_credential(slots, store: DeviceStore, token: str):
-    """Verify one credential under a bounded number of concurrent attempts.
+    """Verify one credential and release the admission slot when done.
 
-    Verifying is deliberately expensive and happens before any per-device limit
-    can apply, so the check itself must not become the load. The bound is held
-    and released inside the worker thread: an awaiting request that is
-    cancelled — by the time budget, or by a client that walked away — cannot
-    leave a slot behind, because the thread always runs to completion.
+    The slot is acquired WITHOUT blocking, before this worker is scheduled (see
+    :func:`authenticated_device`): the deliberately expensive scrypt check
+    happens before any per-device limit can apply, so it must never queue, or
+    the check itself becomes the load. It is released here, inside the worker,
+    so an awaiting request that is cancelled — by the time budget, or by a
+    client that walked away — cannot leave a slot behind, because the thread
+    always runs to completion.
     """
-    slots.acquire()
     try:
         return store.authenticate(token)
     finally:
         slots.release()
+
+
+async def _require_active_device(request: Request, device: Device) -> None:
+    """Refuse if the device was revoked while this request was in flight.
+
+    Verification takes a snapshot of the device; a revocation that commits
+    after it but before an expensive call or before the response would
+    otherwise be served on a credential that is no longer valid. This is a
+    cheap read run at the TOCTOU seams: before the model call and before
+    returning.
+    """
+    active = await asyncio.to_thread(
+        request.app.state.device_store.is_active, device.device_id
+    )
+    if not active:
+        LOGGER.info(
+            "device revoked in flight path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(ERROR_UNAUTHORIZED)
 
 
 async def authenticated_device(
@@ -359,12 +388,22 @@ async def authenticated_device(
     if presented is None or presented.scheme.lower() != "bearer":
         raise ApiError(ERROR_UNAUTHORIZED)
     store: DeviceStore = request.app.state.device_store
-    device = await asyncio.to_thread(
-        _verify_credential,
-        request.app.state.auth_slots,
-        store,
-        presented.credentials.strip(),
-    )
+    slots = request.app.state.auth_slots
+    token = presented.credentials.strip()
+    if not slots.acquire(blocking=False):
+        # The bounded verification executor is full. Shed load HERE, before
+        # scheduling another expensive scrypt derivation: an unauthenticated
+        # caller must not be able to make the credential check itself the load,
+        # and queuing these requests behind the semaphore would do exactly
+        # that. Non-queuing admission — the rate-limited code tells the caller
+        # to back off, and no worker thread is ever left blocked on the slot.
+        LOGGER.info(
+            "auth admission shed path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(ERROR_RATE_LIMITED)
+    device = await asyncio.to_thread(_verify_credential, slots, store, token)
     if device is None:
         LOGGER.info(
             "auth rejected path=%s request_id=%s",
@@ -382,7 +421,17 @@ async def authenticated_device(
         # Deliberately BEFORE record_use: a refused request must not be able to
         # drive an unbounded stream of writes into the credential store.
         raise ApiError(ERROR_RATE_LIMITED)
-    await asyncio.to_thread(store.record_use, device.device_id)
+    # record_use only stamps a row that is still active. A zero count means the
+    # device was revoked between verification and admission: reject it now
+    # rather than serve a request for a credential that is no longer valid.
+    updated = await asyncio.to_thread(store.record_use, device.device_id)
+    if updated != 1:
+        LOGGER.info(
+            "auth rejected: device revoked in flight path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(ERROR_UNAUTHORIZED)
     request.state.device = device
     return device
 
@@ -571,6 +620,9 @@ def _register_routes(app: FastAPI) -> None:
         """Translate plain text through the shared dictionary-first pipeline."""
         state = request.app.state
         forced_to_chinese = None if body.to is None else body.to == "zh"
+        # Before the expensive model call: a device revoked since admission
+        # must not spend an LLM budget slot or a model round trip.
+        await _require_active_device(request, device)
         outcome = await translate_request_async(
             state.term_service,
             state.translator,
@@ -603,6 +655,9 @@ def _register_routes(app: FastAPI) -> None:
             raise ApiError(
                 ERROR_LLM_UNAVAILABLE, "no translation model is configured"
             )
+        # Before returning: close the window between the model call and the
+        # response, so a revocation that commits mid-flight is not served.
+        await _require_active_device(request, device)
         return TranslationResponseBody(
             kind=outcome.kind,
             text=outcome.text,
