@@ -35,7 +35,11 @@ ERROR_TIMEOUT = "timeout"
 ERROR_CANCELLED = "cancelled"
 ERROR_UNKNOWN = "unknown"
 # Raised before any request is sent, when the configured address would carry
-# the device token to another machine without transport protection.
+# the device token to another machine without transport protection - and,
+# for completeness, when a caller-injected transport cannot prove it verifies
+# server certificates. The message below is worded for the first case, which
+# is the only one an owner can reach: the second is unreachable from the UI,
+# from configuration and from the packaged application.
 ERROR_INSECURE_ENDPOINT = "insecure_endpoint"
 
 MESSAGE_BY_CODE: dict[str, str] = {

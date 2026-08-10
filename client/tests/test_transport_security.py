@@ -50,9 +50,17 @@ def _close(client: ApiClient) -> None:
     asyncio.run(client.aclose())
 
 
-def _parts(url: httpx.URL) -> tuple[str, str, int]:
-    """Scheme, host and port - the parts an address comparison is about."""
-    return (url.scheme, url.host, url.port or (443 if url.scheme == "https" else 80))
+def _parts(url: httpx.URL) -> tuple[str, str, int, str]:
+    """Scheme, host, port and path prefix - everything an address decides.
+
+    The path is part of it on purpose: an endpoint may be published under a
+    prefix, and a comparison that ignored it would stay green while every
+    request went somewhere else. httpx normalises a base path with a trailing
+    slash, so both sides are normalised here.
+    """
+    port = url.port or (443 if url.scheme == "https" else 80)
+    path = url.path if url.path.endswith("/") else url.path + "/"
+    return (url.scheme, url.host, port, path)
 
 
 @pytest.mark.parametrize("address", REFUSED_ADDRESSES)
@@ -72,6 +80,32 @@ def test_the_transport_refuses_an_address_it_cannot_protect(address: str) -> Non
     # predicate, so the three cannot drift apart silently.
     assert usable_base_url(address) is False
     assert endpoint_is_confidential(address) is False
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "https://device:secret@api.example.com",       # a second, unmanaged credential
+        "https://api.example.com?token=secret",        # silently dropped when joined
+        "https://api.example.com#fragment",
+        "https://api.example.com:notaport",
+    ],
+)
+def test_the_transport_is_no_more_permissive_than_the_settings_field(address: str) -> None:
+    """The layer closest to the network must not be the weakest one.
+
+    Each of these is confidential in transit and still unusable as a stored
+    address; the settings dialog and the on-disk loader have always refused
+    them, and the constructor now applies the same predicate rather than the
+    narrower confidentiality rule inside it.
+    """
+    # Confidential in transit, and still not a usable stored address: this is
+    # exactly the gap between the two predicates.
+    assert endpoint_is_confidential(address) is True
+    assert usable_base_url(address) is False
+    with pytest.raises(ClientError) as raised:
+        ApiClient(address)
+    assert raised.value.code == ERROR_INSECURE_ENDPOINT
 
 
 @pytest.mark.parametrize("address", ACCEPTED_ADDRESSES)
@@ -100,7 +134,7 @@ def test_a_refused_address_leaves_the_running_client_where_it_was() -> None:
         assert _parts(client._client.base_url) == _parts(httpx.URL(LOOPBACK))
 
         client.update_base_url("https://api.example.com")
-        assert _parts(client._client.base_url) == ("https", "api.example.com", 443)
+        assert _parts(client._client.base_url) == ("https", "api.example.com", 443, "/")
     finally:
         _close(client)
 

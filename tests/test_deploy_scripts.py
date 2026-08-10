@@ -1562,3 +1562,8 @@ def test_the_guide_does_not_teach_host_administration_as_the_client_path():
     # ...and the claim stays true about the routes that really are open.
     for unauthenticated in ("GET /healthz", "GET /readyz", "GET /openapi.json"):
         assert unauthenticated in text, unauthenticated
+    # The Compose comment describes the same surface to whoever reads the file
+    # instead of the guide, so it may not promise more than the guide does.
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "every /v1" in compose
+    assert "GET /healthz, GET /readyz, GET /openapi.json" in compose

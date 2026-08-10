@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .config import ClientConfig, endpoint_is_confidential
+from .config import ClientConfig, usable_base_url
 from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
@@ -197,8 +197,15 @@ def _require_confidential_endpoint(base_url: str) -> None:
     without that dialog - a hand-edited configuration file, a future caller,
     a test - and a refusal that only lives in the UI is not a transport
     guarantee.
+
+    It applies `usable_base_url`, the SAME predicate the settings dialog and
+    the on-disk loader use, rather than the narrower confidentiality rule it
+    contains. The layer closest to the network must not be the most
+    permissive one: embedded credentials, a query or a fragment are refused
+    here too, so an address cannot become acceptable merely by arriving
+    through a different door.
     """
-    if not endpoint_is_confidential(base_url):
+    if not usable_base_url(base_url):
         raise ClientError(ERROR_INSECURE_ENDPOINT)
 
 
@@ -228,7 +235,9 @@ class ApiClient:
             # have to be a deliberate edit to this line rather than the
             # silent effect of a flag someone added elsewhere; the client
             # exposes no setting, argument or environment variable that can
-            # weaken it.
+            # weaken it. It configures the transport this client BUILDS, and
+            # httpx ignores it when one is injected instead - which is why
+            # _require_verifying_transport above vets that case separately.
             verify=True,
             # httpx trusts HTTP_PROXY by default, so a machine with a proxy
             # configured and no NO_PROXY entry for the configured host would

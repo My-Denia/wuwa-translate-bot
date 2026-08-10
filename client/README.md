@@ -75,10 +75,15 @@ establishes a new one.
 - **They are per-operation limits, not a total deadline.** `httpx` applies the
   value separately to connecting, writing, reading and waiting for a pooled
   connection, so it bounds how long the client waits *without progress*, not
-  the wall-clock length of the whole call: a server that keeps sending can
-  legitimately keep a request open past the configured number. The service
-  enforces its own request deadline on its side and answers 504 when it
-  expires, which is what bounds a slow translation in practice.
+  the wall-clock length of the whole call: something that keeps sending bytes
+  can legitimately keep a request open past the configured number.
+- **Which limit expires first, on the shipped defaults.** The client's 60s
+  translate timeout is shorter than the service's own request deadline
+  (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS`, 90s by default), so a translation
+  that simply takes too long ends as a client-side timeout, not as the
+  service's 504. The service's deadline becomes the binding one only if you
+  raise the client's translate timeout above it (the client allows up to
+  600s).
 - **A timeout is reported, never retried.** The request stops and the view
   shows "The request timed out." This client does not retry automatically:
   a translation request that has already reached the service may have spent

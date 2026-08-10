@@ -29,6 +29,15 @@ SCANNED_TREES = (
 )
 SCANNED_FILES = (
     ROOT / "client" / "README.md",
+    # The packaged entry point, the build spec and the build script: they are
+    # shipped client surface too, and none of them lives under client/src.
+    ROOT / "client" / "main.py",
+    ROOT / "client" / "WuwaTerm.spec",
+    ROOT / "client" / "build.ps1",
+    # The runbook. tests/test_deploy_scripts.py pins four literal recipes in
+    # it; this adds the pattern scan, so a spelling those literals miss
+    # (`ssh -fNL`, `autossh`, prose) is caught as well.
+    ROOT / "docs" / "deployment.md",
     *sorted((ROOT / "deploy").glob("*.yml")),
     *sorted((ROOT / "deploy").glob("*.yaml")),
 )
@@ -109,6 +118,10 @@ def test_the_scan_actually_covers_the_files_it_claims_to() -> None:
         "client/src/wuwaterm_client/strings.py",
         "client/tests/test_api.py",
         "client/README.md",
+        "client/main.py",
+        "client/WuwaTerm.spec",
+        "client/build.ps1",
+        "docs/deployment.md",
         "deploy/docker-compose.yml",
     ):
         assert required in scanned, required
@@ -153,6 +166,15 @@ def test_the_allowlisted_operations_note_is_present_and_singular() -> None:
 
 
 # (c) Certificate verification: not a setting, not a flag, not anywhere.
+#
+# This regex is a TRIPWIRE, not the guarantee. Verification can be weakened in
+# ways no text scan will see (`CERT_OPTIONAL`, a setattr, an indirection), and
+# what actually proves the property is
+# client/tests/test_transport_security.py::
+# test_certificate_verification_is_on_for_the_client_it_actually_builds, which
+# inspects the SSL context the client hands to its connection pool. This gate
+# catches the obvious edit early and in the repository suite, where it runs on
+# every pull request without the client's dependencies.
 
 INSECURE_TLS = re.compile(
     r"""
@@ -196,19 +218,28 @@ def _insecure_tls_offences(relative: str, text: str) -> list[str]:
     return offences
 
 
+def _tls_scanned_paths() -> list[Path]:
+    paths: list[Path] = []
+    for tree in TLS_SCANNED_TREES:
+        paths.extend(sorted(tree.rglob("*.py")))
+    # The shell scripts too: `curl --insecure` is in the pattern above, and a
+    # Python-only scan could never have matched it.
+    paths.extend(sorted((ROOT / "deploy").glob("*.sh")))
+    return paths
+
+
 def test_nothing_turns_certificate_verification_off() -> None:
     offences: list[str] = []
     scanned = 0
-    for tree in TLS_SCANNED_TREES:
-        for path in sorted(tree.rglob("*.py")):
-            scanned += 1
-            offences.extend(
-                _insecure_tls_offences(
-                    path.relative_to(ROOT).as_posix(),
-                    path.read_text(encoding="utf-8"),
-                )
+    for path in _tls_scanned_paths():
+        scanned += 1
+        offences.extend(
+            _insecure_tls_offences(
+                path.relative_to(ROOT).as_posix(),
+                path.read_text(encoding="utf-8"),
             )
-    assert scanned, "the scan found no Python files, which would pass vacuously"
+        )
+    assert scanned, "the scan found no files, which would pass vacuously"
     assert not offences, "certificate verification may not be weakened:\n" + "\n".join(
         offences
     )
@@ -224,8 +255,23 @@ def test_the_tls_scanner_catches_a_real_disabling_line() -> None:
     assert _insecure_tls_offences("src/wuwaterm/sentence.py", "ctx.check_hostname = False\n")
 
 
+def test_the_tls_scan_covers_the_shell_scripts_too() -> None:
+    """`curl --insecure` cannot live in a .py file; a scan that only read
+    Python would have carried a pattern it could never match."""
+    scanned = {path.relative_to(ROOT).as_posix() for path in _tls_scanned_paths()}
+    for required in (
+        "client/src/wuwaterm_client/api.py",
+        "deploy/vps-update.sh",
+        "deploy/entrypoint.sh",
+    ):
+        assert required in scanned, required
+    assert _insecure_tls_offences("deploy/vps-update.sh", 'curl -sk "$url"\n')
+
+
 def test_the_tls_exemptions_still_describe_real_lines() -> None:
-    """An exemption whose line is gone is dead configuration."""
+    """An exemption whose line is gone is dead configuration, and an
+    exemption list that grows without review is the hole itself."""
+    assert len(ALLOWED_INSECURE_TLS_LINES) == 2
     for relative, lines in ALLOWED_INSECURE_TLS_LINES.items():
         present = {
             line.strip()
