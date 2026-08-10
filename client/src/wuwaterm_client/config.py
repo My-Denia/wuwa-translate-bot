@@ -9,6 +9,7 @@ it exclusively in the OS credential store.
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import json
 import math
 import os
@@ -55,6 +56,16 @@ def _sane_timeout(value: object, fallback: float) -> float:
     return float(min(max(number, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
 
 
+def _is_loopback(hostname: str) -> bool:
+    host = hostname.strip("[]").lower()
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def usable_base_url(value: object) -> bool:
     """Whether an address can actually be used to reach the service.
 
@@ -77,6 +88,12 @@ def usable_base_url(value: object) -> bool:
     try:
         parsed.port
     except ValueError:
+        return False
+    # Plain HTTP is only acceptable to this machine. The supported transport
+    # is an SSH tunnel whose local end is loopback; anything else carries the
+    # bearer credential over the wire in the clear, and a mistyped or
+    # hand-edited address is exactly how that happens by accident.
+    if parsed.scheme == "http" and not _is_loopback(parsed.hostname):
         return False
     return True
 

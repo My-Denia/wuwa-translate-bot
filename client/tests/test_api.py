@@ -421,3 +421,27 @@ def test_a_credential_that_cannot_be_a_header_is_reported_as_unusable() -> None:
         raise AssertionError("expected a ClientError")
 
     assert asyncio.run(scenario()).code == errors.ERROR_UNAUTHORIZED
+
+
+def test_a_result_field_of_the_wrong_type_becomes_a_client_error() -> None:
+    """Every key present, one of them the wrong shape underneath.
+
+    Without a check the value reaches a Qt call and raises there instead of
+    arriving as the client's own rendered error state.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_translation_payload(text=[]))
+
+    client = _client(handler)
+
+    async def scenario() -> ClientError:
+        try:
+            await client.translate("x")
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    assert asyncio.run(scenario()).code == ERROR_UNKNOWN

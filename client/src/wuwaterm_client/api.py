@@ -34,6 +34,44 @@ def default_token_provider() -> str | None:
     return read_token()
 
 
+# -- Wire-type checks ------------------------------------------------------
+#
+# Annotations are not runtime validation. A 2xx body can carry every required
+# key with the wrong primitive underneath - `"text": []` - and the failure then
+# surfaces inside a Qt call rather than as the client's own error state. These
+# raise ValueError, which the parse wrapper turns into a ClientError.
+
+
+def _as_str(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} is not a string")
+    return value
+
+
+def _as_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} is not a boolean")
+    return value
+
+
+def _as_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} is not an integer")
+    return value
+
+
+def _as_float(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} is not a number")
+    return float(value)
+
+
+def _as_optional_str(value: Any, field: str) -> "str | None":
+    if value is None:
+        return None
+    return _as_str(value, field)
+
+
 # -- Response models (direct pass-through of the wire schema) --------------
 
 
@@ -48,11 +86,11 @@ class TranslationResult:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "TranslationResult":
         return cls(
-            kind=data["kind"],
-            text=data["text"],
-            direction=data["direction"],
-            dictionary_miss=bool(data["dictionary_miss"]),
-            request_id=data["request_id"],
+            kind=_as_str(data["kind"], "kind"),
+            text=_as_str(data["text"], "text"),
+            direction=_as_str(data["direction"], "direction"),
+            dictionary_miss=_as_bool(data["dictionary_miss"], "dictionary_miss"),
+            request_id=_as_str(data["request_id"], "request_id"),
         )
 
 
@@ -74,18 +112,18 @@ class TermsResult:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "TermsResult":
         return cls(
-            query=data["query"],
+            query=_as_str(data["query"], "query"),
             matches=tuple(
                 TermMatch(
-                    zh=match["zh"],
-                    en=match["en"],
-                    category=match["category"],
-                    score=float(match["score"]),
-                    reason=match["reason"],
+                    zh=_as_str(match["zh"], "zh"),
+                    en=_as_str(match["en"], "en"),
+                    category=_as_str(match["category"], "category"),
+                    score=_as_float(match["score"], "score"),
+                    reason=_as_str(match["reason"], "reason"),
                 )
                 for match in data["matches"]
             ),
-            request_id=data["request_id"],
+            request_id=_as_str(data["request_id"], "request_id"),
         )
 
 
@@ -103,14 +141,18 @@ class MetaResult:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "MetaResult":
         return cls(
-            service_version=data["service_version"],
-            api_version=data["api_version"],
-            schema_version=data.get("schema_version"),
-            source_profile=data.get("source_profile"),
-            source_commit=data.get("source_commit"),
-            term_count=int(data["term_count"]),
-            llm_configured=bool(data["llm_configured"]),
-            request_id=data["request_id"],
+            service_version=_as_str(data["service_version"], "service_version"),
+            api_version=_as_str(data["api_version"], "api_version"),
+            schema_version=_as_optional_str(
+                data.get("schema_version"), "schema_version"
+            ),
+            source_profile=_as_optional_str(
+                data.get("source_profile"), "source_profile"
+            ),
+            source_commit=_as_optional_str(data.get("source_commit"), "source_commit"),
+            term_count=_as_int(data["term_count"], "term_count"),
+            llm_configured=_as_bool(data["llm_configured"], "llm_configured"),
+            request_id=_as_str(data["request_id"], "request_id"),
         )
 
 

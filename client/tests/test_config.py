@@ -42,7 +42,7 @@ def test_config_file_never_contains_the_credential(tmp_path: Path) -> None:
 
 def test_config_round_trip(tmp_path: Path) -> None:
     original = ClientConfig(
-        base_url="http://example.local:8787", request_timeout_seconds=12.0
+        base_url="https://example.local:8787", request_timeout_seconds=12.0
     )
     original.save(base_dir=tmp_path)
 
@@ -67,11 +67,13 @@ def test_config_load_ignores_unrecognized_keys(tmp_path: Path) -> None:
     path = config_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"base_url": "http://x:1", "some_future_field": "ignored"}),
+        json.dumps(
+            {"base_url": "http://127.0.0.1:9001", "some_future_field": "ignored"}
+        ),
         encoding="utf-8",
     )
     loaded = ClientConfig.load(base_dir=tmp_path)
-    assert loaded.base_url == "http://x:1"
+    assert loaded.base_url == "http://127.0.0.1:9001"
 
 
 def test_a_hand_edited_timeout_is_clamped_rather_than_trusted(tmp_path) -> None:
@@ -148,3 +150,14 @@ def test_an_unusable_saved_address_falls_back_to_the_default(tmp_path) -> None:
     )
 
     assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL
+
+
+def test_plain_http_is_only_accepted_for_this_machine() -> None:
+    """A remote http:// address carries the bearer credential in the clear."""
+    assert usable_base_url("http://127.0.0.1:8787")
+    assert usable_base_url("http://localhost:8787")
+    assert usable_base_url("http://[::1]:8787")
+    assert not usable_base_url("http://192.0.2.10:8787")
+    assert not usable_base_url("http://api.example.invalid")
+    # TLS anywhere is fine.
+    assert usable_base_url("https://api.example.invalid")

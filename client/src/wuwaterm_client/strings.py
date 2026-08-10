@@ -93,8 +93,9 @@ SETTINGS_TOKEN_STATUS_STORED = "A device credential is stored."
 SETTINGS_TOKEN_STATUS_MISSING = "No device credential is stored."
 SETTINGS_INVALID_BASE_URL_TITLE = "Server address"
 SETTINGS_INVALID_BASE_URL_MESSAGE = (
-    "That server address cannot be used. Enter an http:// or https:// "
-    "address with a host, for example http://127.0.0.1:8787."
+    "That server address cannot be used. Plain http:// is accepted only "
+    "for this machine, which is where an SSH tunnel ends; anything else "
+    "must be https://. For example http://127.0.0.1:8787."
 )
 
 CONFIRM_FORGET_TOKEN_TITLE = "Forget device credential"

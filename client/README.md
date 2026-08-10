@@ -36,6 +36,11 @@ With the tunnel open, set the client's server address (Settings) to
 `http://127.0.0.1:8787` — this is also the default. Only the local half of
 that command has to match the address you configure here.
 
+Plain `http://` is accepted only for this machine, which is where the tunnel
+ends. Any other host must be `https://`: the device token travels in a request
+header, and an address typed or edited by hand is exactly how it would
+otherwise end up crossing a network in the clear.
+
 ## Getting and storing a device credential
 
 There is no self-registration screen, and the service never generates or
