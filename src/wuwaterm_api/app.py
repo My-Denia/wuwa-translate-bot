@@ -390,6 +390,13 @@ def _log_principal(request: Request) -> str:
     Always the redaction helper's output. A raw device id is a stable
     identifier for a person's machine and belongs in the credential store, not
     in an operations log.
+
+    This is a rule about what the SERVICE writes down of what it knows. It is
+    not, and cannot be, a rule about byte sequences: a caller may put anything
+    in its own request target, including sixteen hexadecimal characters, and a
+    record of that discloses nothing the caller did not already have. Trying to
+    recognise identifier-shaped substrings in caller data would trade real
+    diagnostic value for an enumeration that never closes.
     """
     device = getattr(request.state, "device", None)
     if device is None:

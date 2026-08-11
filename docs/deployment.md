@@ -319,9 +319,20 @@ its identifiers — and it is `-` when no credential was verified. It is stable
 for a given device, so requests can be attributed to one machine without the
 log ever holding the device id itself.
 
-What a record deliberately does not contain: no credential, no identifier of an
-authenticated device other than the redacted `device` field, no submitted or
-translated text, no query string, and no request target as the caller wrote it.
+What a record deliberately does not contain, of the things **this service
+holds**: no credential, no identifier of an authenticated device other than the
+redacted `device` field, no submitted or translated text, and no query string.
+Nor a request target as the caller wrote it.
+
+The distinction is worth stating, because the unmatched-target case is the one
+place a caller's own bytes reach the record. A caller can put anything in a URL,
+including strings that look like this service's own identifiers, and those are
+recorded escaped and bounded like any other target. That is not this service
+disclosing something: the reader of the line learns only what the writer of the
+request already had. What the guarantee covers is what the service knows and the
+caller does not — the credential it verified, the principal behind it, the text
+it translated. (A device id is in any case the non-secret half of a token;
+`device revoke` takes one on the command line and `device list` prints them.)
 A target that could itself be a credential — a client or proxy that puts a token
 in the URL instead of the `Authorization` header — is replaced entirely by the
 literal `credential-shaped`, with no digest of it either: the digest would be
