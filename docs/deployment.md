@@ -69,9 +69,9 @@ docker compose -f deploy/docker-compose.yml up -d
 ## HTTP Adapter Service
 
 `wuwaterm-api` serves the versioned HTTP surface documented by
-`docs/api/openapi.json`. It adds **no new public surface**: it binds
-`WUWATERM_API_BIND` (default `127.0.0.1`) on `WUWATERM_API_PORT`
-(default `8787`). The service runs with host networking, so a `ports:` list
+`docs/api/openapi.json`. It opens **no listener of its own that anything
+outside the host can reach**: it binds `WUWATERM_API_BIND` (default
+`127.0.0.1`) on `WUWATERM_API_PORT` (default `8788`). The service runs with host networking, so a `ports:` list
 would have no effect at all and none is present: what keeps this off the host's
 public interfaces is the bind address, hard-coded in
 `deploy/docker-compose.yml` rather than interpolated from an environment file.
@@ -79,24 +79,20 @@ One other line in that same file can override it — `command:` is passed
 through to the server, which accepts `--host` — so both live where they can
 only be changed in review.
 
-**Remote client access is not available in this topology yet, and this page
-does not describe a way to obtain it.** Following this guide gives you a
-service reachable only from the host itself (loopback) — deliberately, because
-the transport a desktop client will use has not been selected. Until it is,
-the supported uses are the on-host readbacks below and a client running on the
-same machine as a development service. A desktop on another machine has no
-address to configure.
+A desktop client reaches the service at **the configured secure endpoint**:
+one stable base address, served over TLS by the reverse proxy that already
+fronts the operator's existing sites on this host, routed to the loopback port
+above. That selection, its threat model and its rollback are recorded in
+[ADR 0012](adr/0012-client-transport-selection.md); the route itself is the
+[Publishing the API](#publishing-the-api) section below.
+
+Anything beyond that one route — a second route, an open port, a new name, a
+firewall change — is still an owner decision and not a deployment step.
 
 Inventing one here (a forwarded port, an open port, a new route) is exactly the decision this project stopped making by default.
 
-When it is selected, a client will reach the service at
-**the configured secure endpoint**: one stable base address, served over TLS,
-which the deployment publishes and routes to this loopback port. The selection is
-made from inspected facts of the target host, is an owner-gated decision, and
-is recorded in the architecture documentation together with its rollback.
-
-Two properties will hold whichever endpoint is selected, and neither is a
-consequence of the network arrangement:
+Two properties hold whatever the network arrangement is, and neither is a
+consequence of it:
 
 - **The API contract does not encode the network path.** The base address is
   pure client configuration; moving the service from one endpoint to another
@@ -106,13 +102,9 @@ consequence of the network arrangement:
   required on every `/v1` call, so being on the right network is not an
   authorization. The two probes `GET /healthz` and `GET /readyz` are
   deliberately unauthenticated (they answer `ok`/`ready` and expose nothing
-  else), as is `GET /openapi.json`; whether those three are reachable from
-  outside the host is part of the endpoint decision, not something the
+  else), as is `GET /openapi.json`; those three ARE reachable through the
+  published route, which is a property of the route and not something the
   application enforces.
-
-Publishing the API on a public hostname is an ingress decision (DNS, TLS, a
-reverse-proxy route) and is owner-gated: it is not part of this topology
-today, and it is not something a deployment run may introduce on its own.
 
 The port a running container was actually given is an operations fact, so
 read it back from that container rather than assuming the default:
@@ -126,6 +118,64 @@ Shell access to the host stays what it has always been: the operator's
 administration channel, used for the deployment and credential commands on
 this page. It is not a path for the desktop client and is never required for
 using it.
+
+### Publishing the API
+
+The endpoint is a **path route on an HTTPS site the host already serves**, not
+a new site and not a new listener. Applying it is an owner-gated step, separate
+from deploying the service, and it is the only host change the client's
+transport needs.
+
+Preconditions, all of which are properties to CHECK on the host rather than
+things to create:
+
+- the reverse proxy is already terminating TLS for at least one site on this
+  host, and that name already resolves here;
+- its certificates are installed from files rather than obtained
+  automatically, so adding a route triggers no certificate or account
+  activity;
+- the site block being extended already routes by path prefix, so the addition
+  is purely additive rather than a restructuring of a live route;
+- the API is running and answering on loopback (the readback below).
+
+With those true, the route is one block added to the existing site. In Caddy
+syntax, inside the site block that already serves the chosen name:
+
+```caddyfile
+handle_path /wuwaterm-api* {
+    reverse_proxy 127.0.0.1:8788
+}
+```
+
+Use the port the container actually has. `handle_path` strips the prefix, so
+the client's base address is `https://<the-existing-site>/wuwaterm-api` and the
+service still sees `/v1/...`. With another proxy, the equivalent is a
+path-prefix route that strips the prefix and passes the request to the same
+loopback address; nothing about the route may bind or publish the API itself.
+
+Back up the configuration before editing it, and apply the change with the
+proxy's own reload rather than a restart, so the sites already being served are
+not interrupted:
+
+```bash
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date -u +%Y%m%dT%H%M%SZ)
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+**Rollback is deleting that block and reloading again** (or restoring the
+backup file). Nothing else is affected: the API keeps running exactly as it did
+before, still bound to loopback, and both containers are untouched. Because the
+service never binds a public interface, removing the route removes the
+exposure — there is no second place it could still be reachable from.
+
+**Readback belongs on the client machine.** A request made on the host proves
+the service is up; it does not prove the route works, and it is not evidence of
+anything about the path being tested. From the owner's own machine, a request
+to the published address without a credential must be refused with the API's
+own `401` envelope — that single answer shows the route reaches this service
+AND that reaching it is not an authorization. Then start the desktop client
+against the same base address and translate something.
 
 ### Device Credentials
 
@@ -257,7 +307,7 @@ docker inspect --format '{{.Image}}' wuwaterm-bot
 docker inspect --format '{{.Image}}' wuwaterm-api
 sha256sum data/terms.db
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api \
-  python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
+  python -c "import os, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8788'); print(urllib.request.urlopen('http://127.0.0.1:' + port + '/readyz', timeout=10).status)"
 ```
 
 The pointer must equal the intended source SHA exactly; BOTH running image IDs

@@ -65,9 +65,10 @@ does not distribute generated game data or generated SQLite databases.
   `command: ["api"]`, mounts the terminology database read-only and keeps its
   own writable `state-api/`, a sibling of the bot's state directory rather than
   a child of it, so the bot's read-write state mount cannot reach the
-  credential store. It binds loopback only and publishes no ports, so the host
-  gains no new public surface; an owner desktop reaches it through the existing
-  SSH entry point.
+  credential store. It binds loopback only and publishes no ports, so the
+  service opens no listener anything outside the host can reach; a desktop
+  client reaches it through a path route on an HTTPS site the host already
+  serves, and authenticates every call with its own device credential.
 - Documented operator commands read `WUWATERM_API_PORT` from the serving
   container instead of assuming the default, so a deployment that configured
   another port is not read back against a closed one.
@@ -88,6 +89,35 @@ does not distribute generated game data or generated SQLite databases.
 - `scripts/check_non_goals.py` skips nested virtual environments and build
   output at any depth, so a per-component venv cannot drown the product gate in
   third-party matches.
+- The API's default port is now **8788**. The previous default was already
+  bound on the deployment target by an unrelated service and was the upstream
+  of that host's existing routes, so the old default would have taken over a
+  running service rather than adding one. The port remains a setting; nothing
+  in the contract or the client depends on the number.
+
+### Documentation
+
+- `docs/architecture.md` rewritten for the system that now exists: two
+  presentation adapters over one application layer plus a client that consumes
+  the API, the component map including the adapter's import allowlist, the
+  trust boundaries including the public HTTPS edge, the two separate identity
+  models and the explicit statement that neither can grant the other, and a
+  cost-topology section stating that the per-process budgets are never global
+  and that the worst case is their sum.
+- Four new decision records: [0009](docs/adr/0009-http-api-adapter.md) the HTTP
+  adapter (amending the context of 0001 and 0003, whose long-polling decision
+  is unchanged), [0010](docs/adr/0010-device-principal-authentication.md)
+  device-principal authentication,
+  [0011](docs/adr/0011-pc-client-stack.md) the PC client stack and its
+  transport policy, and
+  [0012](docs/adr/0012-client-transport-selection.md) the transport selection
+  itself, with its trust boundary, threat model, credential lifecycle,
+  endpoint configuration, verification, deployment and rollback, and the
+  documented future migration path.
+- `docs/deployment.md` gains the route that publishes the API, its backup,
+  reload and one-block rollback, and the readback that has to happen on the
+  client machine to mean anything. `docs/validation.md` gains the contract,
+  client-transport and client-build gates and where each runs.
 
 ## 0.2.1 - 2026-08-06
 

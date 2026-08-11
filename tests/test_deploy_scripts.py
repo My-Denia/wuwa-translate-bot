@@ -1089,7 +1089,7 @@ def test_env_example_covers_the_api_surface():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     for name in (
-        "WUWATERM_API_PORT=8787",
+        "WUWATERM_API_PORT=8788",
         "WUWATERM_API_STATE_DIR=state-api",
         "WUWATERM_API_LLM_MAX_CONCURRENCY=2",
         "WUWATERM_API_LLM_CALLS_PER_MINUTE=30",
@@ -1518,7 +1518,7 @@ def test_the_guide_describes_the_credential_boundary_it_actually_has():
 def test_documented_api_commands_use_the_configured_port():
     """The port is an option, so no operator command may assume the default.
 
-    A readback pinned to 8787 reports a connection failure after a perfectly
+    A readback pinned to 8788 reports a connection failure after a perfectly
     successful deployment on any host that set WUWATERM_API_PORT to something
     else.
     """
@@ -1526,12 +1526,12 @@ def test_documented_api_commands_use_the_configured_port():
     updater = (ROOT / "deploy" / "vps-update.sh").read_text(encoding="utf-8")
 
     # No documented URL may carry a literal port; the updater does not.
-    assert "http://127.0.0.1:8787" not in text
-    assert "http://127.0.0.1:8787" not in updater
+    assert "http://127.0.0.1:8788" not in text
+    assert "http://127.0.0.1:8788" not in updater
     # The readback reads the port the serving container was actually given,
     # exactly as the updater's readiness smoke does.
-    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in text
-    assert "os.environ.get('WUWATERM_API_PORT', '8787')" in updater
+    assert "os.environ.get('WUWATERM_API_PORT', '8788')" in text
+    assert "os.environ.get('WUWATERM_API_PORT', '8788')" in updater
     # The serving port is discovered from the running container, not assumed.
     assert "printenv WUWATERM_API_PORT" in text
 
@@ -1555,10 +1555,15 @@ def test_the_guide_does_not_teach_host_administration_as_the_client_path():
     # The replacement wording is present, not merely the removal.
     assert "configured secure endpoint" in text
     assert "Every `/v1` operation is authenticated at the application layer" in text
-    # The guide must not point at an endpoint that does not exist yet: until
-    # the transport is selected it says so, rather than sending the reader to
-    # invent a route.
-    assert "Remote client access is not available in this topology yet" in text
+    # The transport has since been selected, so the guide names it instead of
+    # saying it does not exist: a path route on a site the host already
+    # serves, which the API is reached THROUGH and never bound to. The two
+    # properties that make that safe are pinned, not the prose around them.
+    assert "path route on an HTTPS site the host already serves" in text
+    assert "Rollback is deleting that block and reloading again" in text
+    # ...and the readback that would prove it must not be one taken on the
+    # host, which proves only that the process is up.
+    assert "Readback belongs on the client machine" in text
     # ...and the claim stays true about the routes that really are open.
     for unauthenticated in ("GET /healthz", "GET /readyz", "GET /openapi.json"):
         assert unauthenticated in text, unauthenticated

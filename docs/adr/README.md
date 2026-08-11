@@ -14,5 +14,9 @@ records are intentionally absent.
 | [0006](0006-dictionary-first-before-llm.md) | Dictionary-first before LLM | Accepted |
 | [0007](0007-runtime-builder-separation.md) | Runtime / builder separation | Accepted |
 | [0008](0008-candidate-verification-and-transactional-deployment.md) | Candidate verification and transactional deployment | Accepted |
+| [0009](0009-http-api-adapter.md) | HTTP API as a second presentation adapter | Accepted |
+| [0010](0010-device-principal-authentication.md) | Device-principal authentication | Accepted |
+| [0011](0011-pc-client-stack.md) | PC client stack and transport policy | Accepted |
+| [0012](0012-client-transport-selection.md) | How the desktop client reaches the service | Accepted |
 
 Maintainer map: [Architecture](../architecture.md).

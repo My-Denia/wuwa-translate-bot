@@ -85,7 +85,7 @@ def validate_port(value: int) -> int:
     through the same range, so every route into the port setting agrees and
     0 is REFUSED explicitly rather than ignored: an operator who asks for an
     ephemeral port is asking for an address the client cannot be configured
-    for, and answering "no" is better than answering 8787.
+    for, and answering "no" is better than answering 8788.
     """
     if not MIN_PORT <= value <= MAX_PORT:
         raise ApiConfigError(
@@ -95,7 +95,7 @@ def validate_port(value: int) -> int:
 
 
 DEFAULT_BIND = "127.0.0.1"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 8788
 DEFAULT_DB_PATH = "data/terms.db"
 # A sibling of the bot's state directory, never a child of it: the bot
 # mounts the whole of state/ read-write.

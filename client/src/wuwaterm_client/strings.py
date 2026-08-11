@@ -83,7 +83,7 @@ STATUS_KEYRING_BACKEND_LABEL = "Credential store backend"
 SETTINGS_TITLE = "Settings"
 SETTINGS_MENU_LABEL = "Settings..."
 SETTINGS_BASE_URL_LABEL = "Server address"
-SETTINGS_BASE_URL_PLACEHOLDER = "http://127.0.0.1:8787"
+SETTINGS_BASE_URL_PLACEHOLDER = "http://127.0.0.1:8788"
 SETTINGS_TIMEOUT_LABEL = "Request timeout (seconds)"
 SETTINGS_CREDENTIAL_SECTION_TITLE = "Device credential"
 SETTINGS_ENTER_TOKEN_BUTTON = "Enter token..."
@@ -109,7 +109,7 @@ SETTINGS_INVALID_BASE_URL_MESSAGE = (
     "That server address cannot be used. Plain http:// is accepted only "
     "for this machine; every other address must be https://, so that the "
     "device token is never sent in the clear. For example "
-    "https://example.com/wuwaterm-api or http://127.0.0.1:8787."
+    "https://example.com/wuwaterm-api or http://127.0.0.1:8788."
 )
 
 CONFIRM_FORGET_TOKEN_TITLE = "Forget device credential"

@@ -2,6 +2,10 @@
 
 - Status: Accepted
 - Date: 2026-08-05
+- Still in force. [ADR 0009](0009-http-api-adapter.md) amends one CONTEXT
+  sentence only: the deployment does now have an inbound HTTP surface, the
+  API adapter's. Chat updates are still received by long polling, and this
+  decision is not affected by it.
 
 ## Context
 

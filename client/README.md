@@ -37,14 +37,14 @@ Two forms are accepted, and nothing else:
 - `http://127.0.0.1:<port>` (or `localhost`/`::1`) — this machine only, for a
   development service running on your own computer. Nothing leaves the host,
   so there is nothing to protect in transit. This is the default,
-  `http://127.0.0.1:8787`.
+  `http://127.0.0.1:8788`.
 
 Plain `http://` to any other host is refused, in the settings dialog and again
 in the transport itself before a request is built: the device token travels in
 a request header on every call, and an address typed or edited by hand is
 exactly how it would otherwise end up crossing a network in the clear.
 
-The port is whatever the deployment configured (`WUWATERM_API_PORT`, 8787 by
+The port is whatever the deployment configured (`WUWATERM_API_PORT`, 8788 by
 default) when you are talking to a service on this machine; for a published
 endpoint the address is whatever the operator gives you, and it is normally
 just the host name.
