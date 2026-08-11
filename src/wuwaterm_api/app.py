@@ -350,9 +350,18 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
         finally:
-            _log_request_completed(
-                request, request_id, status_code, time.perf_counter() - started
-            )
+            try:
+                _log_request_completed(
+                    request, request_id, status_code, time.perf_counter() - started
+                )
+            except Exception:
+                # An exception raised from a `finally` REPLACES the one
+                # propagating through it, so a fault while describing a request
+                # would become the fault reported for it — the traceback the
+                # operator needs, swapped for the one about writing it down.
+                # The record is additive by construction: it can be missing, it
+                # can never be the thing that goes wrong.
+                LOGGER.warning("request record could not be written")
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
@@ -631,9 +640,12 @@ async def authenticated_device(
         raise ApiError(ERROR_UNAUTHORIZED)
     # The credential is now verified, so the principal is known. Recording it
     # HERE rather than after admission is what lets the completion record name
-    # the device on the outcomes an operator most wants attributed — a shed
-    # 429, a 403 outside the granted scopes, a revocation caught in flight.
-    # Nothing branches on this attribute; it exists to be logged.
+    # the device on the outcomes an operator most wants attributed — the
+    # per-device rate limit below, a 403 outside the granted scopes, a
+    # revocation caught in flight. The admission shed above is NOT one of them:
+    # it fires before anything is verified, so there is no principal to name
+    # and it is recorded with none. Nothing branches on this attribute; it
+    # exists to be logged.
     request.state.device = device
     limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
     if not limiter.allow(device.device_id):

@@ -251,6 +251,54 @@ def test_a_request_refused_before_routing_still_produces_a_record(tmp_path, samp
     assert record["request_id"] == response.headers["X-Request-Id"]
 
 
+def test_a_failure_while_recording_cannot_replace_the_requests_own_outcome(
+    tmp_path, sample_db, monkeypatch
+):
+    """The record is additive: it may be missing, never the thing that failed.
+
+    An exception raised from a ``finally`` replaces the one propagating through
+    it. Since the record is written from exactly there, a fault while
+    describing a request would otherwise become the fault reported for it —
+    swapping the traceback the operator needs for one about writing it down.
+    """
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+
+    def unwritable(*_args, **_kwargs):
+        raise RuntimeError("the record itself failed")
+
+    monkeypatch.setattr("wuwaterm_api.app._log_request_completed", unwritable)
+
+    served = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    )
+    assert served.status_code == 200, served.text
+
+    def boom(_service):
+        raise RuntimeError("metadata read failed")
+
+    monkeypatch.setattr("wuwaterm_api.app.service_metadata", boom)
+    failed = run(
+        call(
+            app,
+            "GET",
+            "/v1/meta",
+            headers={"Authorization": f"Bearer {token}"},
+            raise_app_exceptions=False,
+        )
+    )
+
+    # The request's own failure is what surfaces, not the logging one.
+    assert failed.status_code == 500
+    assert failed.json()["error"]["code"] == "internal"
+
+
 # --------------------------------------------------------------------------
 # What a record may never contain
 # --------------------------------------------------------------------------
@@ -297,7 +345,7 @@ def test_no_credential_device_id_or_request_text_reaches_any_record(
     minted = response.headers["X-Request-Id"]
     assert minted != token
     assert minted in emitted
-    assert f"device=id:" in emitted
+    assert "device=id:" in emitted
 
 
 def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(

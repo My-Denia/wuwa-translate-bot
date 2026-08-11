@@ -279,9 +279,15 @@ Each record is one line and always carries the same fields:
 2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>
 ```
 
-`request_id` is minted by the service and returned to the caller in the
-`X-Request-Id` response header and in the JSON body, so a request a client
-reports is found by that id and nothing else:
+Every request produces one, including the unauthenticated `/healthz` and
+`/readyz` probes — so a monitor polling those is visible in the volume.
+
+`request_id` is minted by the service and returned to the caller **in the JSON
+body of every response**, and in the `X-Request-Id` header of every response the
+application itself builds. The one exception is an unhandled failure: that
+response is assembled outside the middleware that attaches the header, so on
+those `500`s the body carries the id and the header does not. Either way the id
+a client reports is what finds the request:
 
 ```bash
 docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>
@@ -300,11 +306,19 @@ because that value is chosen by an unauthenticated caller and an operator
 reads it in a terminal. For the same reason the server's own access log stays
 off: it prints raw targets.
 
+On a request that failed unexpectedly, the completion record appears **before**
+the traceback rather than after it: the exception passes through the recording
+middleware on its way to the handler that renders the `500`. The two are tied
+together by the same `request_id`.
+
 `WUWATERM_API_LOG_LEVEL` sets how much is written; `INFO` is the default and is
 the level these records are emitted at. `WARNING` keeps the failures and drops
-the per-request records. It is separate from `wuwaterm-api serve --log-level`,
-which is the web server's own startup and socket logging and is not passed by
-the Compose `command:` at all.
+the per-request records. It is applied the way the chat adapter applies its own
+`WUWATERM_LOG_LEVEL` — as the process level, so it governs third-party loggers
+too, apart from the HTTP client library which is pinned quiet because at `INFO`
+it reports the model endpoint this service was configured with. It is separate
+from `wuwaterm-api serve --log-level`, which is the web server's own startup and
+socket logging and is not passed by the Compose `command:` at all.
 
 ### Cost Topology
 
