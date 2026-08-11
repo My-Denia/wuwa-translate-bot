@@ -70,11 +70,15 @@ def _prose_files() -> list[Path]:
     has to name the banned spellings in order to ban them.
     """
     found: list[Path] = []
-    for pattern in ("*.md", "*.ps1", "*.rst", "*.txt"):
+    for pattern in ("*.md", "*.ps1", "*.rst", "*.txt", "*.yml", "*.yaml", "*.sh"):
         for path in ROOT.rglob(pattern):
-            if SKIPPED_DIRECTORY_NAMES.intersection(path.parts):
+            # Relative parts only: an absolute path picks up whatever the
+            # checkout happens to live under, so a clone inside a directory
+            # named `build` or `dist` would otherwise skip the whole tree.
+            parts = path.relative_to(ROOT).parts
+            if SKIPPED_DIRECTORY_NAMES.intersection(parts):
                 continue
-            if "tests" in path.relative_to(ROOT).parts:
+            if "tests" in parts:
                 continue
             found.append(path)
     return found
@@ -101,6 +105,10 @@ def test_no_document_claims_the_client_build_is_reproducible():
         Path("docs") / "validation.md",
         Path("docs") / "architecture.md",
         Path("README.md"),
+        # A job name or a step summary is prose too, and so is a script
+        # header: the claim can live anywhere a reader would meet it.
+        Path(".github") / "workflows" / "ci.yml",
+        Path("deploy") / "vps-update.sh",
     ):
         assert ROOT / required in scanned, str(required)
 

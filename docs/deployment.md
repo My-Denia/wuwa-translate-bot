@@ -166,10 +166,10 @@ emptied on the first line for the same reason: a shell that pinned
 successfully earlier would otherwise carry that value into a rerun where the
 resolution failed, and the refusals would pass on a stale reference.
 
-Whatever that prints is the port the route below must name. Read the image back
-too — the Traceability Readback at the end of this page requires BOTH running
-containers to match the manifest, and this step is the one that could break
-that.
+What `printenv` prints is the port the route below must name. The block also
+echoes the reference it is about to use, and the Traceability Readback at the
+end of this page requires BOTH running containers to match the manifest — this
+step is the one that could break that.
 
 Shell access to the host stays what it has always been: the operator's
 administration channel, used for the deployment and credential commands on
@@ -293,9 +293,16 @@ that. A shell where the resolution did not succeed has no usable `pinned` — it
 is emptied on the block's first line, so a value left over from an earlier
 successful run cannot stand in for one this run failed to establish — and every
 one of these commands therefore stops on its own, including in a session where
-the block above was never run, and including the stdin form below. What the
-`echo` prints is `wuwaterm-runtime:<commit>`; there is no path on which it
-prints `:local`.
+the block above was never run, and including the stdin form below.
+
+The `echo` is there to say what you are about to run on, not to be validated by
+its shape. `wuwaterm-runtime:<commit>` is the usual answer;
+`wuwaterm-runtime:rollback-<deployment id>` is the right one on a host that is
+currently rolled back, and even `wuwaterm-runtime:local` is right on a host
+whose API container really was created from that tag. What makes the reference
+trustworthy is the id comparison two lines above it, which has already run by
+the time anything is printed — an operator checking the format instead would
+reject a correct pin after a rollback.
 
 A resolved reference also happens to keep the one-shot container from being
 BUILT — the service carries a `build:` block, and a reference resolving to no
