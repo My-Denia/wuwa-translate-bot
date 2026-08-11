@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -351,9 +352,25 @@ async def _require_active_device(request: Request, device: Device) -> None:
     returning. It NARROWS the window best-effort; it does not close it — a
     revocation that commits after this read is still served.
     """
-    active = await asyncio.to_thread(
-        request.app.state.device_store.is_active, device.device_id
-    )
+    try:
+        active = await asyncio.to_thread(
+            request.app.state.device_store.is_active, device.device_id
+        )
+    except (sqlite3.Error, OSError):
+        # A transient store failure on the POST-auth re-check (database is
+        # locked, a disk I/O error) is infrastructure, not a credential
+        # rejection: answering 401 here would tell a valid device to re-pair.
+        # Reserve unauthorized for a genuine revocation; a hiccup is 503.
+        LOGGER.warning(
+            "device re-check store error path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(
+            ERROR_INTERNAL,
+            "device re-check is temporarily unavailable",
+            status_code=503,
+        )
     if not active:
         LOGGER.info(
             "device revoked in flight path=%s request_id=%s",
@@ -417,8 +434,22 @@ async def authenticated_device(
         raise ApiError(ERROR_RATE_LIMITED)
     # record_use only stamps a row that is still active. A zero count means the
     # device was revoked between verification and admission: reject it now
-    # rather than serve a request for a credential that is no longer valid.
-    updated = await asyncio.to_thread(store.record_use, device.device_id)
+    # rather than serve a request for a credential that is no longer valid. A
+    # transient store failure on this write is infrastructure, not a credential
+    # problem, so it becomes 503 rather than a misleading unauthorized/500.
+    try:
+        updated = await asyncio.to_thread(store.record_use, device.device_id)
+    except (sqlite3.Error, OSError):
+        LOGGER.warning(
+            "credential store error on admission path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(
+            ERROR_INTERNAL,
+            "credential store is temporarily unavailable",
+            status_code=503,
+        )
     if updated != 1:
         LOGGER.info(
             "auth rejected: device revoked in flight path=%s request_id=%s",

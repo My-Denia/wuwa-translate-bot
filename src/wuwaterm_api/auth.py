@@ -420,17 +420,19 @@ class DeviceStore:
         """Whether ``device_id`` is registered and not revoked, right now.
 
         READ ONLY, and cheap: a single indexed lookup, run at the request-time
-        TOCTOU seams. Any store this process cannot read is treated as "not
-        active", the same uniform rejection every other seam gives.
+        TOCTOU seams AFTER the device has already authenticated. Unlike
+        :meth:`authenticate`, a store error here is NOT swallowed into a
+        rejection: this is not an anti-enumeration surface (the caller is a
+        known, verified device), so a transient failure — ``database is
+        locked``, a disk I/O error — must surface as an infrastructure problem
+        and not be misread as the credential being invalid. ``False`` means the
+        device is genuinely absent or revoked; a ``sqlite3.Error`` propagates.
         """
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT revoked_at FROM devices WHERE device_id = ?",
-                    (device_id,),
-                ).fetchone()
-        except sqlite3.Error:
-            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT revoked_at FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
         return row is not None and row["revoked_at"] is None
 
 

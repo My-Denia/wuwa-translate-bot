@@ -1586,3 +1586,89 @@ def test_a_device_revoked_after_admission_is_refused_before_serving(
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_is_active_propagates_a_transient_store_error(tmp_path):
+    """A store failure on the re-check is surfaced, not swallowed into False.
+
+    Swallowing it (as authenticate deliberately does, for anti-enumeration)
+    would misread a locked database as a revoked device and reject a valid one.
+    """
+    import sqlite3
+
+    store = DeviceStore(tmp_path / "devices.db")
+    device, _ = issue_device(store, "owner desktop")
+
+    def boom(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    real = DeviceStore._connect
+    DeviceStore._connect = boom
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            store.is_active(device.device_id)
+    finally:
+        DeviceStore._connect = real
+
+
+def test_a_transient_recheck_store_error_is_503_not_401(tmp_path, sample_db):
+    """A transient store failure on the post-auth re-check must not tell a
+    valid device to re-pair: it is the service-unavailable envelope, not
+    unauthorized."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.is_active
+
+    def boom(self, device_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore.is_active = boom
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.is_active = real
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
+    # The one thing it must never be: a credential rejection.
+    assert response.json()["error"]["code"] != "unauthorized"
+
+
+def test_a_transient_record_use_store_error_is_503_not_500(tmp_path, sample_db):
+    """A transient failure on the admission write is infrastructure (503), not a
+    generic 500 or a credential rejection."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.record_use
+
+    def boom(self, device_id, *, now=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore.record_use = boom
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.record_use = real
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
