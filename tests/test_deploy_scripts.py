@@ -1536,6 +1536,24 @@ def test_documented_api_commands_use_the_configured_port():
     assert "printenv WUWATERM_API_PORT" in text
 
 
+def _fenced_lines(block: str) -> list[str]:
+    """Only the lines inside fenced code blocks.
+
+    A gate that reads prose as well would assert against whatever a future
+    sentence happens to quote, and pass today only because the one prose
+    mention of the command is punctuated without a trailing space.
+    """
+    lines: list[str] = []
+    inside = False
+    for line in block.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            lines.append(line)
+    return lines
+
+
 def _resolution_lines(block: str) -> list[str]:
     """The image-pin resolution, as a list of lines.
 
@@ -1543,7 +1561,17 @@ def _resolution_lines(block: str) -> list[str]:
     tells the operator so in as many words. Comparing the lines makes that a
     check rather than a coincidence of two tests asserting the same literals.
     """
-    wanted = ('pinned=""', "image=", "running_id=", "tag_id=", '[ -n "$tag_id" ]')
+    wanted = (
+        'pinned=""',
+        "image=",
+        "running_id=",
+        "tag_id=",
+        '[ -n "$tag_id" ]',
+        # The refusal itself: the credentials section promises "the same
+        # resolution, the same refusals", and a message that drifts in one
+        # block and not the other would keep both gates green otherwise.
+        "echo ",
+    )
     return [
         line.strip()
         for line in block.splitlines()
@@ -1574,7 +1602,10 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
 
     # The reference comes from the running container, and it comes BEFORE the
     # commands it has to cover.
-    pin = "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)\""
+    pin = (
+        "image=\"$(docker inspect --format '{{.Config.Image}}' "
+        'wuwaterm-api 2>/dev/null)"'
+    )
     assert pin in credentials
     for subcommand in ("device issue", "device list", "device revoke"):
         assert credentials.index(pin) < credentials.index(subcommand), subcommand
@@ -1586,8 +1617,9 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     # The identity of record is the image id, which is what the traceability
     # readback compares - so the reference is only used once it has been shown
     # to still name the running id.
-    assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
-        credentials
+    assert (
+        "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)\""
+        in credentials
     )
     # `${image:?}` sits inside a command substitution, so on a host with no
     # container it kills only that subshell: `tag_id` and `running_id` are then
@@ -1612,7 +1644,7 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     # would leave a fifth, unpinned command added later perfectly green.
     runs = [
         line
-        for line in credentials.splitlines()
+        for line in _fenced_lines(credentials)
         if "docker compose" in line and " run " in line
     ]
     assert runs
@@ -1642,11 +1674,13 @@ def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
     recreate = text.split("**Recreate it on the image it is already on.**", 1)[1]
     recreate = recreate.split("\n### ", 1)[0]
 
-    assert "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)\"" in (
-        recreate
+    assert (
+        "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)\""
+        in recreate
     )
-    assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
-        recreate
+    assert (
+        "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)\""
+        in recreate
     )
     assert 'WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}"' in recreate
     assert "export WUWATERM_RUNTIME_IMAGE" not in recreate
@@ -1661,7 +1695,7 @@ def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
     # happening to assert the same literals.
     credentials = text.split("### Device Credentials", 1)[1].split("\n### ", 1)[0]
     assert _resolution_lines(recreate) == _resolution_lines(credentials)
-    assert len(_resolution_lines(recreate)) == 5
+    assert len(_resolution_lines(recreate)) == 6
 
 
 def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():

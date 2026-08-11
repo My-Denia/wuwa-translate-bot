@@ -52,11 +52,15 @@ code itself enforces.
   attempts that: there is no client lock file, the interpreter patch release
   and the `windows-latest` image both float, and there is no timestamp
   normalisation, hash-seed pinning or two-build comparison. Two builds may
-  therefore differ in both inputs and bytes. Deliberate: the artifact is
-  owner-distributed by hand and unsigned, so a byte-identical rebuild would
-  prove nothing to anyone who does not already trust the build machine, and
-  the check that does pay for itself is the artifact's own start-up
-  self-check.
+  therefore differ in both inputs and bytes. Not because the property would be
+  worthless: a byte-identical rebuild is what lets a recipient rebuild in an
+  independent environment and check that the binary they hold corresponds to
+  this source, and nothing here offers that. It answers a different question
+  from the one this distribution has, though. The artifact goes by hand from
+  the owner to the owner, so what is unanswered is authenticity of origin,
+  which signing addresses and a byte-identical rebuild does not. The check
+  that pays for itself at this scale is the artifact's own start-up
+  self-check. Recorded as a candidate control, not as a rejected one.
 - **No code signing** (`WuwaTerm.spec` sets `codesign_identity=None`;
   `client/build.ps1` and `client/README.md` state it). Accepted cost:
   first-run SmartScreen friction on a machine that has never seen the binary.

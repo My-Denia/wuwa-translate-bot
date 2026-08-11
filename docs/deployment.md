@@ -142,11 +142,11 @@ the other source for it) and forbid building:
 ```bash
 cd /opt/wuwaterm/current
 pinned=""
-image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
-running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
-tag_id="$(docker image inspect --format '{{.Id}}' "${image:?no wuwaterm-api container: nothing to pin to}")"
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
+tag_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"
 [ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
-echo "${pinned:?that reference no longer names the image this container runs}"
+echo "${pinned:?no usable pin: no wuwaterm-api container, or its reference no longer names the image it runs}"
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api &&
   docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
@@ -169,11 +169,14 @@ all, which is the one case it most needs to catch. The `&&` on the recreate is
 the same idea for the readback: a port read from a container that was never
 recreated is not the port this subsection just set.
 
-The two failure messages name two different situations. No container of that
-name is "nothing to pin to". A container whose creation reference no longer
-resolves to the image it is running is a tag that has moved — the case that
-sends an unvalidated image to a live surface. (A stopped container is neither:
-`docker inspect` answers for it, and pinning off it is correct.)
+There is exactly ONE refusal, and its message names both situations it can
+mean, because the block cannot tell an operator which. The lookups run inside
+command substitutions, where a failure ends the substitution and not the
+sequence, so no earlier line can be the thing that stops the block — their
+errors are silenced for that reason, leaving one message rather than a docker
+error followed by a claim that contradicts it. A stopped container is not a
+failure at all: `docker inspect` answers for it, and pinning off it is
+correct.
 
 What `printenv` prints is the port the route below must name. The block also
 echoes the reference it is about to use, and the Traceability Readback at the
@@ -283,11 +286,11 @@ like a broken runbook. Resolve the reference exactly as the recreate above does
 ```bash
 cd /opt/wuwaterm/current
 pinned=""
-image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
-running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
-tag_id="$(docker image inspect --format '{{.Id}}' "${image:?no wuwaterm-api container: nothing to pin to}")"
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
+tag_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"
 [ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
-echo "${pinned:?that reference no longer names the image this container runs}"
+echo "${pinned:?no usable pin: no wuwaterm-api container, or its reference no longer names the image it runs}"
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
@@ -374,11 +377,19 @@ authentication refusal, a rate-limit refusal, and for a translation this one:
 2026-01-01 00:00:00,000 INFO wuwaterm_api translation device=id:<8 hex> kind=exact direction=en request_id=<32 hex>
 ```
 
-`kind` is the stage that answered — `exact` or `fuzzy` from the dictionary,
-`llm` when the translation model was called, `noop` when there was nothing to
-do — so it is what says whether a given request spent model budget. A request
-can therefore produce several lines in total, and a collector must select on
-`request complete` rather than assume every line has that record's fields. Every
+`kind` is the pipeline stage that answered: `exact` or `fuzzy` from the
+dictionary, `llm` from the model branch, `error` when the pipeline failed,
+`noop` when there was nothing to do. **Read it as the outcome, not as a
+billing record.** `exact`, `fuzzy` and `noop` do mean no model was called.
+The other two prove nothing in either direction: on a host with no model
+configured the pipeline still labels its local fallback `llm` (and this
+surface then refuses the request as unavailable rather than pretending), and
+`error` can follow a provider call that was made, and charged, before it
+failed. What model spend actually is lives with the provider, not here.
+
+A request can therefore produce several lines in total, and a collector must
+select on `request complete` rather than assume every line has that record's
+fields. Every
 request produces the completion record, including the unauthenticated
 `/healthz` and `/readyz` probes, so a monitor polling those is visible in the
 volume. Raising the level above `INFO` drops all of them — that is the trade
@@ -480,8 +491,9 @@ this deployment that hang-up did not reach the service: the request ran to
 completion and was recorded with its ordinary status and its full duration —
 and, where the request needed the model, the model call included, whose cost is
 spent whether or not anyone is still waiting for the answer. (A dictionary hit
-returns before the model stage and costs nothing either way; the `kind=` field
-on the translation line says which of the two a request was.) Measured here: a
+returns before the model stage and costs nothing either way; a `kind=` of
+`exact`, `fuzzy` or `noop` on the translation line rules the model out, with
+the caveats above about the two values that do not rule it in.) Measured here: a
 translation cancelled in the client 0.4 s after it started was recorded
 `status=200 duration_ms=5183.6`, indistinguishable from one whose answer was
 read. Treat `499` as what it says — a caller that went away mid-read, or a
