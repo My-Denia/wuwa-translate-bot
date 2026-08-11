@@ -103,13 +103,15 @@ establishes a new one.
   yet have a whole request to act on, so nothing is translated and nothing is
   spent. Once it does have the whole request — and your text is small, so that
   window is short — Cancel no longer reaches the service: it is not told you
-  stopped waiting, and it finishes the translation, model call and all,
-  recording it as an ordinary completed request. Cancelling then frees the
-  application without stopping the work,
-  and without un-spending the model budget the request had already committed.
-  The answer is discarded unread, and with it the request id, so such a
-  request is not one you can quote to an operator afterwards. Pressing
-  Translate again is a new request, which pays again.
+  stopped waiting, and it finishes the request, recording it as an ordinary
+  completed one. If that request needed the translation model, the model call
+  runs to the end and is paid for whether or not you are still waiting; a
+  dictionary hit never reaches the model and costs nothing either way.
+  Cancelling then frees the application without stopping the work, and without
+  un-spending anything the request had already committed. The answer is
+  discarded unread, and with it the request id, so such a request is not one
+  you can quote to an operator afterwards. Pressing Translate again makes a new
+  request, and one that reaches the model pays again.
 
 ## Getting and storing a device credential
 

@@ -217,7 +217,8 @@ runner or the client's dependencies.
   a `499` from a disconnect during the read. That window, not "before the task
   starts", is the boundary, and for a short body it is short. Once the service
   has the whole request, nothing that reaches it cancels anything: the work
-  continues, a model call in flight is still paid for, and the server records
+  continues, a model call in flight is still paid for (a dictionary hit
+  returns before the model stage and costs nothing), and the server records
   an ordinary completion rather than a client-gone `499` — the log side of
   that is in `docs/deployment.md`, the user-facing side in
   `client/README.md`.

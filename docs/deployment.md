@@ -141,6 +141,7 @@ the other source for it) and forbid building:
 
 ```bash
 cd /opt/wuwaterm/current
+pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
 tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
@@ -160,7 +161,10 @@ the tag pointing at a fresh, unvalidated image while this container still runs
 the old one. `${…:?}` is what makes each failure stop the command instead of
 printing a warning that the next pasted line ignores: if the container is not
 running there is nothing to pin to, and if the tag has moved the reference is
-not the deployed image — the property this whole step exists for.
+not the deployed image — the property this whole step exists for. `pinned` is
+emptied on the first line for the same reason: a shell that pinned
+successfully earlier would otherwise carry that value into a rerun where the
+resolution failed, and the refusals would pass on a stale reference.
 
 Whatever that prints is the port the route below must name. Read the image back
 too — the Traceability Readback at the end of this page requires BOTH running
@@ -269,6 +273,7 @@ like a broken runbook. Resolve the reference exactly as the recreate above does
 
 ```bash
 cd /opt/wuwaterm/current
+pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
 tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
@@ -284,10 +289,13 @@ WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/dock
 lookup would leave the variable EMPTY — and Compose's `:-` default treats empty
 exactly like unset, which is `wuwaterm-runtime:local`: the failure this section
 exists to prevent, reached by following this section. `${pinned:?…}` cannot do
-that. A shell where the resolution did not succeed has no `pinned`, so every one
-of these commands stops on its own, including a session where the block above
-was never run, and including the stdin form below. What the `echo` prints is
-`wuwaterm-runtime:<commit>`; there is no path on which it prints `:local`.
+that. A shell where the resolution did not succeed has no usable `pinned` — it
+is emptied on the block's first line, so a value left over from an earlier
+successful run cannot stand in for one this run failed to establish — and every
+one of these commands therefore stops on its own, including in a session where
+the block above was never run, and including the stdin form below. What the
+`echo` prints is `wuwaterm-runtime:<commit>`; there is no path on which it
+prints `:local`.
 
 A resolved reference also happens to keep the one-shot container from being
 BUILT — the service carries a `build:` block, and a reference resolving to no
@@ -438,14 +446,16 @@ before anyone can press a button, so there is nothing left to interrupt. The
 cancel ends the client's wait and closes the client's own connection, and on
 this deployment that hang-up did not reach the service: the request ran to
 completion and was recorded with its ordinary status and its full duration —
-the translation-model call included, whose cost is spent whether or not anyone
-is still waiting for the answer. Measured here: a translation cancelled in the
-client 0.4 s after it started was recorded `status=200 duration_ms=5183.6`,
-indistinguishable from one whose answer was read. Treat `499` as what it says —
-a caller that went away mid-read, or a shutdown — and not as a count of
-cancellations. (A cancel that lands in the instant before the client dispatches
-its request sends nothing at all, so that case leaves no record here rather than
-a misleading one.)
+and, where the request needed the model, the model call included, whose cost is
+spent whether or not anyone is still waiting for the answer. (A dictionary hit
+returns before the model stage and costs nothing either way; the `kind=` field
+on the translation line says which of the two a request was.) Measured here: a
+translation cancelled in the client 0.4 s after it started was recorded
+`status=200 duration_ms=5183.6`, indistinguishable from one whose answer was
+read. Treat `499` as what it says — a caller that went away mid-read, or a
+shutdown — and not as a count of cancellations. (A cancel that lands before the
+service has the whole request sends nothing it can act on, so that case leaves
+no record here, or a `499`, rather than a misleading completion.)
 
 Two consequences for reading these records. A cancelled request is not a
 distinct state in the log: what is recorded is what the SERVICE did, not what a

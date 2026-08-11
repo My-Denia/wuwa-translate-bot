@@ -1575,6 +1575,10 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
         credentials
     )
     assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in credentials
+    # ...and the block clears `pinned` first, so a shell that pinned
+    # successfully earlier cannot carry that value into a rerun where the
+    # resolution failed and have the refusals below pass on a stale reference.
+    assert credentials.index('pinned=""') < credentials.index(pin)
 
     # Every command carries the pin and REFUSES rather than warns. A bare
     # export would report its own success and leave an EMPTY value behind on a
@@ -1614,6 +1618,7 @@ def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
         recreate
     )
     assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in recreate
+    assert recreate.index('pinned=""') < recreate.index("image=\"$(docker inspect")
     assert 'WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}"' in recreate
     assert "export WUWATERM_RUNTIME_IMAGE" not in recreate
     # The recreate must still forbid building, which the credential commands
@@ -1641,7 +1646,9 @@ def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
     assert "has no id the user can quote" in flat
     # ...and the case that really does stop the work, so the correction does
     # not overshoot into a second false claim.
-    assert "sends nothing at all, so that case leaves no record here" in flat
+    assert "sends nothing it can act on, so that case leaves no record here" in flat
+    # ...and the cost claim is scoped to requests that reach the model.
+    assert "A dictionary hit returns before the model stage" in flat
 
 
 def test_the_guide_does_not_teach_host_administration_as_the_client_path():
