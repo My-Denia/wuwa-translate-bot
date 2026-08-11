@@ -269,34 +269,59 @@ def test_a_failure_while_recording_cannot_replace_the_requests_own_outcome(
 
     monkeypatch.setattr("wuwaterm_api.app._log_request_completed", unwritable)
 
-    served = run(
-        call(
-            app,
-            "POST",
-            "/v1/translations",
-            json={"text": "声骸"},
-            headers={"Authorization": f"Bearer {token}"},
+    with captured_records() as captured:
+        served = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
         )
-    )
+
     assert served.status_code == 200, served.text
+    assert captured.completions == [], "the record was supposed to fail"
+    # The loss is reported, with enough to act on: which request, and why.
+    lost = [
+        record
+        for record in captured.records
+        if record.getMessage().startswith("request record could not be written")
+    ]
+    assert len(lost) == 1, captured.messages
+    assert served.headers["X-Request-Id"] in lost[0].getMessage()
+    assert "the record itself failed" in str(lost[0].exc_info[1])
 
     def boom(_service):
         raise RuntimeError("metadata read failed")
 
     monkeypatch.setattr("wuwaterm_api.app.service_metadata", boom)
-    failed = run(
-        call(
-            app,
-            "GET",
-            "/v1/meta",
-            headers={"Authorization": f"Bearer {token}"},
-            raise_app_exceptions=False,
+    with captured_records() as captured:
+        failed = run(
+            call(
+                app,
+                "GET",
+                "/v1/meta",
+                headers={"Authorization": f"Bearer {token}"},
+                raise_app_exceptions=False,
+            )
         )
-    )
 
-    # The request's own failure is what surfaces, not the logging one.
     assert failed.status_code == 500
     assert failed.json()["error"]["code"] == "internal"
+    # The status and the envelope are NOT the discriminating assertion: the
+    # substituted exception would be caught by the same handler and rendered
+    # identically. What distinguishes the two worlds is which exception
+    # actually arrived there.
+    unhandled = [
+        record
+        for record in captured.records
+        if record.getMessage().startswith("unhandled error")
+    ]
+    assert len(unhandled) == 1, captured.messages
+    raised = str(unhandled[0].exc_info[1])
+    assert "metadata read failed" in raised
+    assert "the record itself failed" not in raised
 
 
 # --------------------------------------------------------------------------

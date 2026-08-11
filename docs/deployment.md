@@ -282,12 +282,14 @@ Each record is one line and always carries the same fields:
 Every request produces one, including the unauthenticated `/healthz` and
 `/readyz` probes — so a monitor polling those is visible in the volume.
 
-`request_id` is minted by the service and returned to the caller **in the JSON
-body of every response**, and in the `X-Request-Id` header of every response the
-application itself builds. The one exception is an unhandled failure: that
-response is assembled outside the middleware that attaches the header, so on
-those `500`s the body carries the id and the header does not. Either way the id
-a client reports is what finds the request:
+`request_id` is minted by the service and returned to the caller in the JSON
+body of every response this service defines a body shape for — every `/v1`
+answer and every error envelope, though not the schema at `/openapi.json` — and
+in the `X-Request-Id` header of every response the application itself builds.
+The one exception is an unhandled failure: that response is assembled outside
+the middleware that attaches the header, so on those `500`s the body carries the
+id and the header does not. Either way the id a client reports is what finds the
+request:
 
 ```bash
 docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>

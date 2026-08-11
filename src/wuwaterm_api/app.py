@@ -361,7 +361,18 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 # operator needs, swapped for the one about writing it down.
                 # The record is additive by construction: it can be missing, it
                 # can never be the thing that goes wrong.
-                LOGGER.warning("request record could not be written")
+                #
+                # Reported WITH the id and the cause. `logging` already absorbs
+                # handler-side failures itself, so what reaches here is a fault
+                # in the field helpers above — repository code, whose traceback
+                # therefore carries nothing a caller supplied, and which is
+                # exactly the thing worth having a traceback for. Without the
+                # id this line says only that some request went unrecorded.
+                LOGGER.warning(
+                    "request record could not be written request_id=%s",
+                    request_id,
+                    exc_info=True,
+                )
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
