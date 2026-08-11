@@ -325,11 +325,13 @@ def _log_field(value: object, limit: int) -> str:
     clipped = text[:limit]
     if clipped == text and _PLAIN_LOG_FIELD.fullmatch(text):
         return text
-    # Truncated values are escaped too, so a shortened value is never mistaken
-    # for the whole of what arrived. The two replacements are not cosmetic: see
-    # the forged-fields hazard above.
+    # The two replacements are not cosmetic: see the forged-fields hazard above.
     rendered = repr(clipped).replace(" ", "\\x20").replace("=", "\\x3d")
-    if len(rendered) > RENDERED_LOG_LIMIT:
+    # Marked when EITHER bound bit. Escaping alone does not say "shortened" —
+    # a value can be escaped for having a control character in it and still be
+    # complete — so without this a clipped target reads as the whole of what
+    # arrived, which is the one thing the bound exists to prevent.
+    if clipped != text or len(rendered) > RENDERED_LOG_LIMIT:
         rendered = rendered[:RENDERED_LOG_LIMIT] + TRUNCATION_MARK
     return rendered
 

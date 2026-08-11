@@ -275,8 +275,9 @@ cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
 ```
 
-Every HTTP request produces exactly one **completion record**, one line, always
-the same fields, recognisable by the words `request complete`:
+At `INFO`, the default, every HTTP request produces exactly one **completion
+record**, one line, always the same fields, recognisable by the words `request
+complete`:
 
 ```
 2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>
@@ -289,7 +290,8 @@ request can produce several lines in total, and a collector must select on
 `request complete` rather than assume every line has these fields. Every
 request produces the completion record, including the unauthenticated
 `/healthz` and `/readyz` probes, so a monitor polling those is visible in the
-volume.
+volume. Raising the level above `INFO` drops all of them — that is the trade
+that setting is for, and correlation goes with them.
 
 `request_id` is minted by the service and reaches the caller two ways, neither
 of which covers quite everything:
@@ -368,9 +370,9 @@ escaped precisely so it cannot become two — so splitting on whitespace and the
 on the first `=` is a complete parse **of everything after `request complete`**.
 (What precedes it is the timestamp, level and logger name from the log format,
 plus those two literal words; none of them are fields.) And a trailing `~` on
-the `route` value always means the rendering was clipped: it is outside the
-character set a plain value may use, and an escaped one always ends in its
-closing quote.
+the `route` value always means it was shortened — either the target itself or
+its rendering hit a bound: `~` is outside the character set a plain value may
+use, and an escaped one always ends in its closing quote.
 
 One value in the `status` field is not a status this service ever sends: `499`
 means the caller went away, or the work was cancelled at shutdown, before there

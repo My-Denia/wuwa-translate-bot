@@ -696,6 +696,34 @@ def test_a_rendered_target_is_bounded_by_what_is_written_not_what_arrived(
     assert record["status"] == "404"
 
 
+def test_a_target_shortened_by_either_bound_says_so(tmp_path, sample_db):
+    """The mark is about being shortened, not about being escaped.
+
+    A long PLAIN target renders well inside the written bound, so only the
+    source bound applies to it — and without a mark there it reads as the whole
+    of what arrived, which is the thing the bound exists to prevent. Escaping is
+    not the signal either way: a value can be escaped for holding one control
+    character and still be complete.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+
+    with captured_records() as captured:
+        shortened_response = run(call(app, "GET", "/" + "a" * 120))
+    assert shortened_response.status_code == 404
+    assert len(captured.completions) == 1, captured.messages
+    shortened = fields(captured.completions[0])["route"]
+
+    with captured_records() as captured:
+        whole_response = run(call(app, "GET", "/" + "a" * 40))
+    assert whole_response.status_code == 404
+    assert len(captured.completions) == 1, captured.messages
+    whole = fields(captured.completions[0])["route"]
+
+    assert shortened.endswith("~"), shortened
+    assert not whole.endswith("~"), whole
+    assert "a" * 40 in whole
+
+
 def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
     tmp_path, sample_db
 ):
@@ -1021,3 +1049,11 @@ def test_the_api_extra_installs_no_websocket_library():
     assert not any("[standard]" in item for item in api), api
     for banned in ("websockets", "wsproto"):
         assert not any(item.startswith(banned) for item in api), api
+
+    # And the RESOLVED closure, which is what the image installs
+    # (`uv sync --locked --extra api`). A declaration check alone stays green
+    # if a permitted release of something else starts requiring one of these.
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    locked = {package["name"] for package in lock["package"]}
+    assert "uvicorn" in locked, sorted(locked)
+    assert not locked & {"websockets", "wsproto"}, sorted(locked)
