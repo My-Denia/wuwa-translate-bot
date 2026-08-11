@@ -41,6 +41,7 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -214,7 +215,7 @@ class DeviceStore:
             )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(SCHEMA)
             # CREATE TABLE IF NOT EXISTS cannot add a column to a store written
             # by an older shape. Say so plainly instead of failing later with a
@@ -241,6 +242,14 @@ class DeviceStore:
         SQLite's write-ahead log and shared-memory sidecars carry the same rows
         as the main file, so all three plus the directory are restricted, not
         just the database the caller named.
+
+        This runs once, at creation. Sidecars created LATER — including by a
+        request-path read, which recreates them if the last writer removed them
+        — are not chmod'ed here: SQLite gives a journal/WAL file the mode of the
+        database it belongs to, which the POSIX gate below
+        (``test_every_file_carrying_verifier_material_is_restricted``, which
+        authenticates before it looks) asserts on the deployment platform. The
+        ``0o700`` on the directory is the backstop either way.
         """
         targets = [
             (self.path.parent, 0o700),
@@ -255,11 +264,66 @@ class DeviceStore:
             except OSError:  # pragma: no cover - filesystem without POSIX modes
                 pass
 
+    # Every connection below is opened inside ``closing(...)``. ``with conn:``
+    # is a TRANSACTION manager, not a closer, so the connection used to stay
+    # open until the garbage collector got to it — holding a WAL read lock and
+    # the sidecar files, which is exactly the contention with ``revoke()`` (and,
+    # on Windows, the reason a store an operator deleted could not actually be
+    # deleted). Writers use ``closing(...) as conn, conn`` so the transaction
+    # still commits before the handle goes.
+
     def _connect(self) -> sqlite3.Connection:
+        """Open the store for an OPERATOR command: creates it if absent."""
         conn = sqlite3.connect(self.path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _uri(self, mode: str) -> str:
+        # Built from the resolved path so a store whose name or directory
+        # contains a URI metacharacter ('?', '#') cannot turn part of the path
+        # into connection parameters.
+        return f"{Path(self.path).resolve().as_uri()}?mode={mode}"
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        """Open the store for a REQUEST-PATH read. Never creates the DATABASE.
+
+        The request path used to call :meth:`initialize` — mkdir, a write-mode
+        connect, a journal-mode pragma and DDL — on EVERY request, so an
+        unauthenticated caller wrote to the credential store, contended with
+        ``revoke()``, and silently RECREATED a store an operator had deleted as
+        an emergency revocation. A ``mode=ro`` connection cannot do any of that:
+        a missing directory or file, a corrupt file or an unreadable one all
+        raise ``sqlite3.Error``, which the request path already answers as 503
+        (store unavailable) rather than 401 (credential rejected).
+
+        Stated exactly, because the difference matters: ``mode=ro`` protects the
+        DATABASE FILE. Reading a WAL database still uses the ``-shm`` WAL index
+        and can create the ``-shm``/``-wal`` sidecars if the last writer removed
+        them, so the directory must remain writable — which it must be anyway,
+        since :meth:`record_use` writes to it on every admitted request. This is
+        inherent to WAL, and WAL is what lets this read proceed while a
+        concurrent ``revoke()`` writes; the sidecars carry no schema and their
+        loss or recreation cannot resurrect a deleted store, because the main
+        database file is what ``mode=ro`` refuses to create.
+
+        No pragma is issued: ``journal_mode`` is a persistent property of the
+        file set at creation, and there are no foreign keys in this schema.
+        """
+        conn = sqlite3.connect(self._uri("ro"), uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _connect_existing(self) -> sqlite3.Connection:
+        """Open the store for a REQUEST-PATH write of an EXISTING store.
+
+        ``mode=rw`` writes but does not create. The one request-path write
+        (:meth:`record_use`) therefore cannot resurrect a deleted store either:
+        it raises ``sqlite3.Error`` into the same 503 path.
+        """
+        conn = sqlite3.connect(self._uri("rw"), uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
         return conn
 
     # -- operator commands -------------------------------------------------
@@ -294,7 +358,7 @@ class DeviceStore:
         created_at = _now()
         salt = secrets.token_bytes(SALT_BYTES)
         self.initialize()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO devices(device_id, device_name, salt, token_hash,"
                 " scopes, created_at, revoked_at, last_used_at)"
@@ -319,7 +383,7 @@ class DeviceStore:
 
     def list_devices(self) -> list[Device]:
         self.initialize()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT * FROM devices ORDER BY created_at, device_id"
             ).fetchall()
@@ -328,7 +392,7 @@ class DeviceStore:
     def revoke(self, device_id: str) -> Device:
         self.initialize()
         revoked_at = _now()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
             ).fetchone()
@@ -347,22 +411,32 @@ class DeviceStore:
     # -- request path ------------------------------------------------------
 
     def authenticate(self, token: str) -> Device | None:
-        """Return the live device for ``token``, or None. READ ONLY.
+        """Return the live device for ``token``, or None. READ ONLY — really.
+
+        It says READ ONLY and it now IS read only. This method used to call
+        :meth:`initialize` first, which creates the directory, connects in
+        write mode, sets a pragma and runs DDL. Two things followed from that,
+        both bad: an UNAUTHENTICATED caller could write to the credential store
+        and contend with a concurrent ``revoke()``, and deleting the store —
+        the bluntest emergency revocation an operator has — was silently undone
+        by the next unauthenticated request, which recreated an empty store.
+        The store is created by ``initialize()`` — from ``cli._serve`` at
+        startup and from ``issue()`` when an operator registers the first
+        device. Nothing on the REQUEST path creates it.
 
         None means the CREDENTIAL was not proven: unknown device, wrong secret,
-        malformed token and a revoked device are all indistinguishable, so the
-        endpoint cannot be used to enumerate device ids. These are the only
-        cases that map to 401.
+        malformed token, a revoked device and a store written by an older shape
+        are all indistinguishable, so the endpoint cannot be used to enumerate
+        device ids. These are the only cases that map to 401.
 
-        A store that cannot be READ (``database is locked``, a disk I/O error)
-        is a different thing: the store being momentarily unusable, not the
-        credential being wrong. A ``sqlite3.Error`` from the read therefore
-        PROPAGATES, so the request path can answer 503 rather than tell a valid
-        device to re-pair. This leaks nothing probeable — an unreadable store is
-        device-independent, so the outcome does not vary with the token — and it
-        splits "store unusable" from "credential not proven". A legacy/old-shape
-        store (``DeviceStoreError`` from initialize) is a persistent
-        misconfiguration caught at startup, and stays a uniform rejection.
+        A store that cannot be READ — missing, deleted mid-run, corrupt,
+        ``database is locked``, a disk I/O error — is a different thing: the
+        store being unusable, not the credential being wrong. The
+        ``sqlite3.Error`` PROPAGATES, so the request path answers 503 rather
+        than telling a valid device to re-pair, and a deleted store keeps
+        answering 503 instead of being recreated. This leaks nothing probeable:
+        an unusable store is device-independent, so the outcome does not vary
+        with the token.
 
         Usage is deliberately NOT recorded here: a caller that is about to be
         refused by a rate limit must not be able to drive an unbounded stream
@@ -372,17 +446,10 @@ class DeviceStore:
         if parsed is None:
             return None
         device_id, secret = parsed
-        try:
-            self.initialize()
-        except DeviceStoreError:
-            # A legacy/old-shape store is a persistent misconfiguration, caught
-            # at startup normally; keep it a uniform rejection. A sqlite3.Error
-            # from initialize is an unreadable store and propagates (below).
-            return None
         return self._verify(device_id, secret)
 
     def _verify(self, device_id: str, secret: str) -> Device | None:
-        with self._connect() as conn:
+        with closing(self._connect_readonly()) as conn:
             row = conn.execute(
                 "SELECT * FROM devices WHERE device_id = ?", (device_id,)
             ).fetchone()
@@ -393,9 +460,23 @@ class DeviceStore:
                     _derive(secret, b"\x00" * SALT_BYTES), b"\x00" * SCRYPT_DKLEN
                 )
                 return None
-            if not hmac.compare_digest(
-                _derive(secret, bytes(row["salt"])), bytes(row["token_hash"])
-            ):
+            try:
+                salt = bytes(row["salt"])
+                stored = bytes(row["token_hash"])
+            except (IndexError, KeyError, TypeError):
+                # A store written by an older shape has no verifier columns, or
+                # holds something that is not one (TEXT, NULL). initialize()
+                # reports that to the OPERATOR at startup; on the request path
+                # it stays one more uniform rejection — and it has to be uniform
+                # in TIME too. Returning early here would cost nothing while an
+                # unknown device id still paid for a full derivation, which is
+                # exactly the device-id oracle the dummy derivation above
+                # exists to close, so spend the same work before refusing.
+                hmac.compare_digest(
+                    _derive(secret, b"\x00" * SALT_BYTES), b"\x00" * SCRYPT_DKLEN
+                )
+                return None
+            if not hmac.compare_digest(_derive(secret, salt), stored):
                 return None
             if row["revoked_at"] is not None:
                 return None
@@ -410,8 +491,12 @@ class DeviceStore:
         a revocation that committed in-flight and rejects the request, closing
         the window where a snapshot taken at verify time would otherwise be
         served after the device was withdrawn.
+
+        The connection writes but does not CREATE: this is the one write on the
+        request path, and it must not be able to resurrect a store an operator
+        deleted either. A missing store raises into the 503 path.
         """
-        with self._connect() as conn:
+        with closing(self._connect_existing()) as conn, conn:
             cursor = conn.execute(
                 "UPDATE devices SET last_used_at = ? WHERE device_id = ?"
                 " AND revoked_at IS NULL",
@@ -431,7 +516,7 @@ class DeviceStore:
         and not be misread as the credential being invalid. ``False`` means the
         device is genuinely absent or revoked; a ``sqlite3.Error`` propagates.
         """
-        with self._connect() as conn:
+        with closing(self._connect_readonly()) as conn:
             row = conn.execute(
                 "SELECT revoked_at FROM devices WHERE device_id = ?",
                 (device_id,),

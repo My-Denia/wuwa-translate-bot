@@ -16,6 +16,7 @@ Design constraints that show up all over this module:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import sqlite3
 import threading
@@ -183,7 +184,16 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     422: {"model": ErrorResponseBody, "description": "Input rejected"},
     429: {"model": ErrorResponseBody, "description": "Rate limited"},
     500: {"model": ErrorResponseBody, "description": "Internal error"},
-    503: {"model": ErrorResponseBody, "description": "Translation unavailable"},
+    503: {
+        "model": ErrorResponseBody,
+        "description": (
+            "A dependency this request needs is temporarily unavailable: the"
+            " translation model, the credential store, or the post-admission"
+            " device re-check. Classified as `llm_unavailable` or `internal`;"
+            " the 503 status is what distinguishes it from a genuine 500."
+            " Retryable."
+        ),
+    },
     504: {
         "model": ErrorResponseBody,
         "description": (
@@ -342,6 +352,58 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
+class CredentialPoolClosed(RuntimeError):
+    """The credential-store worker pool has been shut down (app teardown).
+
+    Grouped with ``sqlite3.Error``/``OSError`` at every call site: from the
+    request path's point of view it is one more way for the credential store to
+    be momentarily unusable, which is 503 — never 401, and never a bare 500.
+    """
+
+
+def _new_credential_pool(max_workers: int) -> concurrent.futures.ThreadPoolExecutor:
+    """A pool whose WIDTH is the bound on concurrent credential-store work."""
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="wuwaterm-credential"
+    )
+
+
+async def _in_credential_pool(app: FastAPI, func, *args):
+    """Run a credential-store call on this app's OWN bounded thread pool.
+
+    Every blocking call in this process used to go to asyncio's process-wide
+    DEFAULT executor, which is also where the UNAUTHENTICATED ``/readyz`` probe
+    and the dictionary stage run. Two unauthenticated probes were enough to
+    occupy it, and credential verifications then sat in its queue holding
+    admission slots — so unauthenticated traffic made the owner's own valid
+    token answer 429. Isolating the credential store fixes that at the root:
+    nothing an unauthenticated caller can schedule shares these workers.
+
+    The pool ALSO carries the bound. The admission semaphore alone could not:
+    when an awaiting task is cancelled its slot is released immediately (it has
+    to be, or a verification cancelled while still queued would strand the slot
+    forever), while the worker it started keeps running — so under a flood of
+    cancellations the number of scrypt derivations actually running at once
+    drifted well above the configured maximum. ``max_workers`` is not
+    releasable by anything the caller does, so the real bound now holds under
+    cancellation. The semaphore keeps its other job: non-queuing ADMISSION, so
+    a saturated verifier sheds with 429 before scheduling any scrypt at all.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        pending = loop.run_in_executor(app.state.auth_pool, func, *args)
+    except RuntimeError as exc:
+        # The pool has been shut down: this request arrived during or after
+        # teardown. To every caller here that is the credential store being
+        # momentarily unusable — the same class as a locked database — so it
+        # is re-raised as something their existing handling already covers,
+        # rather than escaping as an unhandled 500. Submission is SYNCHRONOUS,
+        # so this catches only the submit; a RuntimeError raised inside `func`
+        # surfaces at the await below and is deliberately left alone.
+        raise CredentialPoolClosed(str(exc)) from None
+    return await pending
+
+
 async def _require_active_device(
     request: Request, device: Device, *, serve_on_store_error: bool = False
 ) -> None:
@@ -363,10 +425,12 @@ async def _require_active_device(
     (a real revocation) still rejects with 401.
     """
     try:
-        active = await asyncio.to_thread(
-            request.app.state.device_store.is_active, device.device_id
+        active = await _in_credential_pool(
+            request.app,
+            request.app.state.device_store.is_active,
+            device.device_id,
         )
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         # A transient store failure on the POST-auth re-check (database is
         # locked, a disk I/O error) is infrastructure, not a credential
         # rejection: answering 401 here would tell a valid device to re-pair.
@@ -404,7 +468,7 @@ async def authenticated_device(
     slots = request.app.state.auth_slots
     token = presented.credentials.strip()
     if not slots.acquire(blocking=False):
-        # The bounded verification executor is full. Shed load HERE, before
+        # The bounded verification pool is full. Shed load HERE, before
         # scheduling another expensive scrypt derivation: an unauthenticated
         # caller must not be able to make the credential check itself the load,
         # and queuing these requests behind the semaphore would do exactly
@@ -418,14 +482,14 @@ async def authenticated_device(
         raise ApiError(ERROR_RATE_LIMITED)
     # The slot is owned by THIS coroutine and released here, on the loop, not
     # inside the worker: if the awaiting task is cancelled (time budget, client
-    # disconnect) while the to_thread job is still QUEUED on a saturated
-    # executor, the worker never runs — so a worker-side release would leak the
-    # slot permanently and wedge every later request into 429. store.authenticate
-    # touches no shared lock, so releasing while a started worker finishes only
-    # relaxes the bound briefly; it never double-releases or strands a slot.
+    # disconnect) while the verification job is still QUEUED, the worker never
+    # runs — so a worker-side release would leak the slot permanently and wedge
+    # every later request into 429. Releasing early does relax the ADMISSION
+    # count while a started worker finishes; the pool's max_workers is what
+    # actually bounds concurrent derivations, and that cannot be released.
     try:
-        device = await asyncio.to_thread(store.authenticate, token)
-    except (sqlite3.Error, OSError):
+        device = await _in_credential_pool(request.app, store.authenticate, token)
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         # The verification READ itself failed (database is locked, a disk I/O
         # error). That is the store being momentarily unusable, not the
         # credential being wrong — answer 503 rather than telling a valid device
@@ -466,8 +530,10 @@ async def authenticated_device(
     # transient store failure on this write is infrastructure, not a credential
     # problem, so it becomes 503 rather than a misleading unauthorized/500.
     try:
-        updated = await asyncio.to_thread(store.record_use, device.device_id)
-    except (sqlite3.Error, OSError):
+        updated = await _in_credential_pool(
+            request.app, store.record_use, device.device_id
+        )
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         LOGGER.warning(
             "credential store error on admission path=%s request_id=%s",
             request.url.path,
@@ -531,10 +597,39 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        closer = getattr(app.state.translator, "aclose", None)
-        if closer is not None:
-            await closer()
+        # A pool is created in create_app so an application that never runs a
+        # lifespan (the OpenAPI renderer, in-process tests) still has one — but
+        # shutdown() is PERMANENT, so the pool cannot also be per-application.
+        # An app started twice (two sequential TestClient contexts, an
+        # embedding that cycles the ASGI lifespan) would reach a dead executor
+        # and answer every credentialed request with a 500. Each cycle gets its
+        # own; the one being replaced may have started workers (an app driven
+        # through ASGITransport with no lifespan uses it), and is ended without
+        # waiting because startup must not block on a join.
+        previous = getattr(app.state, "auth_pool", None)
+        app.state.auth_pool = _new_credential_pool(resolved.auth_max_concurrency)
+        if previous is not None:
+            previous.shutdown(wait=False, cancel_futures=True)
+        # try/finally, not a bare yield: asynccontextmanager THROWS into the
+        # generator when the surrounding context exits with an exception, so a
+        # server that fails during its lifespan would otherwise skip teardown
+        # entirely and leave the pool's worker threads (and their SQLite
+        # handles) to the interpreter's atexit hook. The pool shutdown is
+        # nested in its own finally so a translator that raises on close cannot
+        # take it with it.
+        try:
+            yield
+        finally:
+            closer = getattr(app.state.translator, "aclose", None)
+            try:
+                if closer is not None:
+                    await closer()
+            finally:
+                # Drop anything still queued and join the workers that already
+                # started, off the loop so the shutdown does not block it.
+                await asyncio.to_thread(
+                    app.state.auth_pool.shutdown, True, cancel_futures=True
+                )
 
     app = FastAPI(
         title="wuwaterm API",
@@ -561,7 +656,14 @@ def create_app(
         limit=resolved.rate_limit_per_minute
     )
     app.state.llm_budget = LlmCallBudget(resolved.llm_calls_per_minute)
+    # Two halves of one mechanism, both sized by auth_max_concurrency:
+    # `auth_slots` decides ADMISSION without queuing (full -> 429, and no
+    # scrypt is ever scheduled), `auth_pool` is the BOUND on how many
+    # credential-store calls actually run at once. See _in_credential_pool for
+    # why neither alone is enough. Threads are created on demand, so an app
+    # that never authenticates never starts one.
     app.state.auth_slots = threading.BoundedSemaphore(resolved.auth_max_concurrency)
+    app.state.auth_pool = _new_credential_pool(resolved.auth_max_concurrency)
 
     # Added last == outermost: the request id wraps everything, so even a
     # failure produced by an inner middleware carries it. The body read and the

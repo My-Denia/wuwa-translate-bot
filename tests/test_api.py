@@ -7,10 +7,12 @@ same duck-typed style as the bot tests.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -864,10 +866,17 @@ def test_routing_failures_use_the_stable_envelope(
 
 
 def test_fresh_credential_store_answers_401_not_an_error(tmp_path, sample_db):
-    """A first install has no devices.db; that is a rejection, not a crash."""
-    settings = build_settings(tmp_path, sample_db)
-    app = create_app(settings, device_store=DeviceStore(settings.device_db_path))
-    assert not settings.device_db_path.exists()
+    """A first install has an EMPTY devices.db; that is a rejection, not a crash.
+
+    The store is created ONCE, at startup (``cli._serve`` calls ``initialize``),
+    which is what this test now models. It used to be created by the request
+    path itself; see
+    ``test_a_missing_credential_store_is_never_created_by_a_request`` for what a
+    genuinely missing store answers, and why it must not be 401.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    assert store.path.exists()
+    assert store.list_devices() == []
 
     response = run(
         call(
@@ -1305,16 +1314,26 @@ def test_a_corrupt_store_is_a_service_unavailable_not_a_rejection(tmp_path, samp
 
 
 def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_db):
-    """The bound is held inside the worker thread, so it cannot be stranded."""
+    """A request cancelled mid-verification leaves the service usable.
+
+    The admission slot is released on the loop, so it comes back immediately;
+    the worker that was already started keeps running on the bounded credential
+    pool and finishes on its own. Both have to recover, or one cancelled
+    request would wedge every later one.
+    """
     app, store = build_client_app(
         tmp_path, sample_db, auth_max_concurrency=1, request_timeout_seconds=1.0
     )
     _, token = issue_device(store, "owner desktop")
     real = DeviceStore.authenticate
+    worker_finished = threading.Event()
 
     def slow(self, presented):
-        time.sleep(3.0)
-        return real(self, presented)
+        try:
+            time.sleep(3.0)
+            return real(self, presented)
+        finally:
+            worker_finished.set()
 
     DeviceStore.authenticate = slow
     try:
@@ -1331,9 +1350,8 @@ def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_
         DeviceStore.authenticate = real
 
     assert timed_out.status_code == 504
-    # The worker always runs to completion, so once it finishes the slot is
-    # free again. Without the worker-thread bound it would stay stranded and
-    # every later request would time out waiting for it.
+    # The slot is released on the loop, so it is already free here. Without
+    # that release it would stay stranded and every later request would 429.
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if app.state.auth_slots.acquire(blocking=False):
@@ -1342,6 +1360,11 @@ def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_
         time.sleep(0.05)
     else:  # pragma: no cover - only on a real leak
         raise AssertionError("verification slot was never released")
+
+    # The started worker is not joined by the loop it was submitted from (it
+    # lives on this app's own credential pool, not the default executor), so
+    # wait for it before measuring recovery rather than racing its 3s sleep.
+    assert worker_finished.wait(15.0), "the verification worker never finished"
 
     recovered = run(
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
@@ -1354,11 +1377,11 @@ def test_admission_slot_is_released_if_verification_is_cancelled_before_it_runs(
 ):
     """The admission slot must be released on the loop, not only in the worker.
 
-    If the to_thread verification job is cancelled while still QUEUED on a
-    saturated executor, the worker never runs — so releasing only inside the
-    worker would leak the slot permanently and wedge every later request into
-    429. Here `to_thread` is cancelled before the worker callable runs, exactly
-    that case, and the slot must still be reacquirable afterwards.
+    If the verification job is cancelled while still QUEUED on a saturated
+    pool, the worker never runs — so releasing only inside the worker would
+    leak the slot permanently and wedge every later request into 429. Here the
+    submission seam is cancelled before the worker callable runs, exactly that
+    case, and the slot must still be reacquirable afterwards.
     """
     from fastapi.security import HTTPAuthorizationCredentials
 
@@ -1379,11 +1402,11 @@ def test_admission_slot_is_released_if_verification_is_cancelled_before_it_runs(
             self.url = _Url()
             self.state = _State()
 
-    async def cancel_before_worker(func, *args, **kwargs):
+    async def cancel_before_worker(app, func, *args):
         # The awaiting task is cancelled before the queued worker starts.
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(appmod.asyncio, "to_thread", cancel_before_worker)
+    monkeypatch.setattr(appmod, "_in_credential_pool", cancel_before_worker)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     async def scenario():
@@ -1669,13 +1692,15 @@ def test_is_active_propagates_a_transient_store_error(tmp_path):
     def boom(self):
         raise sqlite3.OperationalError("database is locked")
 
-    real = DeviceStore._connect
-    DeviceStore._connect = boom
+    # The request path reads through a read-only connection, so that is the
+    # seam a transient failure arrives on.
+    real = DeviceStore._connect_readonly
+    DeviceStore._connect_readonly = boom
     try:
         with pytest.raises(sqlite3.OperationalError):
             store.is_active(device.device_id)
     finally:
-        DeviceStore._connect = real
+        DeviceStore._connect_readonly = real
 
 
 def test_a_transient_recheck_store_error_is_503_not_401(tmp_path, sample_db):
@@ -1838,3 +1863,553 @@ def test_a_locked_store_on_the_auth_read_is_503_a_wrong_secret_is_401(
 
     assert rejected.status_code == 401
     assert rejected.json()["error"]["code"] == "unauthorized"
+
+
+# --------------------------------------------------------------------------
+# Second hardening pass (safety re-check N1/N2/N9 + delta audit): the request
+# path never writes to the credential store, the verification bound holds
+# under cancellation and cannot be starved by unauthenticated traffic, and the
+# --port override is validated like the environment variable it overrides.
+# --------------------------------------------------------------------------
+
+
+def test_a_missing_credential_store_is_never_created_by_a_request(tmp_path, sample_db):
+    """An unauthenticated request must not be able to WRITE the credential store.
+
+    `authenticate()` said READ ONLY and then called `initialize()`: mkdir, a
+    write-mode connect, a journal pragma and DDL, on every request. Two
+    consequences, both real: an unauthenticated caller wrote to the credential
+    store (and contended with a concurrent `revoke()`), and a store an operator
+    had DELETED as an emergency revocation was silently recreated by the very
+    next unauthenticated request.
+
+    A missing store is now the store being unusable — 503, the existing
+    store-unavailable path — and not a credential rejection (401), which would
+    tell a valid device to re-pair over an infrastructure fault.
+    """
+    import sqlite3
+
+    store_path = tmp_path / "deep" / "nested" / "devices.db"
+    settings = build_settings(tmp_path, sample_db, device_db_path=store_path)
+    store = DeviceStore(store_path, guard_legacy_default=False)
+    app = create_app(settings, device_store=store)
+    assert not (tmp_path / "deep").exists()
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.deadbeef.%s" % ("x" * 40)),
+        )
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
+    # Nothing was created: not the directory tree, not the database.
+    assert not (tmp_path / "deep").exists()
+
+    # The store object itself is read-only on this path, not just the endpoint.
+    with pytest.raises(sqlite3.Error):
+        store.authenticate("wtd1.deadbeef.%s" % ("x" * 40))
+    assert not (tmp_path / "deep").exists()
+
+
+def test_deleting_the_store_is_a_revocation_the_request_path_cannot_undo(
+    tmp_path, sample_db
+):
+    """Deleting devices.db is the bluntest revocation an operator has.
+
+    It has to stay deleted. Previously the next request re-created an empty
+    store, so the emergency measure lasted exactly until the next
+    unauthenticated caller. Now every later request answers 503 and the file
+    stays gone.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    served = run(
+        call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
+    )
+    assert served.status_code == 200
+
+    for suffix in ("", "-wal", "-shm"):
+        store.path.with_name(store.path.name + suffix).unlink(missing_ok=True)
+    assert not store.path.exists()
+
+    for _ in range(3):
+        refused = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+        assert refused.status_code == 503
+        assert refused.json()["error"]["code"] == "internal"
+        assert not store.path.exists(), "the request path recreated the store"
+
+
+def test_unauthenticated_probes_cannot_shed_a_valid_credential(tmp_path, sample_db):
+    """/readyz is unauthenticated and used to share the credential pool.
+
+    Every blocking call went to asyncio's process-wide DEFAULT executor, and
+    the admission slot was held from before submission until the awaiting
+    coroutine resumed — so QUEUING occupied a slot. Two unauthenticated
+    /readyz probes were therefore enough to make the owner's own valid token
+    answer 429: the slots were held by verifications that had not started and
+    could not start.
+
+    Here the shared pool is deliberately narrow (2 workers) and both workers
+    are held by unauthenticated probes for the whole run. Valid-token requests
+    are issued one at a time, each given a chance to complete its
+    verification, and NONE of them may be shed.
+    """
+    import wuwaterm_api.app as appmod
+
+    app, store = build_client_app(
+        tmp_path,
+        sample_db,
+        auth_max_concurrency=2,
+        request_timeout_seconds=60.0,
+    )
+    _, token = issue_device(store, "owner desktop")
+
+    hold = threading.Event()
+    running = []
+    verified = []
+
+    def blocking_probe(service):
+        running.append(1)
+        hold.wait(30.0)
+        return True
+
+    real = DeviceStore.authenticate
+
+    def counted(self, presented):
+        try:
+            return real(self, presented)
+        finally:
+            verified.append(1)
+
+    original_probe = appmod.probe_database
+    appmod.probe_database = blocking_probe
+    DeviceStore.authenticate = counted
+    try:
+
+        async def scenario():
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            )
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test", timeout=60.0
+            ) as client:
+                probes = [asyncio.create_task(client.get("/readyz")) for _ in range(2)]
+                # Both shared workers must really be occupied before the
+                # measurement starts, or the test proves nothing.
+                deadline = time.monotonic() + 10.0
+                while len(running) < 2 and time.monotonic() < deadline:
+                    await asyncio.sleep(0.02)
+                assert len(running) == 2, "the shared pool was never saturated"
+
+                pending = []
+                for _ in range(4):
+                    before = len(verified)
+                    pending.append(
+                        asyncio.create_task(
+                            client.post(
+                                "/v1/translations",
+                                json={"text": "声骸"},
+                                headers=bearer(token),
+                            )
+                        )
+                    )
+                    # Give this verification a chance to run. On the shared
+                    # pool it never can, so the next request finds the slot
+                    # still held and is shed.
+                    step = time.monotonic() + 3.0
+                    while len(verified) == before and time.monotonic() < step:
+                        await asyncio.sleep(0.02)
+
+                hold.set()
+                responses = await asyncio.gather(*pending)
+                await asyncio.gather(*probes)
+                return [item.status_code for item in responses]
+
+        statuses = run(scenario())
+    finally:
+        hold.set()
+        appmod.probe_database = original_probe
+        DeviceStore.authenticate = real
+
+    assert 429 not in statuses, statuses
+    assert statuses == [200, 200, 200, 200], statuses
+
+
+def test_the_verification_bound_holds_under_a_flood_of_cancellations(
+    tmp_path, sample_db
+):
+    """The configured maximum must bound concurrent scrypt, not just admission.
+
+    The admission slot has to be released on the loop (a verification cancelled
+    while still queued would otherwise strand it forever), but the worker it
+    started keeps running — so with a shared, wide executor a flood of
+    cancellations let the number of derivations actually running at once drift
+    far above the configured maximum. A dedicated pool of exactly
+    `auth_max_concurrency` workers is not releasable by anything the caller
+    does, so the real bound holds.
+    """
+    import contextlib
+
+    app, store = build_client_app(
+        tmp_path, sample_db, auth_max_concurrency=1, request_timeout_seconds=60.0
+    )
+    _, token = issue_device(store, "owner desktop")
+    state = {"in_flight": 0, "peak": 0}
+    guard = threading.Lock()
+    real = DeviceStore.authenticate
+
+    def slow(self, presented):
+        with guard:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+        try:
+            time.sleep(1.0)
+            return real(self, presented)
+        finally:
+            with guard:
+                state["in_flight"] -= 1
+
+    DeviceStore.authenticate = slow
+    try:
+
+        async def flood():
+            # One loop for the whole flood: a fresh asyncio.run per request
+            # would JOIN the default executor between them and serialize the
+            # very overlap this measures. The CALLER abandons each request
+            # mid-verification, which is what a client disconnect looks like.
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test", timeout=60.0
+            ) as client:
+                for _ in range(8):
+                    task = asyncio.create_task(
+                        client.post(
+                            "/v1/translations",
+                            json={"text": "声骸"},
+                            headers=bearer(token),
+                        )
+                    )
+                    await asyncio.sleep(0.15)
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+
+        run(flood())
+        # Do not leave an abandoned verification running into the next test:
+        # this test's whole point is that a started worker outlives the request
+        # that scheduled it.
+        app.state.auth_pool.shutdown(wait=True)
+    finally:
+        DeviceStore.authenticate = real
+
+    # Non-vacuous: verification really ran, and never more than the bound.
+    # Each abandoned request releases its admission slot immediately (it must,
+    # or a cancel while queued would strand it), so without a pool of exactly
+    # this width the derivations pile up: 8 cancels 0.15s apart against a 1.0s
+    # verification overlapped 7 deep on the shared executor.
+    assert state["peak"] == 1, state["peak"]
+
+
+def test_serve_validates_the_port_override_like_the_environment(monkeypatch, tmp_path):
+    """--port used to bypass the range WUWATERM_API_PORT is held to.
+
+    999999 and -1 reached uvicorn and escaped as a raw socket error rather than
+    a config error, and 0 was silently discarded by `args.port or settings.port`
+    — the operator asked for one port and got another with no diagnostic. Same
+    class the bind guard closed for --host.
+    """
+    import types
+
+    import wuwaterm_api.cli as cli
+
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    monkeypatch.delenv("WUWATERM_API_PORT", raising=False)
+    monkeypatch.delenv("WUWATERM_API_BIND", raising=False)
+
+    called = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    for bad in ("999999", "-1", "0", "65536"):
+        called.clear()
+        assert cli.main(["serve", "--port", bad]) == 2, bad
+        assert "kw" not in called, bad  # never reached uvicorn.run
+
+    # A valid override is honoured, and honoured explicitly.
+    captured = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    monkeypatch.setattr(
+        cli, "DeviceStore", lambda *a, **k: types.SimpleNamespace(initialize=lambda: None)
+    )
+    monkeypatch.setattr("wuwaterm_api.app.create_app", lambda *a, **k: object())
+
+    assert cli.main(["serve", "--port", "9001"]) == 0
+    assert captured["port"] == 9001
+
+
+def test_a_refused_env_bind_is_recoverable_with_a_host_override(
+    monkeypatch, tmp_path, caplog
+):
+    """The escape hatch has to keep working, and has to be visible.
+
+    A machine whose environment carries a bind this service refuses is
+    recovered with `--host 127.0.0.1`: the override is validated on its own and
+    the configured value is never consulted, so a bad WUWATERM_API_BIND cannot
+    keep the service down. Nothing pinned that combination before, so a
+    refactor could have removed the recovery path with a green suite.
+
+    The ignored setting is logged at WARNING — silently discarding a configured
+    bind is how an operator ends up believing the environment took effect — but
+    the raw value is NOT echoed, the same rule the rest of settings follows.
+    """
+    import logging
+    import types
+
+    import wuwaterm_api.cli as cli
+
+    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+    monkeypatch.delenv("WUWATERM_API_PORT", raising=False)
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    captured = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    monkeypatch.setattr(
+        cli, "DeviceStore", lambda *a, **k: types.SimpleNamespace(initialize=lambda: None)
+    )
+    monkeypatch.setattr("wuwaterm_api.app.create_app", lambda *a, **k: object())
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm_api"):
+        code = cli.main(["serve", "--host", "127.0.0.1"])
+
+    assert code == 0
+    assert captured["host"] == "127.0.0.1"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("overrides the configured API bind" in item for item in messages), messages
+    assert not any("0.0.0.0" in item for item in messages), messages
+
+
+def test_the_credential_pool_is_shut_down_with_the_app(tmp_path, sample_db):
+    """The dedicated pool is the app's, so the app has to end it.
+
+    A pool that outlives its application keeps worker threads (and whatever
+    they hold) alive until the interpreter's own atexit hook runs. Shutdown
+    drops anything still queued and joins what already started.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    async def scenario():
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test"
+            ) as client:
+                response = await client.post(
+                    "/v1/translations",
+                    json={"text": "声骸"},
+                    headers=bearer(token),
+                )
+            assert response.status_code == 200
+            # Usable while the app is running.
+            assert app.state.auth_pool.submit(lambda: 7).result(timeout=10) == 7
+
+    run(scenario())
+
+    # And refuses new work once the app has shut down.
+    with pytest.raises(RuntimeError):
+        app.state.auth_pool.submit(lambda: None)
+
+
+def test_a_second_lifespan_cycle_gets_a_live_credential_pool(tmp_path, sample_db):
+    """`shutdown()` is permanent, so the pool cannot be created once and
+    shut down once per application OBJECT.
+
+    An app started twice — two sequential TestClient contexts, an embedding
+    that cycles the ASGI lifespan, a supervisor that restarts the app in
+    process — reached a dead executor on the second cycle and answered every
+    credentialed request with `RuntimeError: cannot schedule new futures after
+    shutdown` (a 500). Each cycle gets its own pool.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    async def cycle():
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test"
+            ) as client:
+                response = await client.post(
+                    "/v1/translations",
+                    json={"text": "声骸"},
+                    headers=bearer(token),
+                )
+            return response.status_code
+
+    assert run(cycle()) == 200
+    assert run(cycle()) == 200
+
+
+def test_an_old_shape_store_rejects_every_device_id_for_the_same_work(tmp_path):
+    """The legacy-store rejection must not become a device-id oracle.
+
+    Tolerating an old-shape row on the request path (so removing `initialize()`
+    from it does not turn a legacy store into a distinguishable error class)
+    introduced one: a token naming an EXISTING device returned immediately while
+    a token naming an absent one still paid for the compensating derivation.
+    That timing difference is exactly what the dummy derivation exists to hide.
+    Counted rather than timed, so the assertion is about the work itself.
+    """
+    import sqlite3
+
+    import wuwaterm_api.auth as authmod
+
+    path = tmp_path / "devices.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO devices VALUES ('cafebabe')")
+    store = DeviceStore(path, guard_legacy_default=False)
+
+    calls = []
+    real = authmod._derive
+    # Count only work done on THIS thread: a verification worker left running
+    # by an earlier test (the cancel-flood one deliberately abandons requests
+    # mid-derivation) would otherwise land inside the measurement window.
+    here = threading.get_ident()
+
+    def counted(secret, salt):
+        if threading.get_ident() == here:
+            calls.append(1)
+        return real(secret, salt)
+
+    authmod._derive = counted
+    try:
+        known = store.authenticate("wtd1.cafebabe.%s" % ("x" * 40))
+        after_known = len(calls)
+        unknown = store.authenticate("wtd1.0badc0de.%s" % ("x" * 40))
+        after_unknown = len(calls)
+    finally:
+        authmod._derive = real
+
+    # Both are refusals, and both cost the same derivation.
+    assert known is None and unknown is None
+    assert after_known == 1, after_known
+    assert after_unknown - after_known == 1, (after_known, after_unknown)
+
+
+def test_an_old_shape_store_with_wrong_typed_columns_is_a_rejection_not_a_500(
+    tmp_path, sample_db
+):
+    """A verifier column that exists but holds TEXT or NULL is still legacy.
+
+    `bytes(row["salt"])` raises TypeError there, which is in neither
+    `sqlite3.Error` nor `OSError`, so it would have escaped as an unhandled 500
+    instead of the uniform rejection the request path promises.
+    """
+    import sqlite3
+
+    settings = build_settings(tmp_path, sample_db)
+    settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.device_db_path) as conn:
+        conn.execute(
+            "CREATE TABLE devices (device_id TEXT PRIMARY KEY, device_name TEXT,"
+            " salt TEXT, token_hash TEXT, scopes TEXT, created_at TEXT,"
+            " revoked_at TEXT, last_used_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO devices VALUES ('cafebabe', 'old', 'not-bytes', NULL,"
+            " 'translate,meta', '2020-01-01T00:00:00+00:00', NULL, NULL)"
+        )
+    app = create_app(
+        settings,
+        device_store=DeviceStore(settings.device_db_path, guard_legacy_default=False),
+    )
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.cafebabe.%s" % ("x" * 40)),
+        )
+    )
+
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_the_credential_pool_is_shut_down_even_when_the_translator_raises(
+    tmp_path, sample_db
+):
+    """Teardown must not be skippable.
+
+    `asynccontextmanager` throws into the generator at the `yield` when the
+    surrounding context exits with an exception, and a translator that raises on
+    close would take the pool shutdown with it — leaving worker threads and
+    their SQLite handles to the interpreter's atexit hook.
+    """
+
+    class _AngryTranslator:
+        async def aclose(self):
+            raise RuntimeError("translator close failed")
+
+    settings = build_settings(tmp_path, sample_db)
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    app = create_app(settings, device_store=store, translator=_AngryTranslator())
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="translator close failed"):
+            async with app.router.lifespan_context(app):
+                pass
+
+    run(scenario())
+
+    with pytest.raises(RuntimeError):
+        app.state.auth_pool.submit(lambda: None)
+
+
+def test_a_request_after_teardown_is_503_not_an_unhandled_500(tmp_path, sample_db):
+    """A shut-down pool is one more way for the store to be unusable.
+
+    `run_in_executor` on a shut-down executor raises RuntimeError, which is in
+    neither `sqlite3.Error` nor `OSError` — so a request landing during or after
+    teardown became an unhandled 500: an infrastructure fault dressed as a bug,
+    which is the one thing this whole change is removing.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    app.state.auth_pool.shutdown(wait=True)
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "internal"
