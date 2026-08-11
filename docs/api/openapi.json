@@ -434,7 +434,7 @@
                 }
               }
             },
-            "description": "Translation unavailable"
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
           },
           "504": {
             "content": {
@@ -564,7 +564,7 @@
                 }
               }
             },
-            "description": "Translation unavailable"
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
           },
           "504": {
             "content": {
@@ -691,7 +691,7 @@
                 }
               }
             },
-            "description": "Translation unavailable"
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
           },
           "504": {
             "content": {

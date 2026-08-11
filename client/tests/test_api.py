@@ -584,3 +584,86 @@ def test_an_absolute_url_is_refused_before_the_token_is_attached() -> None:
     # The request never left the client, so the token went nowhere.
     assert seen["called"] is False
     assert seen["authorization"] is None
+
+
+def test_a_url_carrying_embedded_credentials_is_refused_before_the_token() -> None:
+    """Userinfo on the target REPLACES the device token; the guard must refuse.
+
+    A url like `https://user:pw@<the configured host>/v1/x` keeps the scheme,
+    the host and the port, so the origin check passed - and httpx reports
+    `netloc` WITHOUT the userinfo, so rebuilding the origin from it hid the
+    credentials from the confidentiality check too. httpx then derived a `Basic`
+    credential from that userinfo and OVERWROTE the `Authorization` header,
+    sending an attacker-chosen credential instead of the device token, to the
+    right host, over https, with nothing to see in the logs.
+
+    The token provider must not even be CONSULTED: refusal precedes header
+    construction, which is what makes it a transport guarantee rather than a
+    header-scrubbing exercise.
+    """
+    seen = {"called": False, "authorization": None}
+    tokens = {"reads": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, json=_translation_payload())
+
+    def token_provider() -> str:
+        tokens["reads"] += 1
+        return "wtd1.abc123.supersecret"
+
+    client = _client(handler, token_provider=token_provider)
+
+    async def scenario() -> ClientError:
+        try:
+            await client._request("GET", "https://attacker:pw@test/v1/terms")
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    error = asyncio.run(scenario())
+
+    assert error.code == errors.ERROR_INSECURE_ENDPOINT
+    assert seen["called"] is False
+    assert seen["authorization"] is None
+    # Refused BEFORE the credential was read, not after.
+    assert tokens["reads"] == 0
+
+
+def test_the_request_guard_and_the_constructor_apply_one_policy() -> None:
+    """Everything the constructor refuses in an address, the guard refuses in a
+    target. The layer closest to the network must not be the permissive one.
+
+    The guard's docstring claimed this before it was true: it applied only the
+    confidentiality half while the constructor applied all of `usable_base_url`.
+    """
+    async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be sent")
+
+    client = _client(handler)
+
+    async def scenario() -> list[str]:
+        codes = []
+        for target in (
+            "https://user:pw@test/v1/terms",  # embedded credentials
+            "https://user@test/v1/terms",  # username only
+            "https://test/v1/terms?q=x",  # query on the target
+            "https://test/v1/terms#frag",  # fragment on the target
+            "http://test/v1/terms",  # scheme downgrade, off-loopback
+            "https://test:8443/v1/terms",  # different port
+        ):
+            try:
+                await client._request("GET", target)
+            except ClientError as exc:
+                codes.append(exc.code)
+            else:  # pragma: no cover - only on a guard regression
+                codes.append(f"SENT {target}")
+        await client.aclose()
+        return codes
+
+    codes = asyncio.run(scenario())
+
+    assert codes == [errors.ERROR_INSECURE_ENDPOINT] * 6, codes

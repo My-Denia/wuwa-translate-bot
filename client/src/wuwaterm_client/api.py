@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .config import ClientConfig, endpoint_is_confidential, usable_base_url
+from .config import ClientConfig, usable_base_url
 from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
@@ -349,22 +349,34 @@ class ApiClient:
         client passes a fixed relative path, but the Bearer credential is
         attached unconditionally a line below, so an absolute (or otherwise
         origin-changing) url would put the token on the wire to another host,
-        in the clear if it were plain http. The resolved origin is therefore
-        re-validated against the SAME confidential-endpoint policy the
-        constructor used, and required to be the origin the client was built
-        for, BEFORE any header is attached. The base origin was already proven
-        confidential at construction; this stops a per-request url from moving
-        the target off it.
+        in the clear if it were plain http. The resolved target is therefore
+        re-validated against the SAME policy the constructor used - the whole
+        of `usable_base_url`, not the narrower confidentiality rule inside it -
+        and required to be the origin the client was built for, BEFORE any
+        header is attached.
+
+        Embedded credentials are why the two must be the same policy. The guard
+        used to apply only `endpoint_is_confidential`, and it read the origin
+        back out of `netloc`, which httpx reports WITHOUT the userinfo. So
+        `https://user:pw@same-host/v1/x` passed every check here - same scheme,
+        same host, same port, an https origin - and then httpx turned that
+        userinfo into a `Basic` credential and OVERWROTE the `Authorization`
+        header a line below, silently replacing the device token with someone
+        else's. The userinfo is now refused explicitly, on the target, where it
+        is still visible; a query or fragment goes with it, because the
+        constructor refuses those on an address too.
         """
         target = self._client.base_url.join(url)
         base = self._client.base_url
+        if target.userinfo or target.query or target.fragment:
+            raise ClientError(ERROR_INSECURE_ENDPOINT)
         same_origin = (
             target.scheme == base.scheme
             and target.host == base.host
             and target.port == base.port
         )
         origin = f"{target.scheme}://{target.netloc.decode('ascii')}"
-        if not same_origin or not endpoint_is_confidential(origin):
+        if not same_origin or not usable_base_url(origin):
             raise ClientError(ERROR_INSECURE_ENDPOINT)
 
     async def _request(

@@ -20,10 +20,46 @@ device id, which is not a secret, and the token is simply
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 from .auth import DeviceStore, DeviceStoreError
-from .settings import ApiConfigError, ApiSettings, validate_loopback_bind
+from .settings import (
+    ApiConfigError,
+    ApiSettings,
+    validate_loopback_bind,
+    validate_port,
+)
+
+LOGGER = logging.getLogger("wuwaterm_api")
+
+
+def _resolve_bind(args: argparse.Namespace, settings: ApiSettings) -> str:
+    """The address to bind, with --host as a deliberate escape hatch.
+
+    `--host` is how an operator recovers a machine whose environment carries a
+    bind this service refuses: the override is validated on its own and the
+    configured value is never consulted, so a bad `WUWATERM_API_BIND` cannot
+    keep the service down. That escape hatch is only safe because the override
+    goes through the SAME guard, so it can relax nothing.
+
+    When the override replaces a value that would have been REFUSED, say so at
+    WARNING: silently ignoring a configured bind is how an operator ends up
+    believing the environment took effect. The offending value is not echoed —
+    settings never reflect a raw environment value back.
+    """
+    if args.host is None:
+        return validate_loopback_bind(settings.bind)
+    host = validate_loopback_bind(args.host)
+    try:
+        validate_loopback_bind(settings.bind)
+    except ApiConfigError:
+        LOGGER.warning(
+            "--host overrides the configured API bind, which is not a numeric "
+            "loopback address and would have been refused; the configured "
+            "value is ignored for this run"
+        )
+    return host
 
 
 def _serve(args: argparse.Namespace) -> int:
@@ -38,7 +74,11 @@ def _serve(args: argparse.Namespace) -> int:
     # bind and a --host override go through the same check, before anything is
     # built or bound, so the override cannot reopen the exposure the setting
     # closes. ApiConfigError propagates to main() -> exit 2.
-    host = validate_loopback_bind(args.host if args.host is not None else settings.bind)
+    host = _resolve_bind(args, settings)
+    # Same class for the port: the environment variable is range-checked in
+    # settings, so the override is too. `args.port or settings.port` used to
+    # send 999999 and -1 straight to uvicorn and to swallow an explicit 0.
+    port = settings.port if args.port is None else validate_port(args.port)
     store = DeviceStore(
         settings.device_db_path,
         guard_legacy_default=settings.device_db_is_default,
@@ -48,7 +88,7 @@ def _serve(args: argparse.Namespace) -> int:
     uvicorn.run(
         app,
         host=host,
-        port=args.port or settings.port,
+        port=port,
         log_level=args.log_level,
         access_log=False,
     )

@@ -70,6 +70,30 @@ def validate_loopback_bind(value: str) -> str:
     return str(address)
 
 
+MIN_PORT = 1
+MAX_PORT = 65535
+
+
+def validate_port(value: int) -> int:
+    """Return ``value`` if it is a usable TCP port, else raise ApiConfigError.
+
+    ``WUWATERM_API_PORT`` is range-checked by ``_env_int``; the ``--port``
+    override used to skip that check entirely and go straight to uvicorn, so
+    ``--port 999999`` and ``--port -1`` reached the socket layer and escaped as
+    a raw error instead of a config error, and ``--port 0`` was silently
+    discarded by an ``or`` that treats it as "unset". The override now goes
+    through the same range, so every route into the port setting agrees and
+    0 is REFUSED explicitly rather than ignored: an operator who asks for an
+    ephemeral port is asking for an address the client cannot be configured
+    for, and answering "no" is better than answering 8787.
+    """
+    if not MIN_PORT <= value <= MAX_PORT:
+        raise ApiConfigError(
+            f"the API port must be between {MIN_PORT} and {MAX_PORT}"
+        )
+    return value
+
+
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_DB_PATH = "data/terms.db"
@@ -165,7 +189,7 @@ class ApiSettings:
             bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
             or DEFAULT_BIND,
             port=_env_int(
-                "WUWATERM_API_PORT", DEFAULT_PORT, minimum=1, maximum=65535
+                "WUWATERM_API_PORT", DEFAULT_PORT, minimum=MIN_PORT, maximum=MAX_PORT
             ),
             llm_timeout_seconds=_env_float(
                 "WUWATERM_API_LLM_TIMEOUT_SECONDS",
