@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-08-05
+- Context amended by [ADR 0009](0009-http-api-adapter.md): an HTTP adapter
+  now serves the same pipeline beside Telegram. The layering rule below is
+  unchanged and is what made a second adapter possible.
 
 ## Context
 

@@ -58,7 +58,7 @@ services:
       # surface is an ingress decision that belongs in this file, in review,
       # not in an environment file an operator edits in a hurry.
       WUWATERM_API_BIND: 127.0.0.1
-      WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8787}
+      WUWATERM_API_PORT: ${WUWATERM_API_PORT:-8788}
       # The bot's credentials are not this process' business. env_file carries
       # the shared model settings; these are blanked so a compromise or a stray
       # environment dump here cannot yield the chat token or owner id.

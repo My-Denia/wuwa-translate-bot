@@ -21,7 +21,7 @@ import httpx
 APP_DIR_NAME = "WuwaTerm"
 CONFIG_FILE_NAME = "config.json"
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8787"
+DEFAULT_BASE_URL = "http://127.0.0.1:8788"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
 DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 60.0
 # The same bounds the Settings dialog enforces. A hand-edited config file is

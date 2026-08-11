@@ -783,7 +783,7 @@ def test_settings_defaults_bind_to_loopback(monkeypatch):
     settings = ApiSettings.from_env()
 
     assert settings.bind == "127.0.0.1"
-    assert settings.port == 8787
+    assert settings.port == 8788
     # Deliberately smaller than the bot's budget; the documented worst case is
     # the SUM of the per-process budgets, never a shared global one.
     assert settings.llm_max_concurrency == 2

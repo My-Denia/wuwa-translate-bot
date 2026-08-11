@@ -10,6 +10,7 @@
 .venv/bin/python scripts/check_repo_hygiene.py
 .venv/bin/python scripts/check_non_goals.py
 .venv/bin/python scripts/check_architecture_boundaries.py
+.venv/bin/python scripts/check_api_contract.py
 .venv/bin/python -m pytest
 uv lock --check
 ```
@@ -37,7 +38,27 @@ handler E2E still requires observing the bot's reply from Telegram.
 generated data, TextMap content, SQLite DB files, runtime settings, channel
 reply indexes, tokens, API keys, and real Telegram identifiers.
 `check_architecture_boundaries.py` guards forbidden import directions between
-presentation, domain, and builder modules (see [Architecture](architecture.md)).
+presentation, domain, and builder modules, and enforces the HTTP adapter's
+four-module import allowlist into `wuwaterm` (see
+[Architecture](architecture.md)).
+
+## Gates For The HTTP API And The Desktop Client
+
+| Gate | What it proves | Where it runs |
+|---|---|---|
+| `scripts/check_api_contract.py` | The committed `docs/api/openapi.json` still equals the document the application generates, and the product token pins hold in that JSON artifact (which the text scanner does not read). A route, model or error code cannot change without the published contract changing in the same commit | Offline command above; CI `pytest (py3.11)` / `pytest (py3.12)` jobs, before the suite |
+| `tests/test_client_transport_policy.py` | The desktop client cannot regress into reaching the service through the operator's administration channel, and certificate verification cannot be turned off by an edit anywhere in the client tree, the deploy scripts or this runbook. Text gates over the shipped client surface, `docs/deployment.md` and `deploy/*` | The repository `pytest` run — deliberately here rather than in the client suite, so it runs on every pull request without a Windows runner or the client's dependencies |
+| `client/.venv/Scripts/python.exe -m pytest` (in `client/`) | The client's own behaviour: transport refusals, the request-target guard, credential storage, cancellation, error rendering, and that every displayed string comes from the strings module | CI `desktop client build (windows)` job on `windows-latest` |
+| `client/build.ps1` | The one-folder PyInstaller artifact builds from the pinned spec and passes its own `--self-check`, and the build leaves nothing untracked in the working tree | Same CI job; the artifact is uploaded there |
+
+The client gates are split on purpose. Everything that can be checked by
+reading text runs in the main suite on Linux; only what genuinely needs Qt,
+`keyring` and a Windows toolchain runs on the Windows runner.
+
+Neither the API contract gate nor the client build proves anything about a
+deployed service. A request answered on the service host is evidence about the
+process; evidence about the published endpoint has to come from the client
+machine (see [Deployment](deployment.md)).
 
 ## Windows Reference
 

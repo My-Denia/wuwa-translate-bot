@@ -1,8 +1,9 @@
 # Architecture
 
-Maintainer entry for the **current** production Telegram translation bot
-(`wuwaterm`). Claims map to source, tests, deploy scripts, and Compose
-topology. This is not an aspirational redesign.
+Maintainer entry for the **current** system: a Telegram bot and an HTTP API
+serving one shared translation pipeline, plus a desktop client that consumes
+the API. Claims map to source, tests, deploy scripts, and Compose topology.
+This is not an aspirational redesign.
 
 Operational detail lives in sibling guides. Decision rationale lives in
 [ADRs](adr/). Automated import-direction and non-goal gates live under
@@ -11,28 +12,51 @@ Operational detail lives in sibling guides. Decision rationale lives in
 ## System context
 
 ```
-Telegram users / groups / linked discussion groups
-        │
-        │  Bot API (long polling getUpdates)
-        ▼
-┌───────────────────────────────────────────────┐
-│  Single runtime process (Compose: wuwaterm)   │
-│  presentation: bot.py, channel.py             │
-│  domain: lookup, sentence, normalize, models  │
-│  infra: settings JSON, reply index, SQLite RO │
-└───────────────┬───────────────┬───────────────┘
-                │               │
-                │ read-only     │ HTTP (optional)
-                ▼               ▼
-         data/terms.db    OpenAI-compatible LLM
-                ▲
-                │ promote only via deploy/vps-update.sh
-┌───────────────┴───────────────────────────────┐
-│  Builder jobs (Compose profile: builder)      │
-│  refresh-data → build-db → verify-*           │
-│  never holds runtime secrets (no env_file)    │
-└───────────────────────────────────────────────┘
+Telegram users / groups / linked discussion groups        owner's PC
+                  |                                      |
+                  | Bot API (long polling)               | https, cert verified
+                  v                                      v
++-----------------------------------+  +---------------------------------+
+| wuwaterm-bot (Compose service)    |  | reverse proxy already serving   |
+|  presentation: bot.py, channel.py |  | the operator's existing sites   |
++-----------------+-----------------+  +-----------------+---------------+
+                  |                                      | 127.0.0.1 (loopback)
+                  |                                      v
+                  |                    +---------------------------------+
+                  |                    | wuwaterm-api (Compose service)  |
+                  |                    |  presentation: wuwaterm_api/    |
+                  |                    +-----------------+---------------+
+                  |                                      |
+                  v                                      v
+      +----------------------------------------------------------------+
+      |  application layer   src/wuwaterm/application.py               |
+      |  dictionary-first pipeline, protocol-neutral, exactly once     |
+      +-----------------------------+----------------------------------+
+                                    |
+                  +-----------------+--------------------+
+                  v                                      v
+          data/terms.db (read-only)            OpenAI-compatible LLM
+                  ^
+                  | promote only via deploy/vps-update.sh
+      +------------+---------------------------------------------------+
+      |  Builder jobs (Compose profile: builder)                       |
+      |  refresh-data -> build-db -> verify-*                          |
+      |  never holds runtime secrets (no env_file)                     |
+      +----------------------------------------------------------------+
 ```
+
+Two presentation adapters, one application layer, one more consumer:
+
+| Surface | What it is | Where |
+|---------|------------|-------|
+| Telegram bot | Presentation adapter: commands, chat authorization, chat wording, markup | `src/wuwaterm/bot.py`, `channel.py` |
+| HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
+| Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
+
+The desktop client is deliberately outside the service: it renders answers the
+API produced, and every rule the API applies is applied whether the caller is
+that client or `curl`. See [ADR 0009](adr/0009-http-api-adapter.md) and
+[ADR 0011](adr/0011-pc-client-stack.md).
 
 ### Users and actors
 
@@ -42,36 +66,119 @@ Telegram users / groups / linked discussion groups
 | Group admins | `/tr` when chat is allowlisted (unless public mode) | `bot.py` `_is_authorized_group_sender`, `ChatSettings` |
 | Group members | `/tr` only when public mode is on for that chat | `settings.py` public map; `docs/telegram-behavior.md` |
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
-| Operator on VPS | Deploy, data refresh, Compose up/down | `deploy/vps-update.sh`, `docs/deployment.md` |
+| API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
+| Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
 ### External systems
 
 | System | Direction | Purpose |
 |--------|-----------|---------|
-| Telegram Bot API | Outbound long polling + send/edit/delete | Presentation only |
+| Telegram Bot API | Outbound long polling + send/edit/delete | Chat presentation only |
 | OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation after term lock |
+| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | The only intended API caller today |
 | GitHub game-data repos | Builder sparse checkout only | Source for `terms.db` (`data_source.py`, `constants.py` pins) |
-| Local Docker Compose host | Runtime + optional builder jobs | Supported single-host topology |
+| Local Docker Compose host | Runtime (two serving containers) + optional builder jobs | Supported single-host topology |
 
 ### Trust boundaries
 
-1. **Telegram update surface is untrusted input.** Command text, replied message
-   HTML, and channel posts are treated as data, not instructions
+1. **Telegram update surface is untrusted input.** Command text, replied
+   message HTML, and channel posts are treated as data, not instructions
    (`docs/privacy-and-llm.md`; sentence system prompt + HTML protect/restore).
-2. **Secrets stay outside the image and the builder.** Runtime gets
-   `TELEGRAM_BOT_TOKEN` / LLM keys via Compose `env_file`; builder has no
-   `env_file` (`deploy/docker-compose.yml`, `docs/deployment.md`).
-3. **Terminology DB is trusted after candidate verification**, then mounted
-   read-only at runtime (`/app/data:ro`). Promotion is owner-scripted, not
-   in-process self-update.
-4. **Mutable allowlist / reply-index state is local and private.** Paths under
-   `state/`; must not be committed (`scripts/check_repo_hygiene.py`).
-5. **No public HTTP admin or webhook listener.** Inbound control plane is the
-   Telegram Bot API only, plus operator SSH to the VPS.
+2. **The HTTP surface is untrusted input, and so is anything that has already
+   passed TLS.** The API's boundary is the API process, not the proxy in front
+   of it: the proxy proves the SERVER's identity to the client and proves
+   nothing about the client to the server. Every `/v1` route therefore requires
+   a device credential, bodies are size- and time-capped before a handler sees
+   them, and the request id is always minted server-side so a caller cannot
+   route its own input into the logs or a response
+   ([ADR 0012](adr/0012-client-transport-selection.md)).
+3. **The public HTTPS edge terminates outside this application.** A path route
+   on the operator's existing ingress forwards to the API's loopback port; the
+   API itself binds a numeric loopback literal and refuses anything else on the
+   only path that binds a socket (`validate_loopback_bind`, `cli._serve`). The
+   exposure is therefore removable by deleting one route, with the service
+   untouched.
+4. **Secrets stay outside the image and the builder.** Serving containers get
+   credentials via Compose `env_file`; the builder has no `env_file`
+   (`deploy/docker-compose.yml`, `docs/deployment.md`). The API container has
+   the bot's chat token, owner id and log-redaction key blanked; the model
+   credential is deliberately shared by both surfaces.
+5. **Terminology DB is trusted after candidate verification**, then mounted
+   read-only at runtime (`/app/data:ro`) by BOTH serving containers. Promotion
+   is owner-scripted, not in-process self-update.
+6. **Mutable state is local, private and not shared between the surfaces.**
+   The bot writes `state/`; the API writes `state-api/`, a SIBLING of it, so
+   the bot's read-write mount never covers the credential store. Neither is
+   committed (`scripts/check_repo_hygiene.py`).
+7. **The chat control plane is still the Bot API only.** Chat updates arrive
+   by long polling; nothing here registers a chat-side delivery endpoint
+   ([ADR 0003](adr/0003-long-polling-not-webhook.md), unchanged). Operator
+   shell access to the host is an administration channel and is never the
+   application's path to the service.
+
+## Identity model: two separate controls
+
+The system has two authorization mechanisms. They are separate by
+construction, and **neither can grant, extend or revoke the other**.
+
+| | Telegram | HTTP API |
+|---|---|---|
+| Principal | A Telegram user id, and a chat id | A device registered by the operator |
+| Owner authority | `OWNER_USER_ID` from the environment | none — there is no owner device, only devices |
+| Grant | `/authorize` adds a chat to the allowlist; `/public` opens a chat to its members | `wuwaterm-api device issue`, reading the secret from standard input |
+| Stored where | `state/chat_settings.json` (bot's writable mount) | `state-api/devices.db` (API's own mount) |
+| Stored what | Chat ids and flags | A salted scrypt verifier, scopes, timestamps — never a secret |
+| Withdraw | `/revoke` for a chat | `wuwaterm-api device revoke` stamps `revoked_at`; deleting the store file revokes everything |
+| Scope model | Per chat, plus owner-only commands | Per device: `translate`, `meta` |
+| Failure answer | Silent reject or a chat message | `401` unproven credential, `403` scope not granted, one envelope either way |
+
+Concretely: the owner's Telegram account confers no API access, an API device
+cannot use a Telegram command, revoking a device leaves every chat exactly as
+it was, and removing a chat from the allowlist leaves every device exactly as
+it was. Details in [ADR 0010](adr/0010-device-principal-authentication.md);
+the reason the network layer is not a third control is in
+[ADR 0012](adr/0012-client-transport-selection.md).
+
+## Cost topology: budgets are per process, and the worst case is their sum
+
+Each serving process has its OWN limiter objects, in its own memory. Nothing
+coordinates between them, and nothing in either process can observe the
+other's spend.
+
+| Process | Model concurrency | Model calls per minute | Per-caller limit |
+|---|---|---|---|
+| `wuwaterm-bot` | `WUWATERM_LLM_MAX_CONCURRENCY` (default 4) | `WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE` (default 60) bounds linked-channel work only; commands have no per-minute cap | per-chat request rate limiter |
+| `wuwaterm-api` | `WUWATERM_API_LLM_MAX_CONCURRENCY` (default 2) | `WUWATERM_API_LLM_CALLS_PER_MINUTE` (default 30) | per-device sliding-window rate limiter (default 30/min) |
+
+Read that table as follows, because the wording is the point:
+
+- **The worst case for the host and for the model account is the SUM.** With
+  the defaults, up to six model calls can be in flight at once — four from the
+  bot and two from the API. There is no configuration that makes six into
+  four.
+- **These counters are per process, never global.** They are in-memory objects
+  belonging to one container. A second copy of either process would have its
+  own counters and would double the ceiling; a restart resets them.
+- **No shared budget exists, deliberately.** Building one means a shared
+  durable store, a protocol for reserving and releasing a slot, and a failure
+  mode when that store is unavailable — real machinery for a single-owner
+  deployment with one model account and hand-sized traffic.
+
+What would make it worth building: a second human user or a second client
+machine; an observed breach of the model account's own limits or spend
+budget; or any topology with more than one instance of either surface. Until
+one of those is real, the honest description is the one above — two
+independent budgets whose worst case is their sum.
+
+The API's other limits are its own too, and none of them are model budgets:
+a per-request time budget, a request body cap enforced by streaming rather
+than by the declared length, and a bounded credential-verification pool with
+non-queuing admission (a saturated verifier sheds `429` rather than queueing
+work an unauthenticated caller can schedule).
 
 ## Telegram as presentation layer
 
-Telegram is the UI and transport, not the domain model.
+Telegram is one UI and transport, not the domain model.
 
 | Presentation | Responsibility | Module |
 |--------------|----------------|--------|
@@ -83,19 +190,38 @@ Domain (`lookup`, `normalize`, `models`, term-lock policy in `sentence`) and
 storage (`db` reads, `settings`, `channel_reply_index`) must remain usable from
 CLI and tests without a live Telegram session. See [ADR 0001](adr/0001-telegram-as-presentation-layer.md).
 
+## HTTP API as presentation layer
+
+The API adapter is the same kind of thing on the other side of the
+application layer: routes, authentication, limits and rendering, with no
+translation logic of its own.
+
+| Presentation | Responsibility | Module |
+|--------------|----------------|--------|
+| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
+| Middleware | Server-minted request id, body size/arrival cap, request time budget | `src/wuwaterm_api/app.py` |
+| Identity | Device store, scopes, revocation, credential pool | `src/wuwaterm_api/auth.py` |
+| Error vocabulary | Enumerated codes and their HTTP statuses | `src/wuwaterm_api/errors.py` |
+| Operator entry | `serve`, and `device issue` / `list` / `revoke` | `src/wuwaterm_api/cli.py` |
+
+The contract is published at `docs/api/openapi.json` and drift-gated by
+`scripts/check_api_contract.py`. Answers are plain text: the adapter injects
+no markup translator, so chat markup cannot reach this contract even by
+accident.
+
 ## Component map and dependency direction
 
 Intended layers (modular monolith — [ADR 0002](adr/0002-modular-monolith.md)):
 
 ```
-cli (bootstrap)
-  ├─► bot / channel          presentation (python-telegram-bot)
-  │     ├─► application                                          shared pipeline
-  │     │     └─► lookup / sentence / normalize / translation_policy   domain
-  │     ├─► settings / channel_reply_* / channel_runtime         local infra
-  │     └─► telegram_html / telegram_text                        presentation helpers
-  ├─► builder / data_source / db (write) / build_pinyin           builder path
-  └─► lookup / sentence / db (read)                              offline CLI
+cli (bootstrap)                    wuwaterm_api (separate top-level package)
+  |-> bot / channel                  |-> app / auth / errors / settings / cli
+  |     |-> application  <-----------'        (allowlisted imports only)
+  |     |     |-> lookup / sentence / normalize / translation_policy   domain
+  |     |-> settings / channel_reply_* / channel_runtime         local infra
+  |     |-> telegram_html / telegram_text                 presentation helpers
+  |-> builder / data_source / db (write) / build_pinyin          builder path
+  |-> lookup / sentence / db (read)                              offline CLI
 ```
 
 | Layer | Modules | Must not import |
@@ -104,35 +230,56 @@ cli (bootstrap)
 | Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
-| Presentation | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
+| Presentation (chat) | `bot`, `channel`, `telegram_html`, `telegram_text` | `builder`, `data_source`, `build_pinyin`, bootstrap `cli` |
+| Presentation (HTTP) | `wuwaterm_api.*` | everything in `wuwaterm` except the four allowlisted modules below; the Telegram SDK |
 | Local state | `settings`, `channel_reply_index`, `channel_reply_schema`, `channel_runtime` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Storage | `db` | presentation / Telegram SDK; `build_pinyin` only inside write helpers (lazy) |
 | Builder | `builder`, `data_source`, `build_pinyin` | `bot`, `channel` |
 | Bootstrap | `cli` | may wire both runtime and builder entrypoints |
 
+**The API import allowlist.** `src/wuwaterm_api` may import exactly four
+modules from `wuwaterm`: `application`, `models`, `translation_policy`,
+`logging_utils`. Anything else — `bot`, `channel`, `lookup`, `sentence`, `db`,
+the markup helpers, the builder modules, the `wuwaterm` package root — fails
+`scripts/check_architecture_boundaries.py`. That list is the machine-checkable
+form of "the API cannot bypass the shared pipeline": an adapter that could
+reach `lookup` or `sentence` directly could grow a second, divergent pipeline
+without anyone noticing, which is exactly what a second surface is most likely
+to do.
+
 The application layer holds the dictionary-first pipeline exactly once
 (prepare → direction → exact hit → trusted fuzzy hit → length gate → chunked,
-term-locked LLM call) and knows nothing about Telegram. The two adapter-shaped
-steps are injected by the caller: a markup translator (Telegram HTML) and a
-text splitter (Telegram's UTF-16 aware splitter). Adapters receive a
-`TranslationOutcome` (`kind`, `text`, direction, `dictionary_miss`,
-`error_code`) and own their own wording, so protocol-specific notices never
-leak downward.
+term-locked LLM call) and knows nothing about Telegram or HTTP. The two
+adapter-shaped steps are injected by the caller: a markup translator and a
+text splitter. The bot injects both (Telegram HTML, the UTF-16 aware
+splitter); the API injects neither, which is why its answers are plain text by
+construction. Adapters receive a `TranslationOutcome` (`kind`, `text`,
+direction, `dictionary_miss`, `error_code`) and own their own wording, so
+protocol-specific notices never leak downward — the API renders enumerated
+codes, the bot renders chat sentences, from the same outcome.
 
-Observed edges (static imports among `src/wuwaterm/*.py`):
+Observed edges (static imports among shipped modules):
 
 - `bot` → `channel` (handler registration + flood retry); `channel` → `bot`
   only under `TYPE_CHECKING` for `BotConfig` (no runtime cycle).
 - `bot` → `application` (shared pipeline + rate limiter); `application` imports
   no presentation module and no Telegram SDK, enforced by the boundary guard.
+- `wuwaterm_api` → `wuwaterm.application` (pipeline, translator factory,
+  lookup entry points, error codes) from `app.py` and `errors.py`, and
+  `wuwaterm.logging_utils` (`redact_id`) from `app.py`. Those two modules are
+  the whole of what the package imports from `wuwaterm` today; the guard
+  permits two more (`models`, `translation_policy`) and nothing beyond the
+  four.
 - `sentence` → `lookup`, `normalize`, `telegram_html`, `httpx`.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
-- Runtime image refuses `build-db` and excludes builder tooling
+- Runtime image refuses `build-db` and excludes builder tooling, while
+  serving BOTH surfaces from the same image
   (`tests/test_runtime_imports.py`, CI `deploy-boundary` job).
 
-Automated enforcement: `scripts/check_architecture_boundaries.py` plus existing
-`scripts/check_non_goals.py` and `tests/test_runtime_imports.py`.
+Automated enforcement: `scripts/check_architecture_boundaries.py` plus
+`scripts/check_non_goals.py`, `scripts/check_api_contract.py` and
+`tests/test_runtime_imports.py`.
 
 ### Current coupling (honest)
 
@@ -143,6 +290,7 @@ Automated enforcement: `scripts/check_architecture_boundaries.py` plus existing
 | `channel` TYPE_CHECKING-imports `BotConfig` from `bot` | Low aesthetic cycle | Runtime import graph is one-way; extraction deferred unless a check requires it |
 | `sentence` → `telegram_html` | Accepted | HTML term-lock is part of Telegram-HTML translation fidelity |
 | `db` top-level imports `data_source.SourceProvenance` | Mild storage/builder type coupling | Provenance metadata is shared with build path |
+| Both serving processes share one model credential | Deliberate | A second key would carry the same power and double what must be rotated; the isolation that matters (chat identity, owner id, redaction key) is enforced per container |
 
 ## Request flows
 
@@ -163,6 +311,31 @@ Evidence: `bot.py` `create_application`, `_translation_command`,
 7. Length gate (`translation_policy` / config limits).
 8. `SentenceTranslator`: lock DB terms → optional LLM → restore placeholders.
 9. `reply_to_user` (HTML with plain fallback; flood retry via channel helper).
+
+### `POST /v1/translations`
+
+Evidence: `src/wuwaterm_api/app.py` `create_translation`,
+`authenticated_device`, `_require_active_device`; `tests/test_api.py`.
+
+1. Request id minted server-side; an inbound `X-Request-Id` is ignored.
+2. Body read incrementally against the size cap and its own arrival deadline;
+   the whole request runs under the request time budget.
+3. **Admission**: non-queuing slot acquire (full → `429`), credential verified
+   on the dedicated credential pool, per-device rate limit, then `record_use`
+   — whose row count is itself the check that the device is still live.
+4. **Scope**: `translate` required, else `403`.
+5. Re-check the device before the model call, so a revocation since admission
+   spends no budget.
+6. The shared pipeline runs: exact hit → fuzzy hit → length gate → term-locked
+   model call, with the dictionary stage offloaded to a worker thread.
+7. With no model configured, this surface refuses (`llm_unavailable`) rather
+   than returning source text as though it had been translated — the chat
+   fallback would be misleading over HTTP.
+8. Re-check the device again before returning; the work is already paid for
+   here, so a transient store error serves the answer while a definitive
+   revocation still refuses.
+9. Render `kind`, `text`, `direction`, `dictionary_miss`, `request_id` — plain
+   text, no markup.
 
 ### Linked-channel auto-translation
 
@@ -185,25 +358,28 @@ Channel path is always auto-detected direction; it does not accept command
 
 | Path | Why |
 |------|-----|
-| Exact dictionary hit (`lookup_exact` + early returns in `translate_query*`, channel exact branch) | Official string from SQLite |
+| Exact dictionary hit (`lookup_exact` + early returns in the shared pipeline, channel exact branch) | Official string from SQLite |
 | Fuzzy dictionary short answers (`_fuzzy_dictionary_answer`) | DB-only |
+| `GET /v1/terms`, `GET /v1/meta`, `/healthz`, `/readyz` | Dictionary reads and probes only |
 | Invalid leading `--to` | Usage reply only |
-| Unauthorized / rate-limited / silent reject | No translation work |
+| Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
-| LLM env incomplete | `SentenceTranslator` restores locked placeholders / fails closed without inventing terms (`sentence.py` `_llm_configured`) |
+| LLM env incomplete | The bot restores locked placeholders without inventing terms; the API refuses with `llm_unavailable` |
 | `/about`, `/status`, authorize/revoke/public membership housekeeping | No translation |
 
 ## Data model: immutable vs mutable
 
 | Kind | Location | Mutability | Notes |
 |------|----------|------------|-------|
-| Terminology SQLite | `data/terms.db` (Compose: `/app/data` **ro**) | Immutable at runtime | Built offline; promoted by `deploy/vps-update.sh` ([ADR 0004](adr/0004-sqlite-terminology-data.md), [ADR 0008](adr/0008-candidate-verification-and-transactional-deployment.md)) |
+| Terminology SQLite | `data/terms.db` (Compose: `/app/data` **ro** in both serving containers) | Immutable at runtime | Built offline; promoted by `deploy/vps-update.sh` ([ADR 0004](adr/0004-sqlite-terminology-data.md), [ADR 0008](adr/0008-candidate-verification-and-transactional-deployment.md)) |
 | Chat allowlist + public mode | `state/chat_settings.json` | Mutable | Process `RLock` + `fcntl`/`msvcrt` file lock ([ADR 0005](adr/0005-file-backed-single-instance-state.md)) |
 | Channel reply index | `state/channel_replies.json` | Mutable | Atomic replace + asyncio edit locks |
+| Device credential store | `state-api/devices.db` | Mutable, operator-written | Sibling of `state/`; created by the operator path only, never by a request ([ADR 0010](adr/0010-device-principal-authentication.md)) |
 | Channel admission / budgets | `ChannelRuntime` in process memory | Mutable, lost on restart | Not shared across processes |
-| Rate limiters, admin cache | Process memory in `bot.py` | Mutable, lost on restart | |
+| Rate limiters, model budgets, credential pool | Process memory, per serving process | Mutable, lost on restart | Never shared between bot and API |
 | Source pins / profile | `constants.py` + DB metadata | Immutable until rebuild | |
-| Secrets | Host `.env` mode `600` | Operator-managed | Not in image; not in builder |
+| Secrets | Host `.env` mode `600` | Operator-managed | Not in image; not in builder; narrowed per container |
+| Client base address | `%APPDATA%/WuwaTerm/config.json` on the owner's PC | Mutable, non-secret | The device token is never written here — it lives in the OS credential store |
 
 ## Single-instance assumptions
 
@@ -211,21 +387,31 @@ Supported topology (also [supported vs unsupported](#supported-vs-unsupported-to
 
 - One Bot token (`TELEGRAM_BOT_TOKEN`).
 - One active long-polling runtime container (`container_name: wuwaterm-bot`).
+- One API container (`container_name: wuwaterm-api`) bound to loopback.
 - One Compose host; `network_mode: host`.
 - Builder is profile-gated one-shot work, not a second always-on replica.
 
 ### Dual-instance failure modes (unsupported)
 
-If two processes share the same token and state files:
+If two bot processes share the same token and state files:
 
-1. **getUpdates contention** — Telegram effectively serves one consumer; offsets
-   race and updates are lost or double-handled.
+1. **getUpdates contention** — Telegram effectively serves one consumer;
+   offsets race and updates are lost or double-handled.
 2. **Allowlist / public split-brain** — file locks reduce corrupt JSON writes
    but not logical divergence between two writers with interleaved intent.
 3. **Double channel work** — `ChannelRuntime` budgets and in-memory dedup are
    process-local → duplicate LLM spend and duplicate replies.
 4. **Reply-index races** — claim/edit windows can conflict across processes even
    when individual file replaces are atomic.
+
+If two API processes share the same credential store and port:
+
+5. **Doubled budgets** — model concurrency, per-minute caps, per-device rate
+   limits and the credential pool are per process, so two instances double
+   every ceiling this document states.
+6. **Port ownership** — both bind the same loopback port; the second fails to
+   start, or an operator "fixes" it by binding something else, which is the
+   one thing the bind guard exists to prevent.
 
 Docs and ops must not treat multi-instance as HA. File locks are durability
 aids for a single writer, not a cluster protocol.
@@ -235,10 +421,12 @@ aids for a single writer, not a cluster protocol.
 | Dependency | Failure mode | User-visible / recovery |
 |------------|--------------|-------------------------|
 | Telegram API | NetworkError, RetryAfter, BadRequest | Flood retry helper; HTML parse fallback to plain; missing reply target handling; process keeps polling (`restart: unless-stopped`) |
-| LLM HTTP | Timeout, 4xx/5xx, empty content | `LLMTranslationError` mapped to safe user message; placeholders not left raw when restore fails closed |
-| SQLite terms DB | Missing/corrupt file | Startup/use fails when `TermService` cannot read; deploy keeps previous DB on failed promotion |
+| LLM HTTP | Timeout, 4xx/5xx, empty content | Bot: `LLMTranslationError` mapped to a safe user message. API: enumerated code (`llm_unavailable`, `llm_budget_exhausted`) in the standard envelope |
+| SQLite terms DB | Missing/corrupt file | Startup/use fails when `TermService` cannot read; `/readyz` answers `503`; deploy keeps previous DB on failed promotion |
+| Credential store | Missing, deleted, locked, corrupt | `503` (store unusable), never `401` — a valid device is never told to re-pair because of a database hiccup |
 | Filesystem state | Disk full, lock errors, durability errors | Settings/reply-index raise typed errors; startup migration refuses overwrite of existing targets |
-| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps |
+| Ingress route | Proxy down, route removed | The client renders an offline or timeout state; the service keeps running on loopback and the bot is unaffected |
+| Docker / Compose | Image/build failure, wrong revision | `vps-update.sh` aborts before stop, or rolls back image + DB + pointer after failed post-promote steps, for both serving containers |
 
 No automatic cross-region failover. Recovery is restart, restore from
 timestamped backups under `data/deployment-backups`, or re-run transactional
@@ -255,11 +443,13 @@ From repo scripts and docs only (no live VPS mutation required to understand):
 3. **Verify** — `verify-db`, seed/exact/idempotent scripts as wired in
    `deploy/vps-update.sh` and `docs/validation.md`.
 4. **Build immutable runtime image** labeled with source commit revision.
-5. **Promote** — stop runtime, swap DB, start exact image, smoke
-   (`scripts/deploy_smoke.py` with diagnostic send disabled in updater path),
-   write immutable `.deployments/<commit>.json`, atomic `.deploy_commit`.
+5. **Promote** — stop both serving containers, swap DB, start the exact image,
+   smoke (`scripts/deploy_smoke.py` with diagnostic send disabled in updater
+   path, plus an in-container readiness probe for the API), write immutable
+   `.deployments/<commit>.json`, atomic `.deploy_commit`.
 6. **Rollback** — on post-promote failure restore previous DB, rollback image
-   tag, and pointer (`deploy/vps-update.sh` `rollback_on_failure`).
+   tag, and pointer (`deploy/vps-update.sh` `rollback_on_failure`), restarting
+   only the surfaces that were running before.
 
 Runtime vs builder separation: [ADR 0007](adr/0007-runtime-builder-separation.md).
 Dictionary-before-LLM: [ADR 0006](adr/0006-dictionary-first-before-llm.md).
@@ -271,10 +461,13 @@ likely product/ops changes:
 
 | Extension | Real trigger (examples) |
 |-----------|-------------------------|
+| Private overlay network instead of the public route | Evidence of unwanted traffic on the route; a decision that the surface should not be public; a second machine that also needs access ([ADR 0012](adr/0012-client-transport-selection.md)) |
+| Multi-user / a principals table | A second human user, or per-user quotas. Today the device id IS the principal id |
+| Shared cross-process LLM budget | A second client machine, an observed breach of the model account's limits, or more than one instance of either surface — see [cost topology](#cost-topology-budgets-are-per-process-and-the-worst-case-is-their-sum) |
 | Web admin | Operators need bulk allowlist/audit without Telegram commands; multi-owner RBAC |
-| Multi-instance / external state | Sustained load exceeds one process **and** Telegram delivery model is redesigned (e.g. webhook + shared lease); shared durable admission for channels |
+| Multi-instance / external state | Sustained load exceeds one process **and** the delivery model is redesigned; shared durable admission for channels |
 | Postgres / Redis / queue | State or job volume exceeds single-host JSON/SQLite operational comfort; multi-host deploy becomes a requirement |
-| API gateway | Non-Telegram clients become first-class; auth model expands beyond Bot token + chat admin |
+| Public or third-party API clients | Anyone but the owner needs access, which changes rate limits, abuse handling and the identity model together |
 
 Until those triggers are real, adding the machinery would be ceremony.
 
@@ -282,11 +475,12 @@ Until those triggers are real, adding the machinery would be ceremony.
 
 | Supported | Unsupported |
 |-----------|-------------|
-| Single VPS, Compose, long polling | Webhook HA, multi-replica polling |
+| Single VPS, Compose, bot long polling | Chat delivery endpoints, multi-replica polling, HA |
+| One API container bound to loopback, published by a path route on the operator's existing HTTPS ingress | The API binding a public interface, a second open port, or answering `/v1` without a device credential |
 | Single bot token, one active runtime | Multi-token shard, active-active |
-| `data/terms.db` RO + `state/*.json` RW | Runtime writing game TextMaps or self-promoting DB |
-| Builder one-shot jobs | Always-on builder with runtime secrets |
-| Dictionary-first + optional LLM | LLM-only glossary, secondary name-map layer, inline mode |
+| `data/terms.db` RO in both serving containers + `state/`, `state-api/` RW to their own owners | Runtime writing game TextMaps or self-promoting DB; either surface writing the other's state |
+| One owner, devices registered by the operator | Multi-tenant accounts, self-service registration, public sign-up |
+| Dictionary-first + optional LLM, plain text over HTTP | LLM-only glossary, secondary name-map layer, chat markup in the HTTP contract |
 | Owner-gated deploy from clean `HEAD == origin/main` | Unverified candidate copy over live DB |
 
 ## Related documents

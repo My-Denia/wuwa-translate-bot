@@ -667,3 +667,61 @@ def test_the_request_guard_and_the_constructor_apply_one_policy() -> None:
     codes = asyncio.run(scenario())
 
     assert codes == [errors.ERROR_INSECURE_ENDPOINT] * 6, codes
+
+
+def test_a_base_address_with_a_path_prefix_keeps_it_on_every_route() -> None:
+    """The deployed topology publishes this service under a path prefix.
+
+    `docs/deployment.md` routes the API at `<site>/wuwaterm-api`, so the base
+    address the owner configures carries a path and every request has to land
+    under it. That is httpx's `_merge_url` behaviour rather than RFC-3986
+    joining, and the two disagree: `URL.join` on an absolute path DROPS the
+    base path. The client's origin guard uses `join`, which stays correct here
+    because it only compares scheme, host and port - but nothing pinned what
+    the outgoing request actually looks like, and a 404 against a real reverse
+    proxy is an expensive way to find that out. This asserts the sent URL for
+    all three routes, with and without a trailing slash on the base.
+    """
+    sent: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(str(request.url))
+        if request.url.path.endswith("/v1/translations"):
+            return httpx.Response(200, json=_translation_payload())
+        if request.url.path.endswith("/v1/terms"):
+            return httpx.Response(
+                200, json={"query": "x", "matches": [], "request_id": "r"}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "service_version": "0",
+                "api_version": "v1",
+                "schema_version": None,
+                "source_profile": None,
+                "source_commit": None,
+                "term_count": 0,
+                "llm_configured": False,
+                "request_id": "r",
+            },
+        )
+
+    async def scenario(base: str) -> None:
+        client = ApiClient(
+            base,
+            token_provider=lambda: "wtd1.abc123.supersecret",
+            _test_transport=httpx.MockTransport(handler),
+        )
+        await client.translate("test text")
+        await client.lookup_terms("x")
+        await client.get_meta()
+        await client.aclose()
+
+    asyncio.run(scenario("https://site.example/wuwaterm-api"))
+    asyncio.run(scenario("https://site.example/wuwaterm-api/"))
+
+    assert sent == [
+        "https://site.example/wuwaterm-api/v1/translations",
+        "https://site.example/wuwaterm-api/v1/terms?q=x",
+        "https://site.example/wuwaterm-api/v1/meta",
+    ] * 2, sent

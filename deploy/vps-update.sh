@@ -410,7 +410,7 @@ WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T \
 # wrong path, and publishing a deployment in that state is exactly what this
 # check exists to prevent.
 WUWATERM_RUNTIME_IMAGE="$new_image_ref" compose exec -T wuwaterm-api \
-  python -c "import os, sys, time, urllib.error, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8787'); url = 'http://127.0.0.1:' + port + '/readyz'; deadline = time.monotonic() + 60.0; last = 'no attempt'
+  python -c "import os, sys, time, urllib.error, urllib.request; port = os.environ.get('WUWATERM_API_PORT', '8788'); url = 'http://127.0.0.1:' + port + '/readyz'; deadline = time.monotonic() + 60.0; last = 'no attempt'
 while time.monotonic() < deadline:
     try:
         response = urllib.request.urlopen(url, timeout=5)
