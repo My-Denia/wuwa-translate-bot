@@ -564,6 +564,48 @@ def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
     assert len(fields(message)["route"]) <= 100
 
 
+def test_a_padded_target_cannot_spend_the_event_loop_on_being_examined(
+    tmp_path, sample_db, monkeypatch
+):
+    """The credential check must not become the thing worth attacking.
+
+    Decoding nested escapes to a fixed point removes one layer per pass and
+    rescans the rest each time, so reading the WHOLE target is quadratic — an
+    unauthenticated caller could then buy tens of milliseconds of event loop per
+    request with a padded path. The check reads only the prefix that could reach
+    the record, which is also the only part a reader could recover anything
+    from.
+
+    The assertion counts decode passes rather than milliseconds: the work is
+    what is bounded, and a wall-clock threshold on a shared runner measures the
+    runner.
+    """
+    from wuwaterm_api import app as app_module
+
+    passes: list[int] = []
+    real_unquote = app_module.unquote
+
+    def counting_unquote(value):
+        passes.append(len(value))
+        return real_unquote(value)
+
+    monkeypatch.setattr(app_module, "unquote", counting_unquote)
+    app, _ = build_app(tmp_path, sample_db)
+    # As long as a request line is realistically allowed to be, and nested so
+    # that every layer costs a full pass over what is left.
+    padded = "/%" + "25" * 8000 + "77td1.x.y"
+
+    with captured_records() as captured:
+        response = run(call(app, "GET", padded))
+
+    assert response.status_code == 404
+    assert len(captured.completions) == 1
+    # Both the number of passes and the size of each are bounded by the prefix
+    # that could be written, not by what the caller sent.
+    assert len(passes) <= app_module.RAW_TARGET_LOG_LIMIT, len(passes)
+    assert max(passes) <= app_module.RAW_TARGET_LOG_LIMIT, max(passes)
+
+
 def test_a_rendered_target_is_bounded_by_what_is_written_not_what_arrived(
     tmp_path, sample_db
 ):

@@ -324,13 +324,16 @@ def _log_field(value: object, limit: int) -> str:
 
 
 def _could_carry_a_credential(path: str) -> bool:
-    """Whether a decoded target could contain a token of this service.
+    """Whether a target could contain a token of this service.
 
     Decoded to a fixed point first. The server percent-decodes once, so a
     caller (or a proxy tidying a URL) that encodes the scheme twice hands us
     `%77td1.` — which a literal search does not see, while one more decode
     recovers a working credential from the recorded line. Matching the family
     rather than one spelling of it is the whole point.
+
+    Called with the prefix that could be WRITTEN, never the whole target: see
+    _route_label for why that is both sufficient and necessary.
     """
     seen = path
     while True:
@@ -358,7 +361,15 @@ def _route_label(request: Request) -> str:
     if isinstance(template, str) and template:
         return template
     path = str(request.scope.get("path", ""))
-    if _could_carry_a_credential(path):
+    # The credential check reads only the prefix that can reach the record, and
+    # that is exactly right in both directions. SUFFICIENT: what a reader can
+    # recover from the rendered value is this prefix and nothing else, so a
+    # credential outside it is already unrecoverable from the log. NECESSARY:
+    # decoding the whole target is quadratic — one nested layer is removed per
+    # pass while every pass rescans the rest — and this runs on the event loop
+    # for an unauthenticated request, so a padded target would be a way to stall
+    # the process rather than merely to be logged oddly.
+    if _could_carry_a_credential(path[:RAW_TARGET_LOG_LIMIT]):
         return CREDENTIAL_SHAPED_TARGET
     return _log_field(path, RAW_TARGET_LOG_LIMIT)
 
