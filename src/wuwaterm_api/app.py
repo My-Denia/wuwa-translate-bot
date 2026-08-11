@@ -84,10 +84,10 @@ TERM_QUERY_MAX_LENGTH = 200
 # --------------------------------------------------------------------------
 # Log field rendering
 #
-# A log line is an output channel with the same rules as a response body. Two
-# of the values in a request record are chosen by the caller — the target and
-# the method — and they are read by an operator in a terminal and by whatever
-# collects the stream, so they are rendered rather than interpolated.
+# A log line is an output channel with the same rules as a response body. One
+# value in a request record is chosen by the caller — the target of a request
+# that matched no route — and it is read by an operator in a terminal and by
+# whatever collects the stream, so it is rendered rather than interpolated.
 #
 # Two distinct hazards, and `repr` alone covers only the first:
 #
@@ -116,7 +116,16 @@ TERM_QUERY_MAX_LENGTH = 200
 _PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@+-]+")
 # Source characters of a raw target that are considered at all.
 RAW_TARGET_LOG_LIMIT = 80
-METHOD_LOG_LIMIT = 16
+# The method is recorded from a CLOSED set rather than as it arrived. A method
+# is a caller-chosen token, and this service publishes exactly GET and POST —
+# every other verb is already refused with a 405, so the exact spelling of one
+# has no operational value, while a free-text field that a caller fills is a
+# place for anything at all to end up. Recording membership instead of content
+# leaves `route`'s fallback as the only caller-influenced value in the record.
+KNOWN_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"}
+)
+OTHER_METHOD = "other"
 # And a cap on what is actually WRITTEN. Clipping the source alone does not
 # bound the line: one character can render as ten (`\U000e0001`), so eighty
 # source characters can become eight hundred and push the fields that matter
@@ -150,10 +159,12 @@ _CREDENTIAL_MARKER = f"{TOKEN_SCHEME}."
 CREDENTIAL_SHAPED_TARGET = "credential-shaped"
 # Percent-decoding is the one transform between the wire and the decoded path,
 # and the server applies exactly one round of it — so `%2577td1.` arrives as
-# `%77td1.` and a literal search for the marker misses it. Decoding to a fixed
-# point closes the family rather than the spelling; the bound is there because
-# nothing guarantees the input converges.
-_MAX_DECODE_ROUNDS = 4
+# `%77td1.` and a literal search for the marker misses it. The check therefore
+# decodes to a FIXED POINT, with no round cap: a cap is just a deeper spelling
+# to encode past, which is the failure this whole check exists to stop
+# repeating. Termination is structural rather than budgeted — a decode that
+# changes anything replaces at least one three-character escape with one
+# character, so the string strictly shortens until it stops changing.
 
 
 def service_version() -> str:
@@ -322,14 +333,13 @@ def _could_carry_a_credential(path: str) -> bool:
     rather than one spelling of it is the whole point.
     """
     seen = path
-    for _ in range(_MAX_DECODE_ROUNDS):
+    while True:
         if _CREDENTIAL_MARKER in seen.lower():
             return True
         decoded = unquote(seen)
         if decoded == seen:
             return False
         seen = decoded
-    return _CREDENTIAL_MARKER in seen.lower()
 
 
 def _route_label(request: Request) -> str:
@@ -351,6 +361,12 @@ def _route_label(request: Request) -> str:
     if _could_carry_a_credential(path):
         return CREDENTIAL_SHAPED_TARGET
     return _log_field(path, RAW_TARGET_LOG_LIMIT)
+
+
+def _method_label(request: Request) -> str:
+    """The request method when it is one, else that it was not one of them."""
+    method = str(request.method)
+    return method if method in KNOWN_METHODS else OTHER_METHOD
 
 
 def _log_principal(request: Request) -> str:
@@ -387,7 +403,7 @@ def _log_request_completed(
         "request complete request_id=%s method=%s route=%s status=%s "
         "duration_ms=%.1f device=%s",
         request_id,
-        _log_field(request.method, METHOD_LOG_LIMIT),
+        _method_label(request),
         _route_label(request),
         status_code,
         elapsed_seconds * 1000.0,

@@ -297,7 +297,7 @@ of which covers quite everything:
 | Response | In the JSON body | In `X-Request-Id` |
 |---|---|---|
 | a `/v1` answer an endpoint returned normally | yes | yes |
-| a handled failure's envelope (`400`, `401`, `403`, `404`, `405`, `413`, `429`, `503`, `504`) | yes | yes |
+| a handled failure's envelope (`400`, `401`, `403`, `404`, `405`, `413`, `422`, `429`, `503`, `504`) | yes | yes |
 | an **unhandled** failure's envelope (`500`) | yes | **no** — assembled after the middleware that attaches the header has unwound |
 | `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
 | `/openapi.json` | **no** — that body is the schema | yes |
@@ -319,12 +319,20 @@ its identifiers — and it is `-` when no credential was verified. It is stable
 for a given device, so requests can be attributed to one machine without the
 log ever holding the device id itself.
 
-What a record deliberately does not contain: no credential, no raw device id,
-no submitted or translated text, no query string, and no request target as the
-caller wrote it. A target that could itself be a credential — a client or proxy
-that puts a token in the URL instead of the `Authorization` header — is not
-recorded at all, only a digest of itself, so repeats still group without the
-secret being written down.
+What a record deliberately does not contain: no credential, no identifier of an
+authenticated device other than the redacted `device` field, no submitted or
+translated text, no query string, and no request target as the caller wrote it.
+A target that could itself be a credential — a client or proxy that puts a token
+in the URL instead of the `Authorization` header — is replaced entirely by the
+literal `credential-shaped`, with no digest of it either: the digest would be
+unkeyed here (this container blanks the redaction secret, which belongs to the
+bot) and a leaked line would then be a cheap way to test guesses at the secret.
+
+`method` is likewise recorded by membership, not content: the standard verb when
+it is one, `other` when it is not. This service publishes `GET` and `POST` and
+refuses everything else, so the exact spelling of a refused verb tells an
+operator nothing, and the field cannot be used to write caller-chosen text into
+the log.
 A request that matched a route is named by its **route template**, and an
 unsupported method on a known route counts as matched — the framework picks the
 route first and then refuses the method, so a `405` is named by its template

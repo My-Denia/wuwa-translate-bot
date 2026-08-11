@@ -608,6 +608,30 @@ def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
     assert record["method"] == "DELETE"
 
 
+def test_a_method_outside_the_known_set_is_recorded_by_membership_only(
+    tmp_path, sample_db
+):
+    """The method field records which verb arrived, not what a caller wrote.
+
+    A method is a caller-chosen token, so a free-text field fed from it is a
+    place for anything to end up — a device id, for instance, which is sixteen
+    hexadecimal characters and would pass every escaping rule untouched. This
+    service publishes GET and POST and refuses everything else, so the exact
+    spelling of a refused verb carries nothing an operator can act on, and the
+    field records membership instead of content.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+    device_shaped = "0123456789abcdef"
+
+    with captured_records() as captured:
+        response = run(call(app, device_shaped, "/healthz"))
+
+    assert response.status_code == 405
+    record = fields(captured.completions[0])
+    assert record["method"] == "other"
+    assert device_shaped not in "\n".join(captured.messages)
+
+
 def test_an_unmatched_target_cannot_forge_a_field_in_the_record(
     tmp_path, sample_db
 ):
@@ -663,11 +687,15 @@ def test_a_credential_in_the_request_target_is_never_written_down(
     """
     app, store = build_app(tmp_path, sample_db)
     device, token = issue_device(store)
-    spellings = (
-        f"/{token}",
-        # `wtd1.` written as `%2577td1.`, which arrives as `%77td1.`
-        "/%25" + "77" + token[1:],
-    )
+    # Plain, then the scheme's first character written as an escape under one
+    # more layer of encoding each time. The server decodes the target exactly
+    # once, so layer k needs k further decodes before the marker appears —
+    # past any fixed round budget.
+    # Encoding "w" once is %77; encoding THAT is %2577, then %252577, and so
+    # on — each layer wraps the whole of the previous one.
+    spellings = ["/" + token] + [
+        "/%" + "25" * layers + "77" + token[1:] for layers in range(7)
+    ]
 
     for target in spellings:
         with captured_records() as captured:
