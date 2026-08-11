@@ -63,17 +63,21 @@ machine (see [Deployment](deployment.md)).
 
 ## Server-Side Request Records
 
-The HTTP adapter writes one line per request to standard error when it is
-started by `wuwaterm-api serve` — the stream the standard library's default
-handler uses, and the one the bot's records already go to. `WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`,
-`WARNING`, `INFO`, `DEBUG`; default `INFO`) sets the level; an unusable value
-stops the serve path with exit code 2 and never blocks the credential
-subcommands. Nothing is configured at import time, so a program that embeds the
-application keeps its own logging arrangement.
+The HTTP adapter writes one **completion record** per request — a line
+containing `request complete` — to standard error when it is started by
+`wuwaterm-api serve`. That is the stream the standard library's default handler
+uses, and the one the bot's records already go to. The adapter's other
+diagnostic lines are unchanged and are not part of that guarantee.
+`WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`;
+default `INFO`) sets the level; an unusable value stops the serve path with exit
+code 2 and never blocks the credential subcommands. Nothing is configured at
+import time, so a program that embeds the application keeps its own logging
+arrangement.
 
-Correlating a client's report with the server is the point of the record:
-`request_id` in the response header and body is the `request_id` in the line,
-and reading it back with `docker logs` is described in
+Correlating a client's report with the server is the point of the record: the
+`request_id` the caller was given is the `request_id` in the line. Which
+responses carry it in the body and which only in the header, and how to read it
+back with `docker logs`, are in
 [Deployment](deployment.md#reading-the-request-log). What the records may and
 may not contain is a test, not a convention — see the table above.
 

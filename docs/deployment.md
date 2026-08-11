@@ -265,25 +265,31 @@ mkdir -p state-api && chmod 700 state-api
 
 ### Reading The Request Log
 
-The service writes **one record per request** to its **standard error** — the
-stream the standard library's default handler uses, and the one the bot's
-records already go to. The container runtime collects both streams, so
-`docker compose logs` shows them; a collector that captures only stdout will
-not:
+The service writes to its **standard error** — the stream the standard
+library's default handler uses, and the one the bot's records already go to. The
+container runtime collects both streams, so `docker compose logs` shows them; a
+collector that captures only stdout will not:
 
 ```bash
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
 ```
 
-Each record is one line and always carries the same fields:
+Every request produces exactly one **completion record**, one line, always the
+same fields, recognisable by the words `request complete`:
 
 ```
 2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>
 ```
 
-Every request produces one, including the unauthenticated `/healthz` and
-`/readyz` probes — so a monitor polling those is visible in the volume.
+That guarantee is about the completion record and nothing else. At `INFO` the
+service also writes the diagnostic lines it has always written — a translation's
+stage and direction, an authentication refusal, a rate-limit refusal — so a
+request can produce several lines in total, and a collector must select on
+`request complete` rather than assume every line has these fields. Every
+request produces the completion record, including the unauthenticated
+`/healthz` and `/readyz` probes, so a monitor polling those is visible in the
+volume.
 
 `request_id` is minted by the service and reaches the caller two ways, neither
 of which covers quite everything:
@@ -295,9 +301,11 @@ of which covers quite everything:
 | an unhandled `500` | yes | **no** — assembled outside the middleware that attaches the header |
 | `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
 | `/openapi.json` | **no** — that body is the schema | yes |
+| an automatic trailing-slash `307` | **no** — that response has no body at all | yes |
 
-So for the calls an operator correlates, the body is enough; for a probe, read
-the header. Either way the id a client reports is what finds the request:
+So for the calls an operator correlates, the body is enough; for a probe, a
+schema read or a redirect, read the header. Either way the id a client reports
+is what finds the request:
 
 ```bash
 docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>

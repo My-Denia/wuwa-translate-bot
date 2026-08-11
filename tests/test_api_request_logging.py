@@ -253,6 +253,27 @@ def test_an_error_path_produces_one_completion_record(tmp_path, sample_db, monke
     assert record["device"].startswith("id:")
 
 
+def test_an_automatic_redirect_is_recorded_and_correlates_by_header_only(
+    tmp_path, sample_db
+):
+    """A trailing slash is answered by the framework with an empty body.
+
+    Pinned because the runbook tells an operator where to find the correlation
+    id per response kind, and this is the one that has no body to put it in.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+
+    with captured_records() as captured:
+        response = run(call(app, "GET", "/v1/meta/"))
+
+    assert response.status_code == 307
+    assert response.text == ""
+    assert len(captured.completions) == 1, captured.messages
+    record = fields(captured.completions[0])
+    assert record["status"] == "307"
+    assert record["request_id"] == response.headers["X-Request-Id"]
+
+
 def test_a_request_refused_before_routing_still_produces_a_record(tmp_path, sample_db):
     """The record comes from the outermost layer, not from the route handler.
 
