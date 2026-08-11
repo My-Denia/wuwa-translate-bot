@@ -70,13 +70,15 @@ default handler uses, and the one the bot's records already go to. Raising the
 level drops those records, and correlation with them.
 
 HTTP is the whole of what this service speaks: it declares no WebSocket route,
-and the `api` extra installs the server without a WebSocket library (pinned by
-`test_the_api_extra_installs_no_websocket_library`). An upgrade attempt is
+and this repository locks no WebSocket library for any purpose, so no build of
+it has one to hand (pinned by
+`test_no_websocket_library_is_locked_for_any_purpose`). An upgrade attempt is
 therefore refused before any such connection exists, and is answered — and
 recorded — as the ordinary HTTP request it arrived as.
 
 The adapter's other diagnostic lines are unchanged and are not part of that
 guarantee.
+
 `WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`;
 default `INFO`) sets the level; an unusable value stops the serve path with exit
 code 2 and never blocks the credential subcommands. Nothing is configured at
