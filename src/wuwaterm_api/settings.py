@@ -44,6 +44,17 @@ def validate_loopback_bind(value: str) -> str:
         if candidate.startswith("[") and candidate.endswith("]")
         else candidate
     )
+    if "%" in host:
+        # A zone id is accepted by ipaddress (``::1%does-not-exist`` parses AND
+        # reports is_loopback), but the scope is not validated here and
+        # getaddrinfo fails on a nonexistent one — which would escape as a raw
+        # socket error instead of this module's ApiConfigError -> exit 2. The
+        # loopback interface needs no scope, so refuse the whole class rather
+        # than try to resolve it.
+        raise ApiConfigError(
+            "the API bind must be a plain numeric loopback address without a "
+            "zone id, such as 127.0.0.1 or ::1"
+        )
     try:
         address = ipaddress.ip_address(host)
     except ValueError:

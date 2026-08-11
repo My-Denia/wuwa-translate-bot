@@ -1427,9 +1427,40 @@ def test_validate_loopback_bind_accepts_only_numeric_loopback():
         "example.com",
         "",
         "not-an-address",
+        # Zone-scoped IPv6: ipaddress PARSES these and reports is_loopback, but
+        # the scope is unvalidated and getaddrinfo fails on a nonexistent one,
+        # which would escape as a raw socket error instead of exit 2.
+        "::1%does-not-exist",
+        "::1%eth0",
+        "[::1%eth0]",
     ):
         with pytest.raises(ApiConfigError):
             validate_loopback_bind(bad)
+
+
+def test_serve_rejects_a_zone_scoped_ipv6_bind_with_exit_2(monkeypatch, tmp_path):
+    """A scoped-IPv6 bind must fail as a config error, not a socket error.
+
+    `::1%does-not-exist` satisfies ipaddress.is_loopback, so without the zone-id
+    refusal it reached uvicorn and getaddrinfo raised, escaping main() as an
+    unhandled socket error instead of the intended ApiConfigError -> exit 2.
+    """
+    import wuwaterm_api.cli as cli
+
+    called = {}
+    monkeypatch.setenv("WUWATERM_API_BIND", "::1%does-not-exist")
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    assert cli.main(["serve"]) == 2
+    assert "kw" not in called  # never reached uvicorn.run / getaddrinfo
+
+    # Same for the override path.
+    monkeypatch.delenv("WUWATERM_API_BIND", raising=False)
+    assert cli.main(["serve", "--host", "::1%does-not-exist"]) == 2
+    assert "kw" not in called
 
 
 def test_serve_rejects_a_non_loopback_env_bind(monkeypatch, tmp_path):
