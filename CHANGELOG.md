@@ -39,6 +39,18 @@ does not distribute generated game data or generated SQLite databases.
 - API budgets are per process and separate from the bot's: its own translator
   instance, its own model concurrency cap (default 2) and its own per-minute
   call budget (default 30).
+- The service now writes one structured record per request — correlation id,
+  method, route, status, duration, and the redacted device principal when one
+  authenticated — and `wuwaterm-api serve` installs the handler that emits it
+  (`WUWATERM_API_LOG_LEVEL`, default `INFO`). It had none: every `LOGGER` call
+  in the adapter went nowhere in a deployed process, so a request id handed to
+  a client matched nothing on the server. The operator subcommands and any
+  program importing the application still configure no logging at all.
+- Records name the matched route TEMPLATE, or an escaped and truncated target
+  when nothing matched, instead of the decoded request path: that value is
+  chosen by an unauthenticated caller and is read in a terminal. Credentials,
+  raw device ids and request text appear in no record, which is asserted
+  against captured records rather than by inspection.
 
 ### Desktop Client (new)
 

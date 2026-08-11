@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import re
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -76,6 +78,29 @@ LOGGER = logging.getLogger("wuwaterm_api")
 REQUEST_ID_HEADER = "X-Request-Id"
 
 TERM_QUERY_MAX_LENGTH = 200
+
+# --------------------------------------------------------------------------
+# Log field rendering
+#
+# A log line is an output channel with the same rules as a response body. Two
+# of the values in a request record are chosen by the caller — the target and
+# the method — and an operator reads them in a terminal, so they are rendered
+# rather than interpolated: `repr` escapes every control character (a percent-
+# encoded ESC arrives decoded, and `\x1b]0;…\x07` retitles the window that
+# `docker logs` is being read in), and the quotes it adds also make a value
+# containing a space unable to look like a second field.
+# --------------------------------------------------------------------------
+
+# Characters that cannot carry an escape sequence and cannot forge a field
+# boundary. Anything else is escaped rather than enumerated as dangerous.
+_PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@=+-]+")
+# Long enough for every route this service publishes, short enough that a
+# padded target cannot push the rest of the record out of view.
+RAW_TARGET_LOG_LIMIT = 80
+METHOD_LOG_LIMIT = 16
+# What a record names when no device was authenticated. Not `redact_id(None)`:
+# that renders as a digest and would read like a principal.
+NO_PRINCIPAL = "-"
 
 
 def service_version() -> str:
@@ -219,8 +244,76 @@ def _new_request_id() -> str:
     return uuid.uuid4().hex
 
 
+def _log_field(value: object, limit: int) -> str:
+    """Render a caller-influenced value so a log record stays inert text."""
+    text = str(value)
+    clipped = text[:limit]
+    if clipped == text and _PLAIN_LOG_FIELD.fullmatch(text):
+        return text
+    # Truncated values are escaped too, so a shortened value is never mistaken
+    # for the whole of what arrived.
+    return repr(clipped)
+
+
+def _route_label(request: Request) -> str:
+    """The route TEMPLATE this request matched, or its escaped raw target.
+
+    The template is repository text: it cannot carry anything, and it gives one
+    record shape per endpoint instead of one per spelling a caller invents. A
+    request that matched nothing (an unknown path, an unsupported method) has
+    no template, and there the decoded target is the only identifying thing
+    left — recorded escaped, never as it arrived.
+    """
+    template = getattr(request.scope.get("route"), "path", None)
+    if isinstance(template, str) and template:
+        return template
+    return _log_field(request.scope.get("path", ""), RAW_TARGET_LOG_LIMIT)
+
+
+def _log_principal(request: Request) -> str:
+    """The redacted device principal, or ``-`` when none was authenticated.
+
+    Always the redaction helper's output. A raw device id is a stable
+    identifier for a person's machine and belongs in the credential store, not
+    in an operations log.
+    """
+    device = getattr(request.state, "device", None)
+    if device is None:
+        return NO_PRINCIPAL
+    return redact_id(device.device_id)
+
+
+def _log_request_completed(
+    request: Request, request_id: str, status_code: int, elapsed_seconds: float
+) -> None:
+    """The one record per request an operator correlates a client report with.
+
+    Fields, in order: the server-minted correlation id, the method, the route,
+    the status, how long it took, and which device asked. That is deliberately
+    everything and nothing more — no request text, no credential, no header a
+    caller controls.
+
+    ``duration_ms`` is measured to the point the response is ready, not to the
+    last byte the client receives: the middleware that times it hands the
+    response on to be sent. Every response this service produces is a small
+    complete JSON document, so the difference is transmission time, and what
+    the number is useful for — which stage of the pipeline the request spent
+    its time in — is on this side of it either way.
+    """
+    LOGGER.info(
+        "request complete request_id=%s method=%s route=%s status=%s "
+        "duration_ms=%.1f device=%s",
+        request_id,
+        _log_field(request.method, METHOD_LOG_LIMIT),
+        _route_label(request),
+        status_code,
+        elapsed_seconds * 1000.0,
+        _log_principal(request),
+    )
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Attach a freshly minted request id; never trust an inbound one.
+    """Mint the correlation id, and record how the request ended.
 
     A caller-supplied ``X-Request-Id`` used to be accepted when it matched a
     charset that ALSO matches the token shape ``wtd1.<id>.<secret>``, and it was
@@ -230,14 +323,36 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     server-side and the inbound header is ignored entirely, so nothing a caller
     sends can be logged or echoed. The generated id is still returned in the
     response header for correlation.
+
+    The completion record lives HERE rather than in a middleware of its own for
+    two reasons. This is the outermost layer, so a request refused by the body
+    cap or the time budget — before anything is routed — is recorded exactly
+    like one that reached a handler; and the id being recorded is the same
+    object this method minted, so a client's report and the server's record
+    cannot drift apart through a second lookup.
+
+    The record is emitted from ``finally`` because the application's own
+    ``Exception`` handler runs OUTSIDE every user middleware: an unhandled
+    failure passes straight through this method, and the request most worth
+    having a record of would otherwise be the one that produces none.
     """
 
     async def dispatch(self, request: Request, call_next):
         request_id = _new_request_id()
         request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        return response
+        started = time.perf_counter()
+        # What the caller gets when the exception escapes to the handler
+        # outside this middleware; overwritten as soon as a response exists.
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            _log_request_completed(
+                request, request_id, status_code, time.perf_counter() - started
+            )
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
@@ -299,8 +414,8 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
                         )
         except (asyncio.TimeoutError, TimeoutError):
             LOGGER.warning(
-                "request body read timed out path=%s request_id=%s",
-                request.url.path,
+                "request body read timed out route=%s request_id=%s",
+                _route_label(request),
                 _request_id(request),
             )
             return _error_response(
@@ -329,8 +444,8 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             return await asyncio.wait_for(call_next(request), self.timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
             LOGGER.warning(
-                "request timed out path=%s request_id=%s",
-                request.url.path,
+                "request timed out route=%s request_id=%s",
+                _route_label(request),
                 _request_id(request),
             )
             return _error_response(
@@ -435,8 +550,8 @@ async def _require_active_device(
         # locked, a disk I/O error) is infrastructure, not a credential
         # rejection: answering 401 here would tell a valid device to re-pair.
         LOGGER.warning(
-            "device re-check store error path=%s request_id=%s serve=%s",
-            request.url.path,
+            "device re-check store error route=%s request_id=%s serve=%s",
+            _route_label(request),
             _request_id(request),
             serve_on_store_error,
         )
@@ -449,8 +564,8 @@ async def _require_active_device(
         )
     if not active:
         LOGGER.info(
-            "device revoked in flight path=%s request_id=%s",
-            request.url.path,
+            "device revoked in flight route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
@@ -475,8 +590,8 @@ async def authenticated_device(
         # that. Non-queuing admission — the rate-limited code tells the caller
         # to back off, and no worker thread is ever left blocked on the slot.
         LOGGER.info(
-            "auth admission shed path=%s request_id=%s",
-            request.url.path,
+            "auth admission shed route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_RATE_LIMITED)
@@ -496,8 +611,8 @@ async def authenticated_device(
         # to re-pair. It leaks nothing probeable: an unreadable store is
         # device-independent, so the response does not vary with the token.
         LOGGER.warning(
-            "credential store error on verification path=%s request_id=%s",
-            request.url.path,
+            "credential store error on verification route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(
@@ -509,11 +624,17 @@ async def authenticated_device(
         slots.release()
     if device is None:
         LOGGER.info(
-            "auth rejected path=%s request_id=%s",
-            request.url.path,
+            "auth rejected route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
+    # The credential is now verified, so the principal is known. Recording it
+    # HERE rather than after admission is what lets the completion record name
+    # the device on the outcomes an operator most wants attributed — a shed
+    # 429, a 403 outside the granted scopes, a revocation caught in flight.
+    # Nothing branches on this attribute; it exists to be logged.
+    request.state.device = device
     limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
     if not limiter.allow(device.device_id):
         LOGGER.info(
@@ -535,8 +656,8 @@ async def authenticated_device(
         )
     except (sqlite3.Error, OSError, CredentialPoolClosed):
         LOGGER.warning(
-            "credential store error on admission path=%s request_id=%s",
-            request.url.path,
+            "credential store error on admission route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(
@@ -546,12 +667,11 @@ async def authenticated_device(
         )
     if updated != 1:
         LOGGER.info(
-            "auth rejected: device revoked in flight path=%s request_id=%s",
-            request.url.path,
+            "auth rejected: device revoked in flight route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
-    request.state.device = device
     return device
 
 
@@ -722,8 +842,8 @@ def _register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> Response:
         LOGGER.exception(
-            "unhandled error path=%s request_id=%s",
-            request.url.path,
+            "unhandled error route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         return JSONResponse(

@@ -263,6 +263,49 @@ start; create it on the host rather than letting Docker create it root-owned:
 mkdir -p state-api && chmod 700 state-api
 ```
 
+### Reading The Request Log
+
+The service writes **one record per request** to standard output, which is
+where the container runtime collects it:
+
+```bash
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
+```
+
+Each record is one line and always carries the same fields:
+
+```
+2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>
+```
+
+`request_id` is minted by the service and returned to the caller in the
+`X-Request-Id` response header and in the JSON body, so a request a client
+reports is found by that id and nothing else:
+
+```bash
+docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>
+```
+
+`device` is the redacted principal — the same helper the chat adapter uses for
+its identifiers — and it is `-` when no credential was verified. It is stable
+for a given device, so requests can be attributed to one machine without the
+log ever holding the device id itself.
+
+What a record deliberately does not contain: no credential, no raw device id,
+no submitted or translated text, and no request target as the caller wrote it.
+A matched request is named by its **route template**; an unmatched one (an
+unknown path, an unsupported method) is recorded escaped and truncated,
+because that value is chosen by an unauthenticated caller and an operator
+reads it in a terminal. For the same reason the server's own access log stays
+off: it prints raw targets.
+
+`WUWATERM_API_LOG_LEVEL` sets how much is written; `INFO` is the default and is
+the level these records are emitted at. `WARNING` keeps the failures and drops
+the per-request records. It is separate from `wuwaterm-api serve --log-level`,
+which is the web server's own startup and socket logging and is not passed by
+the Compose `command:` at all.
+
 ### Cost Topology
 
 The API's budgets are per process and are NOT shared with the bot:

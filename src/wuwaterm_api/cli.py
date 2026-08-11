@@ -27,11 +27,40 @@ from .auth import DeviceStore, DeviceStoreError
 from .settings import (
     ApiConfigError,
     ApiSettings,
+    validate_log_level,
     validate_loopback_bind,
     validate_port,
 )
 
 LOGGER = logging.getLogger("wuwaterm_api")
+
+# Same shape the chat adapter uses, so two processes of one deployment read
+# alike in `docker logs`.
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+# Quieted for the same reason the chat adapter quiets them: at INFO the HTTP
+# client library reports every model call it makes, including the endpoint it
+# was configured with. That is a host secret, and this service's own records
+# are what the operator is here for.
+NOISY_LOGGERS = ("httpx", "httpcore")
+
+
+def configure_logging(level: str) -> None:
+    """Install the process log handler. Called on the SERVE path only.
+
+    Nothing in this package configures logging at import time, and the operator
+    subcommands do not call this: `device list` runs inside somebody's shell
+    session, where a root handler would interleave this service's records with
+    the output they asked for. A library or test that imports the application
+    likewise gets no global side effect — the records go wherever that program
+    already sends them.
+
+    ``basicConfig`` is deliberately not forced. It installs a handler when the
+    process has none, which is the container case; an embedder that has already
+    configured logging keeps its own arrangement.
+    """
+    logging.basicConfig(level=level, format=LOG_FORMAT)
+    for noisy_logger in NOISY_LOGGERS:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 def _resolve_bind(args: argparse.Namespace, settings: ApiSettings) -> str:
@@ -68,6 +97,10 @@ def _serve(args: argparse.Namespace) -> int:
     from .app import create_app
 
     settings = ApiSettings.from_env()
+    # First, so that everything below this line — including the bind warning —
+    # has somewhere to go. Validated on this path for the same reason the bind
+    # is: a mistyped level must not be able to block `device revoke`.
+    configure_logging(validate_log_level(settings.log_level))
     # The loopback guard lives HERE, on the only path that binds a socket — not
     # in from_env, which every operator subcommand calls: `device revoke` must
     # never be blocked by serve-time network configuration. Both the configured
@@ -162,7 +195,16 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the HTTP server")
     serve.add_argument("--host", default=None, help="override WUWATERM_API_BIND")
     serve.add_argument("--port", type=int, default=None, help="override WUWATERM_API_PORT")
-    serve.add_argument("--log-level", default="info")
+    # The SERVER's own level, handed to uvicorn: startup lines, socket errors,
+    # shutdown. This service's request records are a different logger with a
+    # different knob, WUWATERM_API_LOG_LEVEL, because the two are read for
+    # different reasons and an operator turning one down should not lose the
+    # other. Left exactly as it was; nothing here changes what it did.
+    serve.add_argument(
+        "--log-level",
+        default="info",
+        help="uvicorn's own server log level (not the request records)",
+    )
     serve.set_defaults(func=_serve)
 
     device = sub.add_parser("device", help="manage device credentials")
