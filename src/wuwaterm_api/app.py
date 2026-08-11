@@ -352,6 +352,15 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
+class CredentialPoolClosed(RuntimeError):
+    """The credential-store worker pool has been shut down (app teardown).
+
+    Grouped with ``sqlite3.Error``/``OSError`` at every call site: from the
+    request path's point of view it is one more way for the credential store to
+    be momentarily unusable, which is 503 — never 401, and never a bare 500.
+    """
+
+
 def _new_credential_pool(max_workers: int) -> concurrent.futures.ThreadPoolExecutor:
     """A pool whose WIDTH is the bound on concurrent credential-store work."""
     return concurrent.futures.ThreadPoolExecutor(
@@ -381,7 +390,18 @@ async def _in_credential_pool(app: FastAPI, func, *args):
     a saturated verifier sheds with 429 before scheduling any scrypt at all.
     """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(app.state.auth_pool, func, *args)
+    try:
+        pending = loop.run_in_executor(app.state.auth_pool, func, *args)
+    except RuntimeError as exc:
+        # The pool has been shut down: this request arrived during or after
+        # teardown. To every caller here that is the credential store being
+        # momentarily unusable — the same class as a locked database — so it
+        # is re-raised as something their existing handling already covers,
+        # rather than escaping as an unhandled 500. Submission is SYNCHRONOUS,
+        # so this catches only the submit; a RuntimeError raised inside `func`
+        # surfaces at the await below and is deliberately left alone.
+        raise CredentialPoolClosed(str(exc)) from None
+    return await pending
 
 
 async def _require_active_device(
@@ -410,7 +430,7 @@ async def _require_active_device(
             request.app.state.device_store.is_active,
             device.device_id,
         )
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         # A transient store failure on the POST-auth re-check (database is
         # locked, a disk I/O error) is infrastructure, not a credential
         # rejection: answering 401 here would tell a valid device to re-pair.
@@ -469,7 +489,7 @@ async def authenticated_device(
     # actually bounds concurrent derivations, and that cannot be released.
     try:
         device = await _in_credential_pool(request.app, store.authenticate, token)
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         # The verification READ itself failed (database is locked, a disk I/O
         # error). That is the store being momentarily unusable, not the
         # credential being wrong — answer 503 rather than telling a valid device
@@ -513,7 +533,7 @@ async def authenticated_device(
         updated = await _in_credential_pool(
             request.app, store.record_use, device.device_id
         )
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, CredentialPoolClosed):
         LOGGER.warning(
             "credential store error on admission path=%s request_id=%s",
             request.url.path,
@@ -583,23 +603,33 @@ def create_app(
         # An app started twice (two sequential TestClient contexts, an
         # embedding that cycles the ASGI lifespan) would reach a dead executor
         # and answer every credentialed request with a 500. Each cycle gets its
-        # own; the one being replaced has no started worker in the only case
-        # this runs, and is ended anyway rather than dropped.
+        # own; the one being replaced may have started workers (an app driven
+        # through ASGITransport with no lifespan uses it), and is ended without
+        # waiting because startup must not block on a join.
         previous = getattr(app.state, "auth_pool", None)
         app.state.auth_pool = _new_credential_pool(resolved.auth_max_concurrency)
         if previous is not None:
             previous.shutdown(wait=False, cancel_futures=True)
-        yield
-        closer = getattr(app.state.translator, "aclose", None)
-        if closer is not None:
-            await closer()
-        # Drop anything still queued and join the workers that already started,
-        # off the loop so the shutdown itself does not block it. Without this
-        # the pool's own atexit hook would be the only thing that ever joined
-        # these threads.
-        await asyncio.to_thread(
-            app.state.auth_pool.shutdown, True, cancel_futures=True
-        )
+        # try/finally, not a bare yield: asynccontextmanager THROWS into the
+        # generator when the surrounding context exits with an exception, so a
+        # server that fails during its lifespan would otherwise skip teardown
+        # entirely and leave the pool's worker threads (and their SQLite
+        # handles) to the interpreter's atexit hook. The pool shutdown is
+        # nested in its own finally so a translator that raises on close cannot
+        # take it with it.
+        try:
+            yield
+        finally:
+            closer = getattr(app.state.translator, "aclose", None)
+            try:
+                if closer is not None:
+                    await closer()
+            finally:
+                # Drop anything still queued and join the workers that already
+                # started, off the loop so the shutdown does not block it.
+                await asyncio.to_thread(
+                    app.state.auth_pool.shutdown, True, cancel_futures=True
+                )
 
     app = FastAPI(
         title="wuwaterm API",

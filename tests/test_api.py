@@ -2111,6 +2111,10 @@ def test_the_verification_bound_holds_under_a_flood_of_cancellations(
                         await task
 
         run(flood())
+        # Do not leave an abandoned verification running into the next test:
+        # this test's whole point is that a started worker outlives the request
+        # that scheduled it.
+        app.state.auth_pool.shutdown(wait=True)
     finally:
         DeviceStore.authenticate = real
 
@@ -2262,3 +2266,150 @@ def test_a_second_lifespan_cycle_gets_a_live_credential_pool(tmp_path, sample_db
 
     assert run(cycle()) == 200
     assert run(cycle()) == 200
+
+
+def test_an_old_shape_store_rejects_every_device_id_for_the_same_work(tmp_path):
+    """The legacy-store rejection must not become a device-id oracle.
+
+    Tolerating an old-shape row on the request path (so removing `initialize()`
+    from it does not turn a legacy store into a distinguishable error class)
+    introduced one: a token naming an EXISTING device returned immediately while
+    a token naming an absent one still paid for the compensating derivation.
+    That timing difference is exactly what the dummy derivation exists to hide.
+    Counted rather than timed, so the assertion is about the work itself.
+    """
+    import sqlite3
+
+    import wuwaterm_api.auth as authmod
+
+    path = tmp_path / "devices.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE devices (device_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO devices VALUES ('cafebabe')")
+    store = DeviceStore(path, guard_legacy_default=False)
+
+    calls = []
+    real = authmod._derive
+    # Count only work done on THIS thread: a verification worker left running
+    # by an earlier test (the cancel-flood one deliberately abandons requests
+    # mid-derivation) would otherwise land inside the measurement window.
+    here = threading.get_ident()
+
+    def counted(secret, salt):
+        if threading.get_ident() == here:
+            calls.append(1)
+        return real(secret, salt)
+
+    authmod._derive = counted
+    try:
+        known = store.authenticate("wtd1.cafebabe.%s" % ("x" * 40))
+        after_known = len(calls)
+        unknown = store.authenticate("wtd1.0badc0de.%s" % ("x" * 40))
+        after_unknown = len(calls)
+    finally:
+        authmod._derive = real
+
+    # Both are refusals, and both cost the same derivation.
+    assert known is None and unknown is None
+    assert after_known == 1, after_known
+    assert after_unknown - after_known == 1, (after_known, after_unknown)
+
+
+def test_an_old_shape_store_with_wrong_typed_columns_is_a_rejection_not_a_500(
+    tmp_path, sample_db
+):
+    """A verifier column that exists but holds TEXT or NULL is still legacy.
+
+    `bytes(row["salt"])` raises TypeError there, which is in neither
+    `sqlite3.Error` nor `OSError`, so it would have escaped as an unhandled 500
+    instead of the uniform rejection the request path promises.
+    """
+    import sqlite3
+
+    settings = build_settings(tmp_path, sample_db)
+    settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.device_db_path) as conn:
+        conn.execute(
+            "CREATE TABLE devices (device_id TEXT PRIMARY KEY, device_name TEXT,"
+            " salt TEXT, token_hash TEXT, scopes TEXT, created_at TEXT,"
+            " revoked_at TEXT, last_used_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO devices VALUES ('cafebabe', 'old', 'not-bytes', NULL,"
+            " 'translate,meta', '2020-01-01T00:00:00+00:00', NULL, NULL)"
+        )
+    app = create_app(
+        settings,
+        device_store=DeviceStore(settings.device_db_path, guard_legacy_default=False),
+    )
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer("wtd1.cafebabe.%s" % ("x" * 40)),
+        )
+    )
+
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_the_credential_pool_is_shut_down_even_when_the_translator_raises(
+    tmp_path, sample_db
+):
+    """Teardown must not be skippable.
+
+    `asynccontextmanager` throws into the generator at the `yield` when the
+    surrounding context exits with an exception, and a translator that raises on
+    close would take the pool shutdown with it — leaving worker threads and
+    their SQLite handles to the interpreter's atexit hook.
+    """
+
+    class _AngryTranslator:
+        async def aclose(self):
+            raise RuntimeError("translator close failed")
+
+    settings = build_settings(tmp_path, sample_db)
+    store = DeviceStore(settings.device_db_path)
+    store.initialize()
+    app = create_app(settings, device_store=store, translator=_AngryTranslator())
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="translator close failed"):
+            async with app.router.lifespan_context(app):
+                pass
+
+    run(scenario())
+
+    with pytest.raises(RuntimeError):
+        app.state.auth_pool.submit(lambda: None)
+
+
+def test_a_request_after_teardown_is_503_not_an_unhandled_500(tmp_path, sample_db):
+    """A shut-down pool is one more way for the store to be unusable.
+
+    `run_in_executor` on a shut-down executor raises RuntimeError, which is in
+    neither `sqlite3.Error` nor `OSError` — so a request landing during or after
+    teardown became an unhandled 500: an infrastructure fault dressed as a bug,
+    which is the one thing this whole change is removing.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    app.state.auth_pool.shutdown(wait=True)
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "internal"

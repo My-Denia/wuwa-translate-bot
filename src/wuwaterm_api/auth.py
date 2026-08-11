@@ -242,6 +242,14 @@ class DeviceStore:
         SQLite's write-ahead log and shared-memory sidecars carry the same rows
         as the main file, so all three plus the directory are restricted, not
         just the database the caller named.
+
+        This runs once, at creation. Sidecars created LATER — including by a
+        request-path read, which recreates them if the last writer removed them
+        — are not chmod'ed here: SQLite gives a journal/WAL file the mode of the
+        database it belongs to, which the POSIX gate below
+        (``test_every_file_carrying_verifier_material_is_restricted``, which
+        authenticates before it looks) asserts on the deployment platform. The
+        ``0o700`` on the directory is the backstop either way.
         """
         targets = [
             (self.path.parent, 0o700),
@@ -412,8 +420,9 @@ class DeviceStore:
         and contend with a concurrent ``revoke()``, and deleting the store —
         the bluntest emergency revocation an operator has — was silently undone
         by the next unauthenticated request, which recreated an empty store.
-        The store is created by ``cli._serve`` at startup, which is the only
-        place that should ever create it.
+        The store is created by ``initialize()`` — from ``cli._serve`` at
+        startup and from ``issue()`` when an operator registers the first
+        device. Nothing on the REQUEST path creates it.
 
         None means the CREDENTIAL was not proven: unknown device, wrong secret,
         malformed token, a revoked device and a store written by an older shape
@@ -454,11 +463,18 @@ class DeviceStore:
             try:
                 salt = bytes(row["salt"])
                 stored = bytes(row["token_hash"])
-            except (IndexError, KeyError):
-                # A store written by an older shape has no verifier columns.
-                # initialize() reports that to the OPERATOR at startup; on the
-                # request path it stays one more uniform rejection rather than
-                # becoming a distinguishable error class.
+            except (IndexError, KeyError, TypeError):
+                # A store written by an older shape has no verifier columns, or
+                # holds something that is not one (TEXT, NULL). initialize()
+                # reports that to the OPERATOR at startup; on the request path
+                # it stays one more uniform rejection — and it has to be uniform
+                # in TIME too. Returning early here would cost nothing while an
+                # unknown device id still paid for a full derivation, which is
+                # exactly the device-id oracle the dummy derivation above
+                # exists to close, so spend the same work before refusing.
+                hmac.compare_digest(
+                    _derive(secret, b"\x00" * SALT_BYTES), b"\x00" * SCRYPT_DKLEN
+                )
                 return None
             if not hmac.compare_digest(_derive(secret, salt), stored):
                 return None
