@@ -70,6 +70,29 @@ def validate_loopback_bind(value: str) -> str:
     return str(address)
 
 
+LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
+def validate_log_level(value: str) -> str:
+    """Return the normalized level name, else raise ApiConfigError.
+
+    Only the five standard names are accepted. ``uvicorn``'s own ``--log-level``
+    additionally understands ``trace``, which is not a level the standard
+    library can be configured with, so accepting it here would mean a value
+    that starts the server and then fails when the first record is emitted.
+
+    Like every other setting in this module the offending value is not echoed;
+    the fix is the same whatever was set, and an environment value can carry
+    material that does not belong in a startup error.
+    """
+    candidate = (value or "").strip().upper()
+    if candidate not in LOG_LEVELS:
+        raise ApiConfigError(
+            "the API log level must be one of " + ", ".join(LOG_LEVELS)
+        )
+    return candidate
+
+
 MIN_PORT = 1
 MAX_PORT = 65535
 
@@ -96,6 +119,7 @@ def validate_port(value: int) -> int:
 
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8788
+DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_DB_PATH = "data/terms.db"
 # A sibling of the bot's state directory, never a child of it: the bot
 # mounts the whole of state/ read-write.
@@ -167,6 +191,7 @@ class ApiSettings:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
+    log_level: str = DEFAULT_LOG_LEVEL
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -233,4 +258,12 @@ class ApiSettings:
                 minimum=1,
                 maximum=64,
             ),
+            # Carried raw for the same reason as `bind`, and validated in the
+            # same place: from_env() runs for EVERY subcommand, so a typo in a
+            # serve-time knob must not be able to block `device revoke`. See
+            # validate_log_level and cli._serve.
+            log_level=(
+                os.getenv("WUWATERM_API_LOG_LEVEL") or DEFAULT_LOG_LEVEL
+            ).strip()
+            or DEFAULT_LOG_LEVEL,
         )

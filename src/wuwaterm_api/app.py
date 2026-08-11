@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
+import re
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -32,6 +36,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
 
 from wuwaterm.application import (
     ERROR_FORBIDDEN,
@@ -57,7 +62,7 @@ from wuwaterm.application import (
 from wuwaterm.logging_utils import redact_id
 
 from . import API_VERSION
-from .auth import SCOPE_META, SCOPE_TRANSLATE, Device, DeviceStore
+from .auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, Device, DeviceStore
 from .errors import MESSAGE_BY_CODE, ApiError, error_body
 
 # Framework-raised routing failures mapped onto the published vocabulary.
@@ -76,6 +81,101 @@ LOGGER = logging.getLogger("wuwaterm_api")
 REQUEST_ID_HEADER = "X-Request-Id"
 
 TERM_QUERY_MAX_LENGTH = 200
+
+# --------------------------------------------------------------------------
+# Log field rendering
+#
+# A log line is an output channel with the same rules as a response body. One
+# value in a request record is chosen by the caller — the target of a request
+# that matched no route — and it is read by an operator in a terminal and by
+# whatever collects the stream, so it is rendered rather than interpolated.
+#
+# Two distinct hazards, and `repr` alone covers only the first:
+#
+# 1. control sequences. A percent-encoded ESC arrives decoded, and
+#    `\x1b]0;…\x07` retitles the window `docker logs` is being read in. `repr`
+#    escapes every character that is not printable, which is all of C0 and C1,
+#    the bidi overrides, the line/paragraph separators, and every space
+#    character except U+0020.
+# 2. FORGED FIELDS. The record is whitespace-delimited `key=value`, and `repr`
+#    leaves U+0020 alone: a target of `/x status=200 device=id:spoofed` would
+#    put a caller's own `status=` and `device=` into the line ahead of the real
+#    ones. Quotes do not help — nothing splitting on whitespace respects them.
+#    So BOTH halves of what makes a field are escaped: the one whitespace
+#    character `repr` keeps, which stops a whitespace tokenizer seeing two
+#    fields, and `=`, which stops anything scanning for `status=` anywhere in a
+#    line finding a caller's copy first. A rendered value can then contain no
+#    field at all. The escapes are unambiguous: `repr` has already doubled any
+#    backslash in the input, so a single-backslash `\x20` or `\x3d` can only be
+#    one these lines introduced.
+# --------------------------------------------------------------------------
+
+# Characters that cannot carry an escape sequence and cannot forge a field
+# boundary. `=` is excluded for the reason above: `/status=200` needs no space
+# to fool a scanner. Anything outside this set is escaped rather than
+# enumerated as dangerous.
+_PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@+-]+")
+# Source characters of a raw target that are considered at all. This is not
+# only a display width: it is also the input bound on the credential check's
+# fixed-point decoding, which is quadratic in the length it is given (see
+# _route_label). Raising it to see more of a scanner's URL raises that work
+# roughly with the square, on the event loop, for an unauthenticated caller.
+RAW_TARGET_LOG_LIMIT = 80
+# The method is recorded from a CLOSED set rather than as it arrived. A method
+# is a caller-chosen token, and this service publishes exactly GET and POST —
+# every other verb is already refused with a 405, so the exact spelling of one
+# has no operational value, while a free-text field that a caller fills is a
+# place for anything at all to end up. Recording membership instead of content
+# leaves `route`'s fallback as the only caller-influenced value in the record.
+KNOWN_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"}
+)
+OTHER_METHOD = "other"
+# And a cap on what is actually WRITTEN. Clipping the source alone does not
+# bound the line: one character can render as ten (`\U000e0001`), so eighty
+# source characters can become eight hundred and push the fields that matter
+# off the end of a terminal. Both bounds are needed — the first keeps the value
+# meaningful, the second keeps the record readable.
+RENDERED_LOG_LIMIT = 160
+# Marks a rendering that hit that cap. Not a space and not `=`, so it cannot
+# become a field boundary of its own.
+TRUNCATION_MARK = "~"
+# What a record names when no device was authenticated. Not `redact_id(None)`:
+# that renders as a digest and would read like a principal.
+NO_PRINCIPAL = "-"
+# Recorded when the caller went away before there was a response. This service
+# never SENDS it — nothing was sent — but a record has to say something, and
+# saying 500 would send an operator looking for a server fault that did not
+# happen. 499 is the long-standing convention for exactly this, so it reads
+# correctly to anyone who has met it and is obviously not one of ours.
+CLIENT_GONE_STATUS = 499
+
+# A request target is caller-supplied and can therefore carry a CREDENTIAL: a
+# client or a proxy that puts a token in the URL instead of the Authorization
+# header produces a target that is otherwise perfectly ordinary to look at, and
+# escaping is reversible, so recording it escaped would still write the secret
+# down. Every token of this service begins with the scheme, so a target that
+# contains it is not recorded at all. The query string is never recorded on any
+# path, so nothing there needs the same treatment.
+#
+# Recorded as a bare label with NO digest of the target. A digest would group
+# repeats, which is mildly useful, but `redact_id` falls back to an unkeyed
+# SHA-256 prefix when no redaction secret is configured — and the API container
+# blanks that variable on purpose, because it keys the BOT's redaction. That
+# would turn a leaked line into a cheap offline check against guessed secrets,
+# sidestepping the deliberately expensive derivation the credential store uses.
+# The actionable fact is that a credential reached a URL at all; nothing about
+# WHICH one belongs in a log.
+_CREDENTIAL_MARKER = f"{TOKEN_SCHEME}."
+CREDENTIAL_SHAPED_TARGET = "credential-shaped"
+# Percent-decoding is the one transform between the wire and the decoded path,
+# and the server applies exactly one round of it — so `%2577td1.` arrives as
+# `%77td1.` and a literal search for the marker misses it. The check therefore
+# decodes to a FIXED POINT, with no round cap: a cap is just a deeper spelling
+# to encode past, which is the failure this whole check exists to stop
+# repeating. Termination is structural rather than budgeted — a decode that
+# changes anything replaces at least one three-character escape with one
+# character, so the string strictly shortens until it stops changing.
 
 
 def service_version() -> str:
@@ -219,8 +319,140 @@ def _new_request_id() -> str:
     return uuid.uuid4().hex
 
 
+def _log_field(value: object, limit: int) -> str:
+    """Render a caller-influenced value as one inert, unsplittable token."""
+    text = str(value)
+    clipped = text[:limit]
+    if clipped == text and _PLAIN_LOG_FIELD.fullmatch(text):
+        return text
+    # The two replacements are not cosmetic: see the forged-fields hazard above.
+    rendered = repr(clipped).replace(" ", "\\x20").replace("=", "\\x3d")
+    # Marked when EITHER bound bit. Escaping alone does not say "shortened" —
+    # a value can be escaped for having a control character in it and still be
+    # complete — so without this a clipped target reads as the whole of what
+    # arrived, which is the one thing the bound exists to prevent.
+    if clipped != text or len(rendered) > RENDERED_LOG_LIMIT:
+        rendered = rendered[:RENDERED_LOG_LIMIT] + TRUNCATION_MARK
+    return rendered
+
+
+def _could_carry_a_credential(path: str) -> bool:
+    """Whether the part of a target that could be LOGGED could be a token.
+
+    Decoded to a fixed point first. The server percent-decodes once, so a
+    caller (or a proxy tidying a URL) that encodes the scheme twice hands us
+    `%77td1.` — which a literal search does not see, while one more decode
+    recovers a working credential from the recorded line. Matching the family
+    rather than one spelling of it is the whole point.
+
+    Called with the prefix that could be WRITTEN, never the whole target: see
+    _route_label for why that is both sufficient and necessary.
+    """
+    seen = path
+    while True:
+        if _CREDENTIAL_MARKER in seen.lower():
+            return True
+        decoded = unquote(seen)
+        if decoded == seen:
+            return False
+        seen = decoded
+
+
+def _route_label(request: Request) -> str:
+    """Three cases, in this order.
+
+    1. the request matched a route → its TEMPLATE. Repository text: it cannot
+       carry anything, and it gives one record shape per endpoint instead of
+       one per spelling a caller invents. An unsupported METHOD on a known
+       route is one of these — ``APIRoute.matches`` records a partial match
+       before the method is refused, so a 405 is named by its template.
+    2. it matched nothing and could be a credential → a fixed label, below.
+    3. anything else → the decoded target, which is the one identifying thing
+       left, rendered so that it cannot carry an escape sequence, forge a
+       field, or run past the line. A target that needs none of that is
+       recorded as it stands; the guarantee is about the FORM reaching the
+       record, not about hiding what a caller wrote in its own request.
+
+    The framework's automatic trailing-slash redirect is case 3, not case 1: it
+    is produced without a route ever being matched. So is ``/openapi.json``,
+    which is registered as a plain route with no ``matches`` override — its
+    fallback rendering is byte-identical to its template, so the record reads
+    the same either way.
+    """
+    template = getattr(request.scope.get("route"), "path", None)
+    if isinstance(template, str) and template:
+        return template
+    path = str(request.scope.get("path", ""))
+    # The credential check reads only the prefix that can reach the record, and
+    # that is exactly right in both directions. SUFFICIENT: what a reader can
+    # recover from the rendered value is this prefix and nothing else, so a
+    # credential outside it is already unrecoverable from the log. NECESSARY:
+    # decoding the whole target is quadratic — one nested layer is removed per
+    # pass while every pass rescans the rest — and this runs on the event loop
+    # for an unauthenticated request, so a padded target would be a way to stall
+    # the process rather than merely to be logged oddly.
+    if _could_carry_a_credential(path[:RAW_TARGET_LOG_LIMIT]):
+        return CREDENTIAL_SHAPED_TARGET
+    return _log_field(path, RAW_TARGET_LOG_LIMIT)
+
+
+def _method_label(request: Request) -> str:
+    """The request method when it is one, else that it was not one of them."""
+    method = str(request.method)
+    return method if method in KNOWN_METHODS else OTHER_METHOD
+
+
+def _log_principal(request: Request) -> str:
+    """The redacted device principal, or ``-`` when none was authenticated.
+
+    Always the redaction helper's output. A raw device id is a stable
+    identifier for a person's machine and belongs in the credential store, not
+    in an operations log.
+
+    This is a rule about what the SERVICE writes down of what it knows. It is
+    not, and cannot be, a rule about byte sequences: a caller may put anything
+    in its own request target, including sixteen hexadecimal characters, and a
+    record of that discloses nothing the caller did not already have. Trying to
+    recognise identifier-shaped substrings in caller data would trade real
+    diagnostic value for an enumeration that never closes.
+    """
+    device = getattr(request.state, "device", None)
+    if device is None:
+        return NO_PRINCIPAL
+    return redact_id(device.device_id)
+
+
+def _log_request_completed(
+    request: Request, request_id: str, status_code: int, elapsed_seconds: float
+) -> None:
+    """The one record per request an operator correlates a client report with.
+
+    Fields, in order: the server-minted correlation id, the method, the route,
+    the status, how long it took, and which device asked. That is deliberately
+    everything and nothing more — no request text, no credential, no header a
+    caller controls.
+
+    ``duration_ms`` is measured to the point the response is ready, not to the
+    last byte the client receives: the middleware that times it hands the
+    response on to be sent. Every response this service produces is a small
+    complete JSON document, so the difference is transmission time, and what
+    the number is useful for — which stage of the pipeline the request spent
+    its time in — is on this side of it either way.
+    """
+    LOGGER.info(
+        "request complete request_id=%s method=%s route=%s status=%s "
+        "duration_ms=%.1f device=%s",
+        request_id,
+        _method_label(request),
+        _route_label(request),
+        status_code,
+        elapsed_seconds * 1000.0,
+        _log_principal(request),
+    )
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Attach a freshly minted request id; never trust an inbound one.
+    """Mint the correlation id, and record how the request ended.
 
     A caller-supplied ``X-Request-Id`` used to be accepted when it matched a
     charset that ALSO matches the token shape ``wtd1.<id>.<secret>``, and it was
@@ -230,14 +462,77 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     server-side and the inbound header is ignored entirely, so nothing a caller
     sends can be logged or echoed. The generated id is still returned in the
     response header for correlation.
+
+    The completion record lives HERE rather than in a middleware of its own for
+    two reasons. This is the outermost layer, so a request refused by the body
+    cap or the time budget — before anything is routed — is recorded exactly
+    like one that reached a handler; and the id being recorded is the same
+    object this method minted, so a client's report and the server's record
+    cannot drift apart through a second lookup.
+
+    The record is emitted from ``finally`` because the application's own
+    ``Exception`` handler runs OUTSIDE every user middleware: an unhandled
+    failure passes straight through this method, and the request most worth
+    having a record of would otherwise be the one that produces none.
     """
 
     async def dispatch(self, request: Request, call_next):
         request_id = _new_request_id()
         request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        return response
+        started = time.perf_counter()
+        # What the caller gets when the exception escapes to the handler
+        # outside this middleware; overwritten as soon as a response exists.
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        except (ClientDisconnect, asyncio.CancelledError):
+            # The caller went away, or the work was cancelled out from under
+            # this task at shutdown. Either way nothing was sent, so the seeded
+            # 500 would be a lie that costs an operator a hunt for a fault that
+            # never happened. Measured rather than assumed: a socket hang-up
+            # during the body read surfaces here as ClientDisconnect, not as
+            # cancellation. Re-raised untouched — this changes what the record
+            # says, not what the request does.
+            status_code = CLIENT_GONE_STATUS
+            raise
+        finally:
+            try:
+                _log_request_completed(
+                    request, request_id, status_code, time.perf_counter() - started
+                )
+            except Exception:
+                # An exception raised from a `finally` REPLACES the one
+                # propagating through it, so a fault while describing a request
+                # would become the fault reported for it — the traceback the
+                # operator needs, swapped for the one about writing it down.
+                # The record is additive by construction: it can be missing, it
+                # can never be the thing that goes wrong.
+                #
+                # Reported WITH the id and the cause: without the id this line
+                # says only that some request went unrecorded, and the cause is
+                # what makes it actionable. Neither can leak — every value in
+                # the record is sanitised by _log_field/_log_principal BEFORE
+                # LOGGER.info is reached, so nothing a caller supplied is in
+                # flight by the time an exception can carry it.
+                #
+                # And suppressed, because the fallback goes through the SAME
+                # handler chain that just failed. `logging.Handler.handle` does
+                # not wrap `filter` or `emit`; it is the stdlib handler
+                # implementations that catch their own errors. A handler this
+                # service did not install — configure_logging deliberately does
+                # not force one — can therefore raise from both calls, and the
+                # second one would escape the finally and become the request's
+                # outcome. Suppressing Exception and not BaseException keeps
+                # cancellation propagating.
+                with contextlib.suppress(Exception):
+                    LOGGER.warning(
+                        "request record could not be written request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:
@@ -299,8 +594,8 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
                         )
         except (asyncio.TimeoutError, TimeoutError):
             LOGGER.warning(
-                "request body read timed out path=%s request_id=%s",
-                request.url.path,
+                "request body read timed out route=%s request_id=%s",
+                _route_label(request),
                 _request_id(request),
             )
             return _error_response(
@@ -329,8 +624,8 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
             return await asyncio.wait_for(call_next(request), self.timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
             LOGGER.warning(
-                "request timed out path=%s request_id=%s",
-                request.url.path,
+                "request timed out route=%s request_id=%s",
+                _route_label(request),
                 _request_id(request),
             )
             return _error_response(
@@ -435,8 +730,8 @@ async def _require_active_device(
         # locked, a disk I/O error) is infrastructure, not a credential
         # rejection: answering 401 here would tell a valid device to re-pair.
         LOGGER.warning(
-            "device re-check store error path=%s request_id=%s serve=%s",
-            request.url.path,
+            "device re-check store error route=%s request_id=%s serve=%s",
+            _route_label(request),
             _request_id(request),
             serve_on_store_error,
         )
@@ -449,8 +744,8 @@ async def _require_active_device(
         )
     if not active:
         LOGGER.info(
-            "device revoked in flight path=%s request_id=%s",
-            request.url.path,
+            "device revoked in flight route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
@@ -475,8 +770,8 @@ async def authenticated_device(
         # that. Non-queuing admission — the rate-limited code tells the caller
         # to back off, and no worker thread is ever left blocked on the slot.
         LOGGER.info(
-            "auth admission shed path=%s request_id=%s",
-            request.url.path,
+            "auth admission shed route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_RATE_LIMITED)
@@ -496,8 +791,8 @@ async def authenticated_device(
         # to re-pair. It leaks nothing probeable: an unreadable store is
         # device-independent, so the response does not vary with the token.
         LOGGER.warning(
-            "credential store error on verification path=%s request_id=%s",
-            request.url.path,
+            "credential store error on verification route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(
@@ -509,11 +804,20 @@ async def authenticated_device(
         slots.release()
     if device is None:
         LOGGER.info(
-            "auth rejected path=%s request_id=%s",
-            request.url.path,
+            "auth rejected route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
+    # The credential is now verified, so the principal is known. Recording it
+    # HERE rather than after admission is what lets the completion record name
+    # the device on the outcomes an operator most wants attributed — the
+    # per-device rate limit below, a 403 outside the granted scopes, a
+    # revocation caught in flight. The admission shed above is NOT one of them:
+    # it fires before anything is verified, so there is no principal to name
+    # and it is recorded with none. Nothing branches on this attribute; it
+    # exists to be logged.
+    request.state.device = device
     limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
     if not limiter.allow(device.device_id):
         LOGGER.info(
@@ -535,8 +839,8 @@ async def authenticated_device(
         )
     except (sqlite3.Error, OSError, CredentialPoolClosed):
         LOGGER.warning(
-            "credential store error on admission path=%s request_id=%s",
-            request.url.path,
+            "credential store error on admission route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(
@@ -546,12 +850,11 @@ async def authenticated_device(
         )
     if updated != 1:
         LOGGER.info(
-            "auth rejected: device revoked in flight path=%s request_id=%s",
-            request.url.path,
+            "auth rejected: device revoked in flight route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         raise ApiError(ERROR_UNAUTHORIZED)
-    request.state.device = device
     return device
 
 
@@ -722,8 +1025,8 @@ def _register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> Response:
         LOGGER.exception(
-            "unhandled error path=%s request_id=%s",
-            request.url.path,
+            "unhandled error route=%s request_id=%s",
+            _route_label(request),
             _request_id(request),
         )
         return JSONResponse(

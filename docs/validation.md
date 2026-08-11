@@ -50,6 +50,7 @@ four-module import allowlist into `wuwaterm` (see
 | `tests/test_client_transport_policy.py` | The desktop client cannot regress into reaching the service through the operator's administration channel, and certificate verification cannot be turned off by an edit anywhere in the client tree, the deploy scripts or this runbook. Text gates over the shipped client surface, `docs/deployment.md` and `deploy/*` | The repository `pytest` run — deliberately here rather than in the client suite, so it runs on every pull request without a Windows runner or the client's dependencies |
 | `client/.venv/Scripts/python.exe -m pytest` (in `client/`) | The client's own behaviour: transport refusals, the request-target guard, credential storage, cancellation, error rendering, and that every displayed string comes from the strings module | CI `desktop client build (windows)` job on `windows-latest` |
 | `client/build.ps1` | The one-folder PyInstaller artifact builds from the pinned spec and passes its own `--self-check`, and the build leaves nothing untracked in the working tree | Same CI job; the artifact is uploaded there |
+| `tests/test_api_request_logging.py` | Every HTTP request leaves exactly one server-side **completion** record — on the authenticated path, on `401`, on a failure that never reaches a handler — carrying the same `request_id` the caller was given; and that no record the deployed process would write holds any of what the service itself knows: a credential, the device id behind an authenticated principal, or submitted text. A caller-supplied target is recorded escaped, bounded, and replaced entirely when it could be a credential. The adapter's other diagnostic lines are outside the one-per-request count and inside the privacy scan. Asserted against captured records rather than by reading the source, because a field added later is invisible to inspection | The repository `pytest` run |
 
 The client gates are split on purpose. Everything that can be checked by
 reading text runs in the main suite on Linux; only what genuinely needs Qt,
@@ -59,6 +60,37 @@ Neither the API contract gate nor the client build proves anything about a
 deployed service. A request answered on the service host is evidence about the
 process; evidence about the published endpoint has to come from the client
 machine (see [Deployment](deployment.md)).
+
+## Server-Side Request Records
+
+At `INFO`, the default, the HTTP adapter writes one **completion record** per
+HTTP request — a line containing `request complete` — to standard error when it
+is started by `wuwaterm-api serve`. That is the stream the standard library's
+default handler uses, and the one the bot's records already go to. Raising the
+level drops those records, and correlation with them.
+
+HTTP is the whole of what this service speaks: it declares no WebSocket route,
+and this repository locks no WebSocket library for any purpose, so no build made
+from the lock — the runtime image among them — has one to hand (pinned by
+`test_no_websocket_library_is_locked_for_any_purpose`). An upgrade attempt is
+therefore refused before any such connection exists, and is answered — and
+recorded — as the ordinary HTTP request it arrived as.
+
+The adapter's other diagnostic lines are unchanged and are not part of that
+guarantee.
+
+`WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`;
+default `INFO`) sets the level; an unusable value stops the serve path with exit
+code 2 and never blocks the credential subcommands. Nothing is configured at
+import time, so a program that embeds the application keeps its own logging
+arrangement.
+
+Correlating a client's report with the server is the point of the record: the
+`request_id` the caller was given is the `request_id` in the line. Which
+responses carry it in the body and which only in the header, and how to read it
+back with `docker logs`, are in
+[Deployment](deployment.md#reading-the-request-log). What the records may and
+may not contain is a test, not a convention — see the table above.
 
 ## Windows Reference
 

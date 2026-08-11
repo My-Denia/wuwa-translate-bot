@@ -263,6 +263,139 @@ start; create it on the host rather than letting Docker create it root-owned:
 mkdir -p state-api && chmod 700 state-api
 ```
 
+### Reading The Request Log
+
+The service writes to its **standard error** — the stream the standard
+library's default handler uses, and the one the bot's records already go to. The
+container runtime collects both streams, so `docker compose logs` shows them; a
+collector that captures only stdout will not:
+
+```bash
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
+```
+
+At `INFO`, the default, every HTTP request produces exactly one **completion
+record**, one line, always the same fields, recognisable by the words `request
+complete`:
+
+```
+2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>
+```
+
+That guarantee is about the completion record and nothing else. At `INFO` the
+service also writes the diagnostic lines it has always written — a translation's
+stage and direction, an authentication refusal, a rate-limit refusal — so a
+request can produce several lines in total, and a collector must select on
+`request complete` rather than assume every line has these fields. Every
+request produces the completion record, including the unauthenticated
+`/healthz` and `/readyz` probes, so a monitor polling those is visible in the
+volume. Raising the level above `INFO` drops all of them — that is the trade
+that setting is for, and correlation goes with them.
+
+`request_id` is minted by the service and reaches the caller two ways, neither
+of which covers quite everything:
+
+| Response | In the JSON body | In `X-Request-Id` |
+|---|---|---|
+| a `/v1` answer an endpoint returned normally | yes | yes |
+| a handled failure's envelope (`400`, `401`, `403`, `404`, `405`, `413`, `422`, `429`, `503`, `504`) | yes | yes |
+| an **unhandled** failure's envelope (`500`) | yes | **no** — assembled after the middleware that attaches the header has unwound |
+| `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
+| `/openapi.json` | **no** — that body is the schema | yes |
+| an automatic trailing-slash `307` | **no** — that response has no body at all | yes |
+
+The rows are exclusive: an unhandled `500` is the third row and not the first
+two, even though it came from a `/v1` endpoint and carries an error envelope.
+
+So for the calls an operator correlates, the body is enough; for a probe, a
+schema read or a redirect, read the header. Either way the id a client reports
+is what finds the request:
+
+```bash
+docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>
+```
+
+`device` is the redacted principal — the same helper the chat adapter uses for
+its identifiers — and it is `-` when no credential was verified. It is stable
+for a given device, so requests can be attributed to one machine without the
+log ever holding the device id itself.
+
+What a record deliberately does not contain, of the things **this service
+holds**: no credential, no identifier of an authenticated device other than the
+redacted `device` field, no submitted or translated text, and no query string.
+
+The unmatched-target case is the one place a caller's own bytes reach a record,
+and the guarantee there is about their **form**, not their content: no target
+reaches a record able to carry a terminal escape sequence, forge a field, or run
+past the line — inert either because it needed no escaping or because it was
+escaped. A caller may put anything in a URL, including strings that look like
+this service's own identifiers, and recording those discloses nothing: the
+reader of the line learns only what the writer of the request already had. What
+the guarantee above covers is what the service knows and the caller does not —
+the credential it verified, the principal behind it, the text it translated. (A
+device id is in any case the non-secret half of a token; `device revoke` takes
+one on the command line and `device list` prints them.)
+A target that could itself be a credential — a client or proxy that puts a token
+in the URL instead of the `Authorization` header — is replaced entirely by the
+literal `credential-shaped`, with no digest of it either: the digest would be
+unkeyed here (this container blanks the redaction secret, which belongs to the
+bot) and a leaked line would then be a cheap way to test guesses at the secret.
+
+`method` is likewise recorded by membership, not content: the standard verb when
+it is one, `other` when it is not. This service publishes `GET` and `POST` (plus
+the `HEAD` the framework pairs with `GET` on `/openapi.json`) and refuses every
+other verb, so the exact spelling of a refused one tells an operator nothing,
+and the field cannot be used to write caller-chosen text into the log.
+
+`route` has three cases, in this order:
+
+1. the request matched a route → its **route template**. An unsupported method
+   on a known route counts as matched: the framework picks the route and then
+   refuses the method, so a `405` is named by its template like any other.
+2. it matched nothing and could be a credential → the literal
+   `credential-shaped`, as above.
+3. it matched nothing else → what arrived, rendered inert and bounded, because
+   that value is chosen by an unauthenticated caller and an operator reads it
+   in a terminal. A target that needs no escaping is recorded as it stands. An
+   automatic trailing-slash `307` lands here, not in case 1, and so does
+   `/openapi.json` — whose rendering happens to be identical to its template.
+
+For the same reason the server's own access log stays off: it prints raw
+targets.
+
+Two properties a collector's parser can rely on. Every field is **one
+whitespace-delimited token** — an escaped target has its spaces and its `=`
+escaped precisely so it cannot become two — so splitting on whitespace and then
+on the first `=` is a complete parse **of everything after `request complete`**.
+(What precedes it is the timestamp, level and logger name from the log format,
+plus those two literal words; none of them are fields.) And a trailing `~` on
+the `route` value always means it was shortened — either the target itself or
+its rendering hit a bound: `~` is outside the character set a plain value may
+use, and an escaped one always ends in its closing quote.
+
+One value in the `status` field is not a status this service ever sends: `499`
+means the caller went away, or the work was cancelled at shutdown, before there
+was a response. Nothing reached the client, so there is no envelope to correlate
+with. A `ClientDisconnect` traceback may follow it — that is the hang-up itself,
+not a fault to chase.
+
+On a request that failed unexpectedly, the completion record appears **before**
+the traceback rather than after it: the exception passes through the recording
+middleware on its way to the handler that renders the `500`. The two are tied
+together by the same `request_id`.
+
+`WUWATERM_API_LOG_LEVEL` sets how much is written; `INFO` is the default and is
+the level these records are emitted at. `WARNING` keeps the failures and drops
+the per-request records. Like the chat adapter's own `WUWATERM_LOG_LEVEL` it is
+applied as the process level, so it governs third-party loggers too — except the
+HTTP client library, which is held at `WARNING` **or at this level, whichever is
+stricter**, because at `INFO` it reports the model endpoint this service was
+configured with. (The chat adapter pins that one flat at `WARNING`; here a
+quieter setting stays quiet.) It is separate from `wuwaterm-api serve
+--log-level`, which is the web server's own startup and socket logging and is
+not passed by the Compose `command:` at all.
+
 ### Cost Topology
 
 The API's budgets are per process and are NOT shared with the bot:
