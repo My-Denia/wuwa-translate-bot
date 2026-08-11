@@ -93,7 +93,11 @@ does not distribute generated game data or generated SQLite databases.
   bound on the deployment target by an unrelated service and was the upstream
   of that host's existing routes, so the old default would have taken over a
   running service rather than adding one. The port remains a setting; nothing
-  in the contract or the client depends on the number.
+  in the contract or the client depends on the number. An existing `.env` that
+  sets `WUWATERM_API_PORT` explicitly still wins over both defaults, so the
+  deployment guide now says to update that line and read the port back from the
+  recreated container: a changed default does not reach a host that pinned the
+  old one.
 
 ### Documentation
 

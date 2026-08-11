@@ -71,9 +71,10 @@ docker compose -f deploy/docker-compose.yml up -d
 `wuwaterm-api` serves the versioned HTTP surface documented by
 `docs/api/openapi.json`. It opens **no listener of its own that anything
 outside the host can reach**: it binds `WUWATERM_API_BIND` (default
-`127.0.0.1`) on `WUWATERM_API_PORT` (default `8788`). The service runs with host networking, so a `ports:` list
-would have no effect at all and none is present: what keeps this off the host's
-public interfaces is the bind address, hard-coded in
+`127.0.0.1`) on `WUWATERM_API_PORT` (default `8788`). The service runs with
+host networking, so a `ports:` list would have no effect at all and none is
+present: what keeps this off the host's public interfaces is the bind address,
+hard-coded in
 `deploy/docker-compose.yml` rather than interpolated from an environment file.
 One other line in that same file can override it — `command:` is passed
 through to the server, which accepts `--host` — so both live where they can
@@ -142,16 +143,28 @@ With those true, the route is one block added to the existing site. In Caddy
 syntax, inside the site block that already serves the chosen name:
 
 ```caddyfile
-handle_path /wuwaterm-api* {
+handle_path /wuwaterm-api/* {
+    # The port from the readback above, not the default assumed here.
     reverse_proxy 127.0.0.1:8788
 }
 ```
 
-Use the port the container actually has. `handle_path` strips the prefix, so
-the client's base address is `https://<the-existing-site>/wuwaterm-api` and the
-service still sees `/v1/...`. With another proxy, the equivalent is a
-path-prefix route that strips the prefix and passes the request to the same
-loopback address; nothing about the route may bind or publish the API itself.
+`handle_path` strips the matched prefix, so the client's base address is
+`https://<the-existing-site>/wuwaterm-api` and the service still sees
+`/v1/...`: the client's HTTP library merges a relative route onto a base that
+carries a path, so `/v1/translations` is sent as
+`/wuwaterm-api/v1/translations` (pinned by
+`client/tests/test_api.py::test_a_base_address_with_a_path_prefix_keeps_it_on_every_route`).
+
+The trailing `/*` is deliberate. `/wuwaterm-api*` would also match a sibling
+path that merely starts with the same characters — `/wuwaterm-api-docs`, say —
+and strip the prefix out of it, which is the one thing "purely additive" must
+not mean. The bare `/wuwaterm-api` with nothing after it stops matching, and
+nothing requests it.
+
+With another proxy, the equivalent is a path-prefix route that strips the
+prefix and passes the request to the same loopback address; nothing about the
+route may bind or publish the API itself.
 
 Back up the configuration before editing it, and apply the change with the
 proxy's own reload rather than a restart, so the sites already being served are
@@ -176,6 +189,25 @@ to the published address without a credential must be refused with the API's
 own `401` envelope — that single answer shows the route reaches this service
 AND that reaching it is not an authorization. Then start the desktop client
 against the same base address and translate something.
+
+If an existing `.env` sets `WUWATERM_API_PORT` explicitly, it wins over both
+the Compose default and the application's, so the port change above does not
+reach that host on its own. Update or remove the line:
+
+```bash
+WUWATERM_API_PORT=8788
+```
+
+Then recreate the API container and read the port back from it, because an
+`.env` edit does not reach a container that is already running:
+
+```bash
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
+docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
+```
+
+The route above must name whatever that prints.
 
 ### Device Credentials
 

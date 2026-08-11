@@ -13,36 +13,36 @@ Operational detail lives in sibling guides. Decision rationale lives in
 
 ```
 Telegram users / groups / linked discussion groups        owner's PC
-        |                                                     |
-        | Bot API (long polling getUpdates)                    | https, cert verified
-        v                                                      v
-+-----------------------------------+          +--------------------------------+
-| wuwaterm-bot (Compose service)    |          | reverse proxy already serving   |
-|  presentation: bot.py, channel.py |          | the operator's existing sites   |
-+----------------+------------------+          +---------------+----------------+
-                 |                                             | 127.0.0.1 (loopback)
-                 |                                             v
-                 |                              +--------------------------------+
-                 |                              | wuwaterm-api (Compose service) |
-                 |                              |  presentation: wuwaterm_api/   |
-                 |                              +---------------+----------------+
-                 |                                              |
-                 v                                              v
-        +-------------------------------------------------------------+
-        |  application layer  src/wuwaterm/application.py              |
-        |  dictionary-first pipeline, protocol-neutral, exactly once   |
-        +------------------------------+------------------------------+
-                                       |
-                 +---------------------+---------------------+
-                 v                                           v
-          data/terms.db (read-only)                OpenAI-compatible LLM
-                 ^
-                 | promote only via deploy/vps-update.sh
-        +--------+----------------------------------------------------+
-        |  Builder jobs (Compose profile: builder)                     |
-        |  refresh-data -> build-db -> verify-*                        |
-        |  never holds runtime secrets (no env_file)                   |
-        +--------------------------------------------------------------+
+                  |                                      |
+                  | Bot API (long polling)               | https, cert verified
+                  v                                      v
++-----------------------------------+  +---------------------------------+
+| wuwaterm-bot (Compose service)    |  | reverse proxy already serving   |
+|  presentation: bot.py, channel.py |  | the operator's existing sites   |
++-----------------+-----------------+  +-----------------+---------------+
+                  |                                      | 127.0.0.1 (loopback)
+                  |                                      v
+                  |                    +---------------------------------+
+                  |                    | wuwaterm-api (Compose service)  |
+                  |                    |  presentation: wuwaterm_api/    |
+                  |                    +-----------------+---------------+
+                  |                                      |
+                  v                                      v
+      +----------------------------------------------------------------+
+      |  application layer   src/wuwaterm/application.py               |
+      |  dictionary-first pipeline, protocol-neutral, exactly once     |
+      +-----------------------------+----------------------------------+
+                                    |
+                  +-----------------+--------------------+
+                  v                                      v
+          data/terms.db (read-only)            OpenAI-compatible LLM
+                  ^
+                  | promote only via deploy/vps-update.sh
+      +------------+---------------------------------------------------+
+      |  Builder jobs (Compose profile: builder)                       |
+      |  refresh-data -> build-db -> verify-*                          |
+      |  never holds runtime secrets (no env_file)                     |
+      +----------------------------------------------------------------+
 ```
 
 Two presentation adapters, one application layer, one more consumer:
@@ -264,9 +264,12 @@ Observed edges (static imports among shipped modules):
   only under `TYPE_CHECKING` for `BotConfig` (no runtime cycle).
 - `bot` → `application` (shared pipeline + rate limiter); `application` imports
   no presentation module and no Telegram SDK, enforced by the boundary guard.
-- `wuwaterm_api.app` → `wuwaterm.application` (pipeline, translator factory,
-  lookup entry points, error codes) and `wuwaterm.logging_utils` (`redact_id`)
-  — and nothing else from `wuwaterm`.
+- `wuwaterm_api` → `wuwaterm.application` (pipeline, translator factory,
+  lookup entry points, error codes) from `app.py` and `errors.py`, and
+  `wuwaterm.logging_utils` (`redact_id`) from `app.py`. Those two modules are
+  the whole of what the package imports from `wuwaterm` today; the guard
+  permits two more (`models`, `translation_policy`) and nothing beyond the
+  four.
 - `sentence` → `lookup`, `normalize`, `telegram_html`, `httpx`.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
