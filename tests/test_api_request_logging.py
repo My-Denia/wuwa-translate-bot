@@ -1058,12 +1058,16 @@ def test_the_api_extra_installs_no_websocket_library():
     # and group, so `pypinyin` is in it for the build extra alone. Failing on a
     # development tool that happens to want a WebSocket library would be a gate
     # that cries wolf, and those get deleted.
+    # Seeded from the mandatory dependencies AS WELL AS the extra: `--extra`
+    # adds to the ordinary set rather than replacing it, so the image really
+    # installs both, and a core dependency that one day wants a WebSocket
+    # library would be just as installed as an API one.
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     locked = {package["name"]: package for package in lock["package"]}
     closure: set[str] = set()
     pending = [
         item.split(">")[0].split("<")[0].split("=")[0].split("[")[0].strip()
-        for item in api
+        for item in list(pyproject["project"]["dependencies"]) + list(api)
     ]
     while pending:
         name = pending.pop()
