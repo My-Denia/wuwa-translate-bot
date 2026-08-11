@@ -54,13 +54,21 @@ def test_no_document_claims_the_client_build_is_reproducible():
 def test_the_build_script_states_the_guarantee_it_does_have():
     """Removing a false claim leaves a reader with no claim at all, which is
     how the false one comes back. The script says what it actually provides
-    and, explicitly, what it does not."""
+    and, explicitly, what it does not.
+
+    "Pinned" would have been the next false claim: the client has no lock
+    file, its dependencies are ranges, and both the interpreter patch release
+    and the CI runner image float, so two builds need not even share inputs.
+    The word is version-bounded, and the reasons are named.
+    """
     text = (ROOT / "client" / "build.ps1").read_text(encoding="utf-8")
 
-    assert "Pinned, self-checked one-folder PyInstaller build" in text
-    assert "What it does NOT claim: bit-for-bit reproducibility." in text
-    # The three absent mechanisms are named, so the next reader can tell
-    # whether adding one would change the claim.
+    assert "Version-bounded, self-checked one-folder PyInstaller build" in text
+    assert "What it does NOT claim: bit-for-bit reproducibility" in text
+    # Why the inputs are not fixed either.
+    assert "The client has no lock file" in text
+    # The absent mechanisms are named, so the next reader can tell whether
+    # adding one would change the claim.
     for mechanism in (
         "build-timestamp normalisation",
         "hash-seed pinning",
@@ -70,13 +78,21 @@ def test_the_build_script_states_the_guarantee_it_does_have():
 
 
 def test_the_client_readme_says_what_cancel_does_not_do():
-    """Cancel is client-side only: the request has been sent, the service is
-    never told, the work finishes and a model call already in flight is paid
-    for. A user who reads "stops the in-flight request" believes the opposite
-    of all four."""
+    """Cancel is client-side only once the request is on the wire: the service
+    is never told, the work finishes and a model call already in flight is
+    paid for. A user who reads "stops the in-flight request" believes the
+    opposite of all three.
+
+    The narrower case is part of the claim, not a footnote to it: a cancel
+    caught before the task's first step really does send nothing
+    (`TranslateView._on_translate_clicked` only schedules the coroutine;
+    `client/tests/test_ui_smoke.py::test_cancelling_before_the_task_starts_restores_the_buttons`).
+    Saying otherwise would be a second false claim in place of the first.
+    """
     text = (ROOT / "client" / "README.md").read_text(encoding="utf-8")
 
     assert "Cancellation stops the waiting, not the work." in text
-    assert "it does not un-spend the model budget" in text
+    assert "without un-spending the model budget" in text
+    assert "before the request is\n  dispatched, nothing has been sent" in text
     # The old wording, which promised the service was affected.
     assert "Cancel stops the in-flight request\n  immediately" not in text

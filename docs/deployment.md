@@ -414,7 +414,9 @@ is still waiting for the answer. Measured here: a translation cancelled in the
 client 0.4 s after it started was recorded `status=200 duration_ms=5183.6`,
 indistinguishable from one whose answer was read. Treat `499` as what it says —
 a caller that went away mid-read, or a shutdown — and not as a count of
-cancellations.
+cancellations. (A cancel that lands in the instant before the client dispatches
+its request sends nothing at all, so that case leaves no record here rather than
+a misleading one.)
 
 Two consequences for reading these records. A cancelled request is not a
 distinct state in the log: what is recorded is what the SERVICE did, not what a

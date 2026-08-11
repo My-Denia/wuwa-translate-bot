@@ -96,17 +96,18 @@ establishes a new one.
   "Could not reach the server…" and leaves the client usable; the next
   request tries again from scratch. No state is cached across the failure.
 - **Cancellation stops the waiting, not the work.** Translate → Cancel ends
-  this client's request immediately: the status line says the request was
-  cancelled and the buttons return to their normal state. What it does not do
-  is reach the service. Your text is small and has been sent in full well
-  before the button can be pressed, so there is no delivery left to interrupt;
-  the service is not told that you stopped waiting and finishes the
+  this client's request: the status line says the request was cancelled and
+  the buttons return to their normal state. Whether it stops anything else
+  depends on how early it lands. Caught in the moment before the request is
+  dispatched, nothing has been sent and nothing is spent. After that — and
+  your text is small, so "after that" is almost at once — Cancel no longer
+  reaches the service: it is not told you stopped waiting, and it finishes the
   translation, model call and all, recording it as an ordinary completed
-  request. So cancelling frees the application; it does
-  not stop the work and it does not un-spend the model budget the request had
-  already committed. The answer is discarded unread, and with it the request
-  id, so a cancelled request is not one you can quote to an operator
-  afterwards. Pressing Translate again is a new request, and pays again.
+  request. Cancelling then frees the application without stopping the work,
+  and without un-spending the model budget the request had already committed.
+  The answer is discarded unread, and with it the request id, so such a
+  request is not one you can quote to an operator afterwards. Pressing
+  Translate again is a new request, which pays again.
 
 ## Getting and storing a device credential
 
