@@ -45,7 +45,14 @@ code itself enforces.
   machine's PATH, and the build script runs the artifact's `--self-check`
   (imports and constructs everything a normal start does, off-screen) before
   declaring success. A one-file build was not chosen: it unpacks at every
-  start and hides the payload from inspection.
+  start and hides the payload from inspection. The build is pinned (one
+  committed spec, one declared interpreter version, dependency ranges in
+  `client/pyproject.toml`), scripted, CI-executed and self-checked; it is
+  **not** bit-for-bit reproducible, and nothing in it attempts that — no
+  timestamp normalisation, no hash-seed pinning, no two-build comparison.
+  Deliberate: the artifact is owner-distributed by hand and unsigned, so a
+  byte-identical rebuild would prove nothing to anyone who does not already
+  trust the build machine.
 - **No code signing** (`WuwaTerm.spec` sets `codesign_identity=None`;
   `client/build.ps1` and `client/README.md` state it). Accepted cost:
   first-run SmartScreen friction on a machine that has never seen the binary.
@@ -199,7 +206,15 @@ runner or the client's dependencies.
   (`client/tests/test_api.py::test_cancel_reports_cancellation_not_a_generic_error`;
   `client/tests/test_translate_view_status.py::test_a_cancelled_request_reports_that_it_was_cancelled`;
   the view also covers a cancel that lands between awaits or before the task
-  starts).
+  starts). **Its scope is this process.** The request has already been
+  delivered in full by then and nothing that reaches the service cancels it, so
+  the work continues, a model call in flight is still paid for, and the server
+  records an ordinary completion rather than a client-gone `499` — the log
+  side of that is in `docs/deployment.md`, the user-facing side in
+  `client/README.md`.
+  Making cancel actually cancel is a server-side change (a disconnect the
+  service watches for, and orchestration that unwinds on it), not a client
+  wording change, and it is not implemented.
 - Stable error rendering (`errors.py`, `strings.py`): connect-level failures
   become `offline`, a deadline becomes `timeout` (including the service's
   own 504, remapped so a server-side deadline reads as a timeout), a

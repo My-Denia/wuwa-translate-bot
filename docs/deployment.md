@@ -234,14 +234,36 @@ address and translate something.
 ### Device Credentials
 
 There is no registration endpoint. Credentials are issued by the operator on
-the host and shown exactly once:
+the host and shown exactly once.
+
+**Run them on the image the service is already on.** These are one-shot
+containers of the same Compose service, and `docker compose run` resolves the
+image the same way `compose up` does: from `WUWATERM_RUNTIME_IMAGE`, falling
+back to the Compose default `wuwaterm-runtime:local`. The updater never uses
+that default — it creates the serving containers from an immutable
+`wuwaterm-runtime:<source commit>` — so on a host that still carries an older
+`wuwaterm-runtime:local` tag from before, an unpinned `run` starts a container
+from a *different and stale* image while the deployed one keeps serving. The
+property to hold, and the one to check a variant of these commands against, is:
+**the one-shot container must be the deployed image, not whatever the default
+tag resolves to.** Getting it wrong does not announce itself as the wrong
+image: the runtime entrypoint accepts only the commands its own build knows, so
+an image older than a subcommand refuses that subcommand, and the refusal reads
+like a broken runbook. Take the reference from the running container, exactly
+as the recreate above does:
 
 ```bash
 cd /opt/wuwaterm/current
+export WUWATERM_RUNTIME_IMAGE="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
 ```
+
+The export lasts for that shell session, so it covers the stdin form below as
+well; a new session needs it again. It is also what keeps the one-shot
+container from being BUILT: the service carries a `build:` block, and a
+reference that resolves to no local image is what sends Compose to build one.
 
 `device issue` reads the secret from standard input; the service never prints
 credential material. Generate it where it will be stored, then register it:
@@ -379,6 +401,27 @@ means the caller went away, or the work was cancelled at shutdown, before there
 was a response. Nothing reached the client, so there is no envelope to correlate
 with. A `ClientDisconnect` traceback may follow it — that is the hang-up itself,
 not a fault to chase.
+
+**A desktop client's Cancel button does not normally produce one.** What the
+service can observe is a connection that goes away *while it is still reading
+the request*; a translation body is a short piece of text, delivered long
+before anyone can press a button, so there is nothing left to interrupt. The
+cancel ends the client's wait and closes the client's own connection, and on
+this deployment that hang-up did not reach the service: the request ran to
+completion and was recorded with its ordinary status and its full duration —
+the translation-model call included, whose cost is spent whether or not anyone
+is still waiting for the answer. Measured here: a translation cancelled in the
+client 0.4 s after it started was recorded `status=200 duration_ms=5183.6`,
+indistinguishable from one whose answer was read. Treat `499` as what it says —
+a caller that went away mid-read, or a shutdown — and not as a count of
+cancellations.
+
+Two consequences for reading these records. A cancelled request is not a
+distinct state in the log: what is recorded is what the SERVICE did, not what a
+user waited for, so log volume and model spend both count requests nobody read.
+And such a request has no id the user can quote — the client never reads the
+response the id arrives in — so finding it means bracketing it in time on its
+route rather than searching for an id.
 
 On a request that failed unexpectedly, the completion record appears **before**
 the traceback rather than after it: the exception passes through the recording

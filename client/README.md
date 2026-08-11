@@ -95,9 +95,18 @@ establishes a new one.
 - **Unreachable service.** A connection failure is reported as
   "Could not reach the server…" and leaves the client usable; the next
   request tries again from scratch. No state is cached across the failure.
-- **Cancellation.** Translate → Cancel stops the in-flight request
-  immediately; the status line says the request was cancelled and the buttons
-  return to their normal state.
+- **Cancellation stops the waiting, not the work.** Translate → Cancel ends
+  this client's request immediately: the status line says the request was
+  cancelled and the buttons return to their normal state. What it does not do
+  is reach the service. Your text is small and has been sent in full well
+  before the button can be pressed, so there is no delivery left to interrupt;
+  the service is not told that you stopped waiting and finishes the
+  translation, model call and all, recording it as an ordinary completed
+  request. So cancelling frees the application; it does
+  not stop the work and it does not un-spend the model budget the request had
+  already committed. The answer is discarded unread, and with it the request
+  id, so a cancelled request is not one you can quote to an operator
+  afterwards. Pressing Translate again is a new request, and pays again.
 
 ## Getting and storing a device credential
 

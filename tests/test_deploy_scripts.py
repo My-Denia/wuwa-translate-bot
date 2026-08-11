@@ -1536,6 +1536,58 @@ def test_documented_api_commands_use_the_configured_port():
     assert "printenv WUWATERM_API_PORT" in text
 
 
+def test_documented_one_shot_commands_run_on_the_deployed_image():
+    """A one-shot `compose run` resolves the image from the Compose default,
+    not from the deployment.
+
+    The serving containers are created from an immutable
+    `wuwaterm-runtime:<commit>`; the Compose default is the mutable
+    `wuwaterm-runtime:local`. On a host that still carries an old `:local`
+    tag, an unpinned `run` therefore executes a DIFFERENT image than the one
+    deployed, and an image older than a subcommand refuses that subcommand -
+    which reads as a broken runbook rather than as the wrong image. Observed
+    exactly that way on this project's own host while issuing the owner's
+    credential.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    credentials = text.split("### Device Credentials", 1)[1].split("###", 1)[0]
+
+    # The pin comes from the running container, and it comes BEFORE the
+    # commands it has to cover.
+    pin = (
+        'export WUWATERM_RUNTIME_IMAGE="$(docker inspect '
+        "--format '{{.Config.Image}}' wuwaterm-api)\""
+    )
+    assert pin in credentials
+    for subcommand in ("device issue", "device list", "device revoke"):
+        assert credentials.index(pin) < credentials.index(subcommand), subcommand
+    # The property is stated next to the command, so a reader can tell whether
+    # a variant of it is still correct instead of matching the text.
+    assert (
+        "the one-shot container must be the deployed image, not whatever the "
+        "default\ntag resolves to" in credentials
+    )
+
+
+def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
+    """`499` is the record for a caller that went away, and a reader can
+    reasonably expect a Cancel button to produce one. It does not.
+
+    Cancelling in the desktop client stops that client from waiting; the
+    request was already sent, nothing tells the service, and the request runs
+    to completion and is recorded with its ordinary status - model cost
+    included. An operator told otherwise would look for `499` records that
+    never arrive and would under-count what the service actually did.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    assert "A desktop client's Cancel button does not normally produce one." in text
+    # The two consequences, not just the mechanism.
+    assert "whose cost is spent" in text
+    assert "has no id the user can quote" in text
+
+
 def test_the_guide_does_not_teach_host_administration_as_the_client_path():
     """The deployment guide is a runbook, and a runbook that documents a
     host-administration channel as the way a desktop client reaches the

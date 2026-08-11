@@ -1,12 +1,25 @@
 <#
 .SYNOPSIS
-    Reproducible one-folder PyInstaller build for the WuwaTerm desktop client.
+    Pinned, self-checked one-folder PyInstaller build for the WuwaTerm
+    desktop client.
 
 .DESCRIPTION
     Builds client/dist/WuwaTerm/WuwaTerm.exe from client/WuwaTerm.spec using
     the client's own virtual environment (client/.venv). Fails loudly if the
     venv, PySide6, or pyinstaller are missing, rather than falling back to a
     system Python or a different GUI toolkit. No code signing is performed.
+
+    What "pinned, self-checked" claims, precisely: the inputs are fixed (one
+    committed spec, one declared interpreter version, dependency ranges in
+    client/pyproject.toml), this exact script is what CI runs on
+    windows-latest, and the artifact it produces is started with --self-check
+    before the build is called a success.
+
+    What it does NOT claim: bit-for-bit reproducibility. There is no
+    build-timestamp normalisation, no hash-seed pinning and no two-build
+    comparison here, so two runs are not expected to produce identical bytes
+    and nothing verifies that they do. Any such guarantee would have to be
+    built and checked; do not read one into this script.
 #>
 
 $ErrorActionPreference = "Stop"
