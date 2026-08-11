@@ -265,8 +265,11 @@ mkdir -p state-api && chmod 700 state-api
 
 ### Reading The Request Log
 
-The service writes **one record per request** to standard output, which is
-where the container runtime collects it:
+The service writes **one record per request** to its **standard error** — the
+stream the standard library's default handler uses, and the one the bot's
+records already go to. The container runtime collects both streams, so
+`docker compose logs` shows them; a collector that captures only stdout will
+not:
 
 ```bash
 cd /opt/wuwaterm/current
@@ -282,14 +285,19 @@ Each record is one line and always carries the same fields:
 Every request produces one, including the unauthenticated `/healthz` and
 `/readyz` probes — so a monitor polling those is visible in the volume.
 
-`request_id` is minted by the service and returned to the caller in the JSON
-body of every response this service defines a body shape for — every `/v1`
-answer and every error envelope, though not the schema at `/openapi.json` — and
-in the `X-Request-Id` header of every response the application itself builds.
-The one exception is an unhandled failure: that response is assembled outside
-the middleware that attaches the header, so on those `500`s the body carries the
-id and the header does not. Either way the id a client reports is what finds the
-request:
+`request_id` is minted by the service and reaches the caller two ways, neither
+of which covers quite everything:
+
+| Response | In the JSON body | In `X-Request-Id` |
+|---|---|---|
+| any `/v1` answer | yes | yes |
+| any error envelope | yes | yes |
+| an unhandled `500` | yes | **no** — assembled outside the middleware that attaches the header |
+| `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
+| `/openapi.json` | **no** — that body is the schema | yes |
+
+So for the calls an operator correlates, the body is enough; for a probe, read
+the header. Either way the id a client reports is what finds the request:
 
 ```bash
 docker compose -f deploy/docker-compose.yml logs --since 24h wuwaterm-api | grep <request id>
@@ -302,11 +310,13 @@ log ever holding the device id itself.
 
 What a record deliberately does not contain: no credential, no raw device id,
 no submitted or translated text, and no request target as the caller wrote it.
-A matched request is named by its **route template**; an unmatched one (an
-unknown path, an unsupported method) is recorded escaped and truncated,
-because that value is chosen by an unauthenticated caller and an operator
-reads it in a terminal. For the same reason the server's own access log stays
-off: it prints raw targets.
+A request that matched a route is named by its **route template**, and an
+unsupported method on a known route counts as matched — the framework picks the
+route first and then refuses the method, so a `405` is named by its template
+like any other. Only a target that matched no route at all is recorded from what
+arrived, escaped and truncated, because that value is chosen by an
+unauthenticated caller and an operator reads it in a terminal. For the same
+reason the server's own access log stays off: it prints raw targets.
 
 On a request that failed unexpectedly, the completion record appears **before**
 the traceback rather than after it: the exception passes through the recording

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
 import re
 import sqlite3
@@ -259,10 +260,13 @@ def _route_label(request: Request) -> str:
     """The route TEMPLATE this request matched, or its escaped raw target.
 
     The template is repository text: it cannot carry anything, and it gives one
-    record shape per endpoint instead of one per spelling a caller invents. A
-    request that matched nothing (an unknown path, an unsupported method) has
-    no template, and there the decoded target is the only identifying thing
-    left — recorded escaped, never as it arrived.
+    record shape per endpoint instead of one per spelling a caller invents.
+
+    An unsupported METHOD on a known route still has one: the router records a
+    partial match before refusing, so a 405 is named by its template like any
+    other. Only a target that matched no route at all falls through, and there
+    the decoded path is the one identifying thing left — recorded escaped,
+    never as it arrived.
     """
     template = getattr(request.scope.get("route"), "path", None)
     if isinstance(template, str) and template:
@@ -362,17 +366,28 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 # The record is additive by construction: it can be missing, it
                 # can never be the thing that goes wrong.
                 #
-                # Reported WITH the id and the cause. `logging` already absorbs
-                # handler-side failures itself, so what reaches here is a fault
-                # in the field helpers above — repository code, whose traceback
-                # therefore carries nothing a caller supplied, and which is
-                # exactly the thing worth having a traceback for. Without the
-                # id this line says only that some request went unrecorded.
-                LOGGER.warning(
-                    "request record could not be written request_id=%s",
-                    request_id,
-                    exc_info=True,
-                )
+                # Reported WITH the id and the cause: without the id this line
+                # says only that some request went unrecorded, and the cause is
+                # what makes it actionable. Neither can leak — every value in
+                # the record is sanitised by _log_field/_log_principal BEFORE
+                # LOGGER.info is reached, so nothing a caller supplied is in
+                # flight by the time an exception can carry it.
+                #
+                # And suppressed, because the fallback goes through the SAME
+                # handler chain that just failed. `logging.Handler.handle` does
+                # not wrap `filter` or `emit`; it is the stdlib handler
+                # implementations that catch their own errors. A handler this
+                # service did not install — configure_logging deliberately does
+                # not force one — can therefore raise from both calls, and the
+                # second one would escape the finally and become the request's
+                # outcome. Suppressing Exception and not BaseException keeps
+                # cancellation propagating.
+                with contextlib.suppress(Exception):
+                    LOGGER.warning(
+                        "request record could not be written request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
 
 
 def _error_response(exc: ApiError, request: Request) -> JSONResponse:

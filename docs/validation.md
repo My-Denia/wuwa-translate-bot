@@ -63,8 +63,9 @@ machine (see [Deployment](deployment.md)).
 
 ## Server-Side Request Records
 
-The HTTP adapter writes one line per request to standard output when it is
-started by `wuwaterm-api serve`. `WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`,
+The HTTP adapter writes one line per request to standard error when it is
+started by `wuwaterm-api serve` — the stream the standard library's default
+handler uses, and the one the bot's records already go to. `WUWATERM_API_LOG_LEVEL` (`CRITICAL`, `ERROR`,
 `WARNING`, `INFO`, `DEBUG`; default `INFO`) sets the level; an unusable value
 stops the serve path with exit code 2 and never blocks the credential
 subcommands. Nothing is configured at import time, so a program that embeds the

@@ -103,12 +103,19 @@ class RecordingHandler(logging.Handler):
 
 @contextlib.contextmanager
 def captured_records():
-    """Attach a handler to the adapter's logger for the duration of a block.
+    """Attach a handler to the ROOT logger for the duration of a block.
+
+    Root, not ``wuwaterm_api``: what the serve path installs is a root handler,
+    so the deployed output carries records from the shared application layer and
+    from every library in the process too. A privacy claim about "the log" is a
+    claim about that whole surface — pinning only this package's namespace would
+    let a request-dependent record added anywhere else carry a credential past a
+    green test.
 
     Deliberately not ``caplog``: the point is what an installed handler sees,
     and pytest's own capture level is global state other tests can move.
     """
-    logger = logging.getLogger(LOGGER_NAME)
+    logger = logging.getLogger()
     handler = RecordingHandler()
     previous_level = logger.level
     logger.addHandler(handler)
@@ -324,6 +331,64 @@ def test_a_failure_while_recording_cannot_replace_the_requests_own_outcome(
     assert "the record itself failed" not in raised
 
 
+def test_a_handler_that_always_raises_cannot_take_the_request_with_it(
+    tmp_path, sample_db
+):
+    """The failure mode the guard is FOR, driven through a real handler.
+
+    ``logging.Handler.handle`` wraps neither ``filter`` nor ``emit`` — it is the
+    standard library's own handler implementations that catch their errors. So
+    an embedder's handler can raise, and it raises again for the fallback that
+    reports the loss, from inside the same ``finally``. Both have to be
+    contained or the record becomes the request's outcome.
+
+    The handler is scoped to those two calls on purpose. Every other logging
+    call in this service is unguarded, as it was before this change, and a
+    process whose handler raises is broken in those places too — that is a
+    pre-existing property and not what this guard claims. What it claims is
+    narrow and is what is asserted here: the completion record cannot be the
+    thing that goes wrong.
+    """
+    guarded = ("request complete", "request record could not be written")
+
+    class Hostile(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__(level=logging.DEBUG)
+            self.attempts = 0
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if not record.getMessage().startswith(guarded):
+                return
+            self.attempts += 1
+            raise RuntimeError("this handler always fails")
+
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+
+    hostile = Hostile()
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(hostile)
+    root.setLevel(logging.DEBUG)
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        )
+    finally:
+        root.removeHandler(hostile)
+        root.setLevel(previous_level)
+
+    assert response.status_code == 200, response.text
+    # Both the record and the report of its loss were attempted and contained.
+    assert hostile.attempts >= 2
+
+
 # --------------------------------------------------------------------------
 # What a record may never contain
 # --------------------------------------------------------------------------
@@ -400,6 +465,26 @@ def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
     assert "\x07" not in message
     assert "\\x1b" in message
     assert len(fields(message)["route"]) <= 100
+
+
+def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
+    tmp_path, sample_db
+):
+    """A 405 is a MATCH, not a miss.
+
+    The router records a partial match before refusing the method, so the
+    template is available and the escaped fallback does not apply. Pinned
+    because the runbook tells an operator which of the two a record contains.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+
+    with captured_records() as captured:
+        response = run(call(app, "DELETE", "/healthz"))
+
+    assert response.status_code == 405
+    record = fields(captured.completions[0])
+    assert record["route"] == "/healthz"
+    assert record["method"] == "DELETE"
 
 
 def test_a_hostile_path_that_matched_a_route_is_recorded_as_the_template(
