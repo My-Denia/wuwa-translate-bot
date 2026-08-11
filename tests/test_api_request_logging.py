@@ -1044,12 +1044,16 @@ IMAGE_ENVIRONMENTS = [
         "os_name": "posix",
         "platform_machine": machine,
         "python_version": "3.11",
-        "python_full_version": "3.11.0",
+        "python_full_version": version,
         "implementation_name": "cpython",
         "platform_python_implementation": "CPython",
         "extra": "",
     }
     for machine in ("x86_64", "aarch64")
+    # `python:3.11-slim` is a MUTABLE tag: it is some 3.11 patch, not a known
+    # one. Both ends of the series are evaluated so that a marker written
+    # against a patch boundary counts whichever way it points.
+    for version in ("3.11.0", "3.11.99")
 ]
 
 WEBSOCKET_LIBRARIES = {"websockets", "wsproto"}
@@ -1075,12 +1079,17 @@ def _requested(items) -> list[tuple[str, frozenset[str]]]:
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
 
+    requirements = [Requirement(item) for item in items]
     return [
         (
-            canonicalize_name(Requirement(item).name),
-            frozenset(canonicalize_name(e) for e in Requirement(item).extras),
+            canonicalize_name(requirement.name),
+            frozenset(canonicalize_name(e) for e in requirement.extras),
         )
-        for item in items
+        for requirement in requirements
+        # A root requirement carries a marker too, and one that does not apply
+        # to the image is not installed by it — rejecting it here would fail a
+        # gate about the image over something the image never sees.
+        if _applies_to_the_image(str(requirement.marker) if requirement.marker else None)
     ]
 
 
@@ -1120,6 +1129,14 @@ def test_the_api_extra_installs_no_websocket_library():
     # the extras a requirement selects, because those edges live under the
     # package's optional dependencies and are just as installed.
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    # One entry per project, asserted rather than assumed: a universal lock CAN
+    # carry several variants of a name under a forked resolution, and collapsing
+    # those by name would silently keep one of them. This lock has none, and if
+    # that ever changes this gate should say so rather than quietly narrow.
+    names = [canonicalize_name(package["name"]) for package in lock["package"]]
+    assert len(names) == len(set(names)), sorted(
+        name for name in names if names.count(name) > 1
+    )
     locked = {
         canonicalize_name(package["name"]): package for package in lock["package"]
     }
