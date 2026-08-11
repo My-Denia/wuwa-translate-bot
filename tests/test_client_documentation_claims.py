@@ -6,6 +6,10 @@ reproducibility mechanism, and the client's README described Cancel as
 stopping the in-flight request when it stops only this process waiting for it.
 Both are cheap to reintroduce and neither is caught by any behavioural test,
 because there is no behaviour to catch - the defect is the sentence.
+
+Every check here reads whitespace-normalised text. A phrase that spans a line
+break in markdown must still be found, and - more importantly - a banned
+sentence must not be able to slip back in simply by wrapping one word earlier.
 """
 
 from __future__ import annotations
@@ -14,18 +18,49 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Every place a build claim could live: the script itself, the client's
-# README, the ADR that records the packaging decision, and the validation
-# table that says what each gate proves.
-BUILD_CLAIM_FILES = (
-    "client/build.ps1",
-    "client/README.md",
-    "docs/adr/0011-pc-client-stack.md",
-    "docs/validation.md",
-    "docs/architecture.md",
-    "README.md",
-    "CHANGELOG.md",
+# Directories that are not this repository's prose: build output, virtual
+# environments, caches, and the run folders the agent harness writes.
+SKIPPED_DIRECTORY_NAMES = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        "node_modules",
+        "build",
+        "dist",
+        "goal-runs",
+        "site-packages",
+    }
 )
+
+
+def _flat(path: Path) -> str:
+    """File text with every run of whitespace collapsed to one space."""
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _prose_files() -> list[Path]:
+    """Every prose or script file in this repository a build claim could
+    live in - discovered, not listed.
+
+    A hardcoded list turns a rename into silent loss of coverage and never
+    sees a document added later, which is the wrong direction for a guard
+    whose whole job is to notice text. `tests/` is excluded because this file
+    has to name the banned spellings in order to ban them.
+    """
+    found: list[Path] = []
+    for pattern in ("*.md", "*.ps1", "*.rst", "*.txt"):
+        for path in ROOT.rglob(pattern):
+            if SKIPPED_DIRECTORY_NAMES.intersection(path.parts):
+                continue
+            if "tests" in path.relative_to(ROOT).parts:
+                continue
+            found.append(path)
+    return found
 
 
 def test_no_document_claims_the_client_build_is_reproducible():
@@ -33,22 +68,28 @@ def test_no_document_claims_the_client_build_is_reproducible():
     scripted one.
 
     Nothing here normalises build timestamps, pins a hash seed, or compares
-    two builds, so no file may use the word as a promise. The ADR is allowed
-    to say the project does NOT have it - that is the denial, not the claim -
-    so the check is on the claiming spellings.
+    two builds, so no file may use the word as a promise. Denials are fine and
+    are what the corrected text uses, so the ban is on the claiming
+    spellings.
     """
-    for relative in BUILD_CLAIM_FILES:
-        path = ROOT / relative
-        if not path.exists():  # pragma: no cover - all of these are committed
-            continue
-        text = path.read_text(encoding="utf-8").lower()
+    scanned = _prose_files()
+    # A discovery bug that finds nothing would pass every assertion below.
+    assert len(scanned) > 10
+    assert ROOT / "client" / "build.ps1" in scanned
+    assert ROOT / "client" / "README.md" in scanned
+    assert ROOT / "docs" / "adr" / "0011-pc-client-stack.md" in scanned
+    assert ROOT / "docs" / "validation.md" in scanned
+
+    for path in scanned:
+        text = _flat(path).lower()
         for claim in (
             "reproducible build",
             "reproducible one-folder",
             "reproducible pyinstaller",
+            "build is reproducible",
             "reproducibly",
         ):
-            assert claim not in text, f"{relative}: {claim}"
+            assert claim not in text, f"{path.relative_to(ROOT)}: {claim}"
 
 
 def test_the_build_script_states_the_guarantee_it_does_have():
@@ -61,7 +102,7 @@ def test_the_build_script_states_the_guarantee_it_does_have():
     and the CI runner image float, so two builds need not even share inputs.
     The word is version-bounded, and the reasons are named.
     """
-    text = (ROOT / "client" / "build.ps1").read_text(encoding="utf-8")
+    text = _flat(ROOT / "client" / "build.ps1")
 
     assert "Version-bounded, self-checked one-folder PyInstaller build" in text
     assert "What it does NOT claim: bit-for-bit reproducibility" in text
@@ -89,10 +130,11 @@ def test_the_client_readme_says_what_cancel_does_not_do():
     `client/tests/test_ui_smoke.py::test_cancelling_before_the_task_starts_restores_the_buttons`).
     Saying otherwise would be a second false claim in place of the first.
     """
-    text = (ROOT / "client" / "README.md").read_text(encoding="utf-8")
+    text = _flat(ROOT / "client" / "README.md")
 
     assert "Cancellation stops the waiting, not the work." in text
     assert "without un-spending the model budget" in text
-    assert "before the request is\n  dispatched, nothing has been sent" in text
-    # The old wording, which promised the service was affected.
-    assert "Cancel stops the in-flight request\n  immediately" not in text
+    assert "before the request is dispatched, nothing has been sent" in text
+    # The old wording, which promised the service was affected. Normalised, so
+    # re-wrapping the sentence cannot bring it back past this check.
+    assert "Cancel stops the in-flight request immediately" not in text

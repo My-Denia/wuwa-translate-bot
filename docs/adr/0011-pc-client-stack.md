@@ -26,8 +26,9 @@ code itself enforces.
   maintains both sides.
 - **PySide6 >= 6.7, < 7** for the UI, with **qasync** bridging the Qt event
   loop and asyncio (`client/src/wuwaterm_client/app.py`). The bridge is what
-  makes an in-flight HTTP request cancellable from the UI thread without a
-  worker-thread layer. A plain Tk UI would have cost the native look and the
+  makes the UI's wait on an in-flight HTTP request cancellable from the UI
+  thread without a worker-thread layer (the wait, not the request: see
+  Timeouts, cancellation, stable errors below). A plain Tk UI would have cost the native look and the
   async bridge; a web UI would have reintroduced a hosted surface the project
   deliberately does not have.
 - **httpx >= 0.27, < 1** as the async HTTP client

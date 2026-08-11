@@ -1552,21 +1552,30 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
 
     credentials = text.split("### Device Credentials", 1)[1].split("###", 1)[0]
+    # Line wrapping is editorial; the phrases below are the property.
+    flat = " ".join(credentials.split())
 
-    # The pin comes from the running container, and it comes BEFORE the
+    # The reference comes from the running container, and it comes BEFORE the
     # commands it has to cover.
-    pin = (
-        'export WUWATERM_RUNTIME_IMAGE="$(docker inspect '
-        "--format '{{.Config.Image}}' wuwaterm-api)\""
-    )
+    pin = "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)\""
     assert pin in credentials
+    assert 'export WUWATERM_RUNTIME_IMAGE="$image"' in credentials
     for subcommand in ("device issue", "device list", "device revoke"):
         assert credentials.index(pin) < credentials.index(subcommand), subcommand
+    # A failed `docker inspect` leaves the variable EMPTY, and Compose's `:-`
+    # default treats empty exactly like unset - straight back to the mutable
+    # tag this whole section exists to avoid, by following this section. So
+    # the value is checked and echoed, not assumed, and the guide says what
+    # the echo must show.
+    assert '[ -n "$image" ]' in credentials
+    assert 'echo "$WUWATERM_RUNTIME_IMAGE"' in credentials
+    assert "Read the echoed value; do not assume it." in flat
+    assert "leaves the variable set to the EMPTY string" in flat
     # The property is stated next to the command, so a reader can tell whether
     # a variant of it is still correct instead of matching the text.
     assert (
         "the one-shot container must be the deployed image, not whatever the "
-        "default\ntag resolves to" in credentials
+        "default tag resolves to" in flat
     )
 
 
@@ -1580,12 +1589,17 @@ def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
     included. An operator told otherwise would look for `499` records that
     never arrive and would under-count what the service actually did.
     """
-    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    flat = " ".join(
+        (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8").split()
+    )
 
-    assert "A desktop client's Cancel button does not normally produce one." in text
+    assert "A desktop client's Cancel button does not normally produce one." in flat
     # The two consequences, not just the mechanism.
-    assert "whose cost is spent" in text
-    assert "has no id the user can quote" in text
+    assert "whose cost is spent" in flat
+    assert "has no id the user can quote" in flat
+    # ...and the case that really does stop the work, so the correction does
+    # not overshoot into a second false claim.
+    assert "sends nothing at all, so that case leaves no record here" in flat
 
 
 def test_the_guide_does_not_teach_host_administration_as_the_client_path():

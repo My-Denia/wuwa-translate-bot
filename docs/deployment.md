@@ -254,16 +254,31 @@ as the recreate above does:
 
 ```bash
 cd /opt/wuwaterm/current
-export WUWATERM_RUNTIME_IMAGE="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
+[ -n "$image" ] || echo "wuwaterm-api is not running: nothing to pin to" >&2
+export WUWATERM_RUNTIME_IMAGE="$image"
+echo "$WUWATERM_RUNTIME_IMAGE"
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
 ```
 
+**Read the echoed value; do not assume it.** `export` reports its own success,
+never the command inside it, so a `docker inspect` that failed — the container
+stopped, renamed, or a deployment torn down half way — leaves the variable set
+to the EMPTY string. Compose's `:-` default treats empty exactly like unset, so
+the commands would drop straight back to `wuwaterm-runtime:local`: the failure
+this section exists to prevent, reached by following this section. What the
+echo must print is `wuwaterm-runtime:<commit>`. If it prints nothing, or the
+`:local` tag, stop — nothing is pinned, and that is the property, not the
+command, failing.
+
 The export lasts for that shell session, so it covers the stdin form below as
-well; a new session needs it again. It is also what keeps the one-shot
-container from being BUILT: the service carries a `build:` block, and a
-reference that resolves to no local image is what sends Compose to build one.
+well; a new session needs it again. A resolved reference also happens to keep
+the one-shot container from being BUILT — the service carries a `build:` block,
+and a reference resolving to no local image is what sends Compose to build an
+unvalidated one — but that is a consequence of the pin holding, not a second
+guard. It is one more reason to read the echoed value.
 
 `device issue` reads the secret from standard input; the service never prints
 credential material. Generate it where it will be stored, then register it:
