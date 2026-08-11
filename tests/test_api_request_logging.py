@@ -28,6 +28,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from starlette.requests import ClientDisconnect
 
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import TOKEN_SCHEME, DeviceStore
@@ -298,6 +299,51 @@ def test_an_automatic_redirect_is_recorded_and_correlates_by_header_only(
     assert record["route"] == "/v1/meta/"
 
 
+@pytest.mark.parametrize("gone", [ClientDisconnect, asyncio.CancelledError])
+def test_a_caller_that_goes_away_is_not_recorded_as_a_server_fault(
+    tmp_path, sample_db, gone
+):
+    """A hang-up produces no response, so the seeded status would be a lie.
+
+    Recording it as `500` sends an operator looking for a server fault that did
+    not happen. Both shapes are covered because the one that actually occurs is
+    not the one to guess at: a socket hang-up during the body read surfaces as
+    ``ClientDisconnect`` (measured against a real server), while cancellation is
+    what a shutdown mid-request raises. Both must still propagate afterwards —
+    this changes the record, not the request.
+    """
+    from starlette.requests import Request
+
+    from wuwaterm_api.app import CLIENT_GONE_STATUS, RequestIdMiddleware
+
+    app, _ = build_app(tmp_path, sample_db)
+    middleware = RequestIdMiddleware(app)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/translations",
+        "headers": [],
+        "query_string": b"",
+        "app": app,
+    }
+
+    async def hung_up(_request):
+        raise gone()
+
+    async def scenario():
+        with captured_records() as captured:
+            with pytest.raises(gone):
+                await middleware.dispatch(Request(scope), hung_up)
+        return captured
+
+    captured = run(scenario())
+
+    assert len(captured.completions) == 1, captured.messages
+    record = fields(captured.completions[0])
+    assert record["status"] == str(CLIENT_GONE_STATUS)
+    assert record["route"] == "/v1/translations"
+
+
 def test_a_request_refused_before_routing_still_produces_a_record(tmp_path, sample_db):
     """The record comes from the outermost layer, not from the route handler.
 
@@ -542,7 +588,7 @@ def test_the_privacy_scan_covers_the_exception_text_a_handler_would_write(
     assert device.device_id not in emitted
 
 
-def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
+def test_an_unmatched_path_reaches_the_record_only_as_inert_text(
     tmp_path, sample_db
 ):
     """An unauthenticated caller controls the request target.
@@ -552,6 +598,11 @@ def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
     It is rendered escaped, so what an operator's terminal receives is inert
     text, and it is truncated so a long target cannot push the rest of the
     record off a line.
+
+    The property is about the FORM, which is why the name is: a target that
+    needs no escaping is recorded as it stands, and that is not a failure of
+    anything — recording bytes a caller chose for its own request discloses
+    nothing to the reader of the line.
     """
     app, _ = build_app(tmp_path, sample_db)
     # Percent-encoded on the wire, exactly as a caller would have to send it;
@@ -948,3 +999,25 @@ def test_the_api_example_environment_documents_the_log_level():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "WUWATERM_API_LOG_LEVEL=INFO" in text
+
+
+def test_the_api_extra_installs_no_websocket_library():
+    """The record covers HTTP requests, and HTTP is all this service speaks.
+
+    That is safe by construction — the middleware the record is written from
+    only ever sees HTTP scopes — but the runbook's explanation of WHY there is
+    nothing else rests on the server having no WebSocket library to build one
+    with. `uvicorn[standard]` is an ordinary thing to reach for (it brings
+    `uvloop` and `httptools`) and it pulls one in, at which point the server
+    would answer an upgrade itself and the documented behaviour would flip with
+    nothing to notice it.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    api = pyproject["project"]["optional-dependencies"]["api"]
+
+    assert any(item.startswith("uvicorn") for item in api), api
+    assert not any("[standard]" in item for item in api), api
+    for banned in ("websockets", "wsproto"):
+        assert not any(item.startswith(banned) for item in api), api

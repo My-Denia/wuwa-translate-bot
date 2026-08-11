@@ -322,17 +322,18 @@ log ever holding the device id itself.
 What a record deliberately does not contain, of the things **this service
 holds**: no credential, no identifier of an authenticated device other than the
 redacted `device` field, no submitted or translated text, and no query string.
-Nor a request target as the caller wrote it.
 
-The distinction is worth stating, because the unmatched-target case is the one
-place a caller's own bytes reach the record. A caller can put anything in a URL,
-including strings that look like this service's own identifiers, and those are
-recorded escaped and bounded like any other target. That is not this service
-disclosing something: the reader of the line learns only what the writer of the
-request already had. What the guarantee covers is what the service knows and the
-caller does not — the credential it verified, the principal behind it, the text
-it translated. (A device id is in any case the non-secret half of a token;
-`device revoke` takes one on the command line and `device list` prints them.)
+The unmatched-target case is the one place a caller's own bytes reach a record,
+and the guarantee there is about their **form**, not their content: no target
+reaches a record able to carry a terminal escape sequence, forge a field, or run
+past the line — inert either because it needed no escaping or because it was
+escaped. A caller may put anything in a URL, including strings that look like
+this service's own identifiers, and recording those discloses nothing: the
+reader of the line learns only what the writer of the request already had. What
+the guarantee above covers is what the service knows and the caller does not —
+the credential it verified, the principal behind it, the text it translated. (A
+device id is in any case the non-secret half of a token; `device revoke` takes
+one on the command line and `device list` prints them.)
 A target that could itself be a credential — a client or proxy that puts a token
 in the URL instead of the `Authorization` header — is replaced entirely by the
 literal `credential-shaped`, with no digest of it either: the digest would be
@@ -352,9 +353,11 @@ and the field cannot be used to write caller-chosen text into the log.
    refuses the method, so a `405` is named by its template like any other.
 2. it matched nothing and could be a credential → the literal
    `credential-shaped`, as above.
-3. it matched nothing else → what arrived, escaped and truncated, because that
-   value is chosen by an unauthenticated caller and an operator reads it in a
-   terminal. An automatic trailing-slash `307` lands here, not in case 1.
+3. it matched nothing else → what arrived, rendered inert and bounded, because
+   that value is chosen by an unauthenticated caller and an operator reads it
+   in a terminal. A target that needs no escaping is recorded as it stands. An
+   automatic trailing-slash `307` lands here, not in case 1, and so does
+   `/openapi.json` — whose rendering happens to be identical to its template.
 
 For the same reason the server's own access log stays off: it prints raw
 targets.
@@ -362,9 +365,18 @@ targets.
 Two properties a collector's parser can rely on. Every field is **one
 whitespace-delimited token** — an escaped target has its spaces and its `=`
 escaped precisely so it cannot become two — so splitting on whitespace and then
-on the first `=` is a complete parse. And a trailing `~` on the `route` value
-always means the rendering was clipped: it is outside the character set a plain
-value may use, and an escaped one always ends in its closing quote.
+on the first `=` is a complete parse **of everything after `request complete`**.
+(What precedes it is the timestamp, level and logger name from the log format,
+plus those two literal words; none of them are fields.) And a trailing `~` on
+the `route` value always means the rendering was clipped: it is outside the
+character set a plain value may use, and an escaped one always ends in its
+closing quote.
+
+One value in the `status` field is not a status this service ever sends: `499`
+means the caller went away, or the work was cancelled at shutdown, before there
+was a response. Nothing reached the client, so there is no envelope to correlate
+with. A `ClientDisconnect` traceback may follow it — that is the hang-up itself,
+not a fault to chase.
 
 On a request that failed unexpectedly, the completion record appears **before**
 the traceback rather than after it: the exception passes through the recording

@@ -36,6 +36,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import ClientDisconnect
 
 from wuwaterm.application import (
     ERROR_FORBIDDEN,
@@ -142,6 +143,12 @@ TRUNCATION_MARK = "~"
 # What a record names when no device was authenticated. Not `redact_id(None)`:
 # that renders as a digest and would read like a principal.
 NO_PRINCIPAL = "-"
+# Recorded when the caller went away before there was a response. This service
+# never SENDS it — nothing was sent — but a record has to say something, and
+# saying 500 would send an operator looking for a server fault that did not
+# happen. 499 is the long-standing convention for exactly this, so it reads
+# correctly to anyone who has met it and is obviously not one of ours.
+CLIENT_GONE_STATUS = 499
 
 # A request target is caller-supplied and can therefore carry a CREDENTIAL: a
 # client or a proxy that puts a token in the URL instead of the Authorization
@@ -350,16 +357,25 @@ def _could_carry_a_credential(path: str) -> bool:
 
 
 def _route_label(request: Request) -> str:
-    """The route TEMPLATE this request matched, or its escaped raw target.
+    """Three cases, in this order.
 
-    The template is repository text: it cannot carry anything, and it gives one
-    record shape per endpoint instead of one per spelling a caller invents.
+    1. the request matched a route → its TEMPLATE. Repository text: it cannot
+       carry anything, and it gives one record shape per endpoint instead of
+       one per spelling a caller invents. An unsupported METHOD on a known
+       route is one of these — ``APIRoute.matches`` records a partial match
+       before the method is refused, so a 405 is named by its template.
+    2. it matched nothing and could be a credential → a fixed label, below.
+    3. anything else → the decoded target, which is the one identifying thing
+       left, rendered so that it cannot carry an escape sequence, forge a
+       field, or run past the line. A target that needs none of that is
+       recorded as it stands; the guarantee is about the FORM reaching the
+       record, not about hiding what a caller wrote in its own request.
 
-    An unsupported METHOD on a known route still has one: the router records a
-    partial match before refusing, so a 405 is named by its template like any
-    other. Only a target that matched no route at all falls through, and there
-    the decoded path is the one identifying thing left — recorded escaped,
-    never as it arrived, and not at all when it could be a credential.
+    The framework's automatic trailing-slash redirect is case 3, not case 1: it
+    is produced without a route ever being matched. So is ``/openapi.json``,
+    which is registered as a plain route with no ``matches`` override — its
+    fallback rendering is byte-identical to its template, so the record reads
+    the same either way.
     """
     template = getattr(request.scope.get("route"), "path", None)
     if isinstance(template, str) and template:
@@ -470,6 +486,16 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             status_code = response.status_code
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
+        except (ClientDisconnect, asyncio.CancelledError):
+            # The caller went away, or the work was cancelled out from under
+            # this task at shutdown. Either way nothing was sent, so the seeded
+            # 500 would be a lie that costs an operator a hunt for a fault that
+            # never happened. Measured rather than assumed: a socket hang-up
+            # during the body read surfaces here as ClientDisconnect, not as
+            # cancellation. Re-raised untouched — this changes what the record
+            # says, not what the request does.
+            status_code = CLIENT_GONE_STATUS
+            raise
         finally:
             try:
                 _log_request_completed(
