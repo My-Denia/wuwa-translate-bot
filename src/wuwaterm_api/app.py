@@ -352,6 +352,13 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
+def _new_credential_pool(max_workers: int) -> concurrent.futures.ThreadPoolExecutor:
+    """A pool whose WIDTH is the bound on concurrent credential-store work."""
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="wuwaterm-credential"
+    )
+
+
 async def _in_credential_pool(app: FastAPI, func, *args):
     """Run a credential-store call on this app's OWN bounded thread pool.
 
@@ -570,6 +577,18 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # A pool is created in create_app so an application that never runs a
+        # lifespan (the OpenAPI renderer, in-process tests) still has one — but
+        # shutdown() is PERMANENT, so the pool cannot also be per-application.
+        # An app started twice (two sequential TestClient contexts, an
+        # embedding that cycles the ASGI lifespan) would reach a dead executor
+        # and answer every credentialed request with a 500. Each cycle gets its
+        # own; the one being replaced has no started worker in the only case
+        # this runs, and is ended anyway rather than dropped.
+        previous = getattr(app.state, "auth_pool", None)
+        app.state.auth_pool = _new_credential_pool(resolved.auth_max_concurrency)
+        if previous is not None:
+            previous.shutdown(wait=False, cancel_futures=True)
         yield
         closer = getattr(app.state.translator, "aclose", None)
         if closer is not None:
@@ -614,10 +633,7 @@ def create_app(
     # why neither alone is enough. Threads are created on demand, so an app
     # that never authenticates never starts one.
     app.state.auth_slots = threading.BoundedSemaphore(resolved.auth_max_concurrency)
-    app.state.auth_pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=resolved.auth_max_concurrency,
-        thread_name_prefix="wuwaterm-credential",
-    )
+    app.state.auth_pool = _new_credential_pool(resolved.auth_max_concurrency)
 
     # Added last == outermost: the request id wraps everything, so even a
     # failure produced by an inner middleware carries it. The body read and the

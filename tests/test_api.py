@@ -2232,3 +2232,33 @@ def test_the_credential_pool_is_shut_down_with_the_app(tmp_path, sample_db):
     # And refuses new work once the app has shut down.
     with pytest.raises(RuntimeError):
         app.state.auth_pool.submit(lambda: None)
+
+
+def test_a_second_lifespan_cycle_gets_a_live_credential_pool(tmp_path, sample_db):
+    """`shutdown()` is permanent, so the pool cannot be created once and
+    shut down once per application OBJECT.
+
+    An app started twice — two sequential TestClient contexts, an embedding
+    that cycles the ASGI lifespan, a supervisor that restarts the app in
+    process — reached a dead executor on the second cycle and answered every
+    credentialed request with `RuntimeError: cannot schedule new futures after
+    shutdown` (a 500). Each cycle gets its own pool.
+    """
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    async def cycle():
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://api.test"
+            ) as client:
+                response = await client.post(
+                    "/v1/translations",
+                    json={"text": "声骸"},
+                    headers=bearer(token),
+                )
+            return response.status_code
+
+    assert run(cycle()) == 200
+    assert run(cycle()) == 200

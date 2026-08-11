@@ -279,7 +279,7 @@ class DeviceStore:
         return f"{Path(self.path).resolve().as_uri()}?mode={mode}"
 
     def _connect_readonly(self) -> sqlite3.Connection:
-        """Open the store for a REQUEST-PATH read. Never creates, never writes.
+        """Open the store for a REQUEST-PATH read. Never creates the DATABASE.
 
         The request path used to call :meth:`initialize` — mkdir, a write-mode
         connect, a journal-mode pragma and DDL — on EVERY request, so an
@@ -289,6 +289,16 @@ class DeviceStore:
         a missing directory or file, a corrupt file or an unreadable one all
         raise ``sqlite3.Error``, which the request path already answers as 503
         (store unavailable) rather than 401 (credential rejected).
+
+        Stated exactly, because the difference matters: ``mode=ro`` protects the
+        DATABASE FILE. Reading a WAL database still uses the ``-shm`` WAL index
+        and can create the ``-shm``/``-wal`` sidecars if the last writer removed
+        them, so the directory must remain writable — which it must be anyway,
+        since :meth:`record_use` writes to it on every admitted request. This is
+        inherent to WAL, and WAL is what lets this read proceed while a
+        concurrent ``revoke()`` writes; the sidecars carry no schema and their
+        loss or recreation cannot resurrect a deleted store, because the main
+        database file is what ``mode=ro`` refuses to create.
 
         No pragma is issued: ``journal_mode`` is a persistent property of the
         file set at creation, and there are no foreign keys in this schema.
