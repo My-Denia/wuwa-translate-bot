@@ -74,8 +74,8 @@ outside the host can reach**: it binds `WUWATERM_API_BIND` (default
 `127.0.0.1`) on `WUWATERM_API_PORT` (default `8788`). The service runs with
 host networking, so a `ports:` list would have no effect at all and none is
 present: what keeps this off the host's public interfaces is the bind address,
-hard-coded in
-`deploy/docker-compose.yml` rather than interpolated from an environment file.
+hard-coded in `deploy/docker-compose.yml` rather than interpolated from an
+environment file.
 One other line in that same file can override it — `command:` is passed
 through to the server, which accepts `--host` — so both live where they can
 only be changed in review.
@@ -114,6 +114,27 @@ read it back from that container rather than assuming the default:
 cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
+
+**Correct the port before publishing anything.** If an existing `.env` sets
+`WUWATERM_API_PORT` explicitly it wins over both the Compose default and the
+application's, so a changed default does not reach that host on its own — and
+the route below would then be pointed at whatever else holds the old port.
+Update or remove the line:
+
+```bash
+WUWATERM_API_PORT=8788
+```
+
+Then recreate the API container, because an `.env` edit does not reach a
+container that is already running, and read the port back from the new one:
+
+```bash
+cd /opt/wuwaterm/current
+docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
+docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
+```
+
+Whatever that prints is the port the route below must name.
 
 Shell access to the host stays what it has always been: the operator's
 administration channel, used for the deployment and credential commands on
@@ -184,30 +205,15 @@ exposure — there is no second place it could still be reachable from.
 
 **Readback belongs on the client machine.** A request made on the host proves
 the service is up; it does not prove the route works, and it is not evidence of
-anything about the path being tested. From the owner's own machine, a request
-to the published address without a credential must be refused with the API's
-own `401` envelope — that single answer shows the route reaches this service
-AND that reaching it is not an authorization. Then start the desktop client
-against the same base address and translate something.
-
-If an existing `.env` sets `WUWATERM_API_PORT` explicitly, it wins over both
-the Compose default and the application's, so the port change above does not
-reach that host on its own. Update or remove the line:
-
-```bash
-WUWATERM_API_PORT=8788
-```
-
-Then recreate the API container and read the port back from it, because an
-`.env` edit does not reach a container that is already running:
-
-```bash
-cd /opt/wuwaterm/current
-docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
-docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
-```
-
-The route above must name whatever that prints.
+anything about the path being tested. From the owner's own machine, request
+`https://<the-existing-site>/wuwaterm-api/v1/meta` **without** a credential: it
+must come back as the API's own `401` envelope. That single answer carries
+three facts — the route reaches this service, the prefix is being stripped
+(`/v1/meta` was matched by the application, not by the site), and reaching the
+endpoint is not an authorization. Ask for a path under the prefix rather than
+the base address itself: the base is what the client is configured with, and on
+its own it matches no route. Then start the desktop client against that base
+address and translate something.
 
 ### Device Credentials
 
