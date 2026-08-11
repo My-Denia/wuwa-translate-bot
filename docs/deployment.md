@@ -275,8 +275,8 @@ cd /opt/wuwaterm/current
 docker compose -f deploy/docker-compose.yml logs --since 30m wuwaterm-api
 ```
 
-Every request produces exactly one **completion record**, one line, always the
-same fields, recognisable by the words `request complete`:
+Every HTTP request produces exactly one **completion record**, one line, always
+the same fields, recognisable by the words `request complete`:
 
 ```
 2026-01-01 00:00:00,000 INFO wuwaterm_api request complete request_id=<32 hex> method=POST route=/v1/translations status=200 duration_ms=41.2 device=id:<8 hex>

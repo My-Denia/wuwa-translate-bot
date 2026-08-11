@@ -7,9 +7,12 @@ Two separate properties are under test here and they fail in different ways:
   so a deployed process produced no per-request evidence — a request id handed
   to a client could not be matched to anything on the server.
 * what the record CONTAINS. A log line is an output channel like any other, so
-  the same rules that govern the response body govern it: no credential, no raw
-  device id, no request text, and nothing an unauthenticated caller can put on
-  the wire may reach an operator's terminal unescaped.
+  the same rules that govern the response body govern it. The rule is about what
+  the SERVICE knows: no credential, no device id behind an authenticated
+  principal, no request text. A caller's own bytes are a different question —
+  they may appear, bounded and escaped, because a record of them tells a reader
+  only what the writer of the request already had; what they may never do is
+  reach an operator's terminal unescaped, forge a field, or be a credential.
 
 The privacy half is asserted against captured records rather than by reading
 the source, because the interesting failures (a field added later, a framework

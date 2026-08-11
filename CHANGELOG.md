@@ -48,11 +48,13 @@ does not distribute generated game data or generated SQLite databases.
   server. The adapter's other diagnostic lines are unchanged and are not part of
   the one-per-request guarantee. The operator subcommands and any program
   importing the application still configure no logging at all.
-- Records name the matched route TEMPLATE, or an escaped and truncated target
-  when nothing matched, instead of the decoded request path: that value is
-  chosen by an unauthenticated caller and is read in a terminal. Credentials,
-  raw device ids and request text appear in no record, which is asserted
-  against captured records rather than by inspection.
+- Records name the matched route TEMPLATE, or an escaped, bounded target when
+  nothing matched, instead of the decoded request path: that value is chosen by
+  an unauthenticated caller and is read in a terminal. A target that could be a
+  credential is replaced entirely. Nothing the service itself knows — the
+  credential it verified, the device id behind the principal, the text it
+  translated — appears in any record, which is asserted against captured
+  records rather than by inspection.
 
 ### Desktop Client (new)
 
