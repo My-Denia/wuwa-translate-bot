@@ -221,10 +221,9 @@ runner or the client's dependencies.
   returns before the model stage and costs nothing), and the server records
   an ordinary completion rather than a client-gone `499` — the log side of
   that is in `docs/deployment.md`, the user-facing side in
-  `client/README.md`.
-  Making cancel actually cancel is a server-side change (a disconnect the
-  service watches for, and orchestration that unwinds on it), not a client
-  wording change, and it is not implemented.
+  `client/README.md`. Making cancel actually cancel is a server-side change
+  (a disconnect the service watches for, and orchestration that unwinds on
+  it), not a client wording change, and it is not implemented.
 - Stable error rendering (`errors.py`, `strings.py`): connect-level failures
   become `offline`, a deadline becomes `timeout` (including the service's
   own 504, remapped so a server-side deadline reads as a timeout), a

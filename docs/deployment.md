@@ -144,11 +144,11 @@ cd /opt/wuwaterm/current
 pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
-tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
-[ "$tag_id" = "$running_id" ] && pinned="$image"
+tag_id="$(docker image inspect --format '{{.Id}}' "${image:?no wuwaterm-api container: nothing to pin to}")"
+[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
 echo "${pinned:?that reference no longer names the image this container runs}"
-WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api
-docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api &&
+  docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
 
 **That block refuses rather than warns, and both refusals matter.** A container
@@ -158,13 +158,22 @@ Traceability Readback compares and what the deployment manifest binds). A tag is
 mutable, and the updater rebuilds and retags `wuwaterm-runtime:<commit>` before
 its rollback trap exists, so a same-commit rerun that aborts in between leaves
 the tag pointing at a fresh, unvalidated image while this container still runs
-the old one. `${…:?}` is what makes each failure stop the command instead of
-printing a warning that the next pasted line ignores: if the container is not
-running there is nothing to pin to, and if the tag has moved the reference is
-not the deployed image — the property this whole step exists for. `pinned` is
-emptied on the first line for the same reason: a shell that pinned
-successfully earlier would otherwise carry that value into a rerun where the
-resolution failed, and the refusals would pass on a stale reference.
+the old one. Nothing here is left to the operator to notice: `pinned` is set
+only when the reference resolves AND still names the running id, and every
+command that uses it is written so that an unset `pinned` stops it rather than
+falling through. `pinned` is emptied on the first line so a value from an
+earlier successful run in the same shell cannot stand in for one this run
+failed to establish, and `[ -n "$tag_id" ]` is there because two empty strings
+compare equal — without it the check would pass on a host with no container at
+all, which is the one case it most needs to catch. The `&&` on the recreate is
+the same idea for the readback: a port read from a container that was never
+recreated is not the port this subsection just set.
+
+The two failure messages name two different situations. No container of that
+name is "nothing to pin to". A container whose creation reference no longer
+resolves to the image it is running is a tag that has moved — the case that
+sends an unvalidated image to a live surface. (A stopped container is neither:
+`docker inspect` answers for it, and pinning off it is correct.)
 
 What `printenv` prints is the port the route below must name. The block also
 echoes the reference it is about to use, and the Traceability Readback at the
@@ -269,15 +278,15 @@ tag resolves to.** Getting it wrong does not announce itself as the wrong
 image: the runtime entrypoint accepts only the commands its own build knows, so
 an image older than a subcommand refuses that subcommand, and the refusal reads
 like a broken runbook. Resolve the reference exactly as the recreate above does
-— same four lines, same two refusals — and carry it on each command:
+— the same resolution, the same refusals — and carry it on each command:
 
 ```bash
 cd /opt/wuwaterm/current
 pinned=""
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
 running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
-tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
-[ "$tag_id" = "$running_id" ] && pinned="$image"
+tag_id="$(docker image inspect --format '{{.Id}}' "${image:?no wuwaterm-api container: nothing to pin to}")"
+[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
 echo "${pinned:?that reference no longer names the image this container runs}"
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
 WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
@@ -308,6 +317,14 @@ A resolved reference also happens to keep the one-shot container from being
 BUILT — the service carries a `build:` block, and a reference resolving to no
 local image is what sends Compose to build an unvalidated one — but that is a
 consequence of the pin holding, not a second guard.
+
+What the check establishes is point-in-time: the reference named the deployed
+image when it was checked, and Compose resolves that reference again on every
+command below. A deployment that retags the same commit **while** a credential
+session is open would move it underneath. That is not something a command in
+this block can close — it is a reason not to issue credentials during a
+deployment, and the reason the Traceability Readback at the end of this page,
+which compares image ids rather than names, is what says what actually ran.
 
 `device issue` reads the secret from standard input; the service never prints
 credential material. Generate it where it will be stored, then register it:
@@ -350,10 +367,18 @@ complete`:
 ```
 
 That guarantee is about the completion record and nothing else. At `INFO` the
-service also writes the diagnostic lines it has always written — a translation's
-stage and direction, an authentication refusal, a rate-limit refusal — so a
-request can produce several lines in total, and a collector must select on
-`request complete` rather than assume every line has these fields. Every
+service also writes the diagnostic lines it has always written — an
+authentication refusal, a rate-limit refusal, and for a translation this one:
+
+```
+2026-01-01 00:00:00,000 INFO wuwaterm_api translation device=id:<8 hex> kind=exact direction=en request_id=<32 hex>
+```
+
+`kind` is the stage that answered — `exact` or `fuzzy` from the dictionary,
+`llm` when the translation model was called, `noop` when there was nothing to
+do — so it is what says whether a given request spent model budget. A request
+can therefore produce several lines in total, and a collector must select on
+`request complete` rather than assume every line has that record's fields. Every
 request produces the completion record, including the unauthenticated
 `/healthz` and `/readyz` probes, so a monitor polling those is visible in the
 volume. Raising the level above `INFO` drops all of them — that is the trade

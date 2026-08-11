@@ -1536,6 +1536,21 @@ def test_documented_api_commands_use_the_configured_port():
     assert "printenv WUWATERM_API_PORT" in text
 
 
+def _resolution_lines(block: str) -> list[str]:
+    """The image-pin resolution, as a list of lines.
+
+    Both blocks must resolve the pin the same way; the credentials section
+    tells the operator so in as many words. Comparing the lines makes that a
+    check rather than a coincidence of two tests asserting the same literals.
+    """
+    wanted = ('pinned=""', "image=", "running_id=", "tag_id=", '[ -n "$tag_id" ]')
+    return [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip().startswith(wanted)
+    ]
+
+
 def test_documented_one_shot_commands_run_on_the_deployed_image():
     """A one-shot `compose run` resolves the image from the Compose default,
     not from the deployment.
@@ -1574,7 +1589,14 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
         credentials
     )
-    assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in credentials
+    # `${image:?}` sits inside a command substitution, so on a host with no
+    # container it kills only that subshell: `tag_id` and `running_id` are then
+    # both empty and a bare equality would pass VACUOUSLY, on exactly the host
+    # the check exists for. The emptiness test is part of the check.
+    assert (
+        '[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"'
+        in credentials
+    )
     # ...and the block clears `pinned` first, so a shell that pinned
     # successfully earlier cannot carry that value into a rerun where the
     # resolution failed and have the refusals below pass on a stale reference.
@@ -1586,7 +1608,16 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     # unset - straight back to the mutable tag this section exists to avoid,
     # by following this section.
     assert "export WUWATERM_RUNTIME_IMAGE" not in credentials
-    assert credentials.count('WUWATERM_RUNTIME_IMAGE="${pinned:?') >= 4
+    # EVERY compose run in the section carries it - counting the ones that do
+    # would leave a fifth, unpinned command added later perfectly green.
+    runs = [
+        line
+        for line in credentials.splitlines()
+        if "docker compose" in line and " run " in line
+    ]
+    assert runs
+    for line in runs:
+        assert line.startswith('WUWATERM_RUNTIME_IMAGE="${pinned:?'), line
     assert "The pin travels on the command, and refuses rather than warns." in flat
 
     # The property is stated next to the command, so a reader can tell whether
@@ -1617,13 +1648,20 @@ def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
     assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
         recreate
     )
-    assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in recreate
-    assert recreate.index('pinned=""') < recreate.index("image=\"$(docker inspect")
     assert 'WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}"' in recreate
     assert "export WUWATERM_RUNTIME_IMAGE" not in recreate
     # The recreate must still forbid building, which the credential commands
     # do not need: this one would replace a running container.
     assert "--no-build" in recreate
+    # ...and the port readback is chained to it, so a refused pin cannot leave
+    # the operator reading the port of a container that was never recreated.
+    assert "--force-recreate wuwaterm-api &&" in recreate
+
+    # The two resolutions are compared directly rather than by both tests
+    # happening to assert the same literals.
+    credentials = text.split("### Device Credentials", 1)[1].split("\n### ", 1)[0]
+    assert _resolution_lines(recreate) == _resolution_lines(credentials)
+    assert len(_resolution_lines(recreate)) == 5
 
 
 def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():

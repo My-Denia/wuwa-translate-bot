@@ -70,7 +70,22 @@ def _prose_files() -> list[Path]:
     has to name the banned spellings in order to ban them.
     """
     found: list[Path] = []
-    for pattern in ("*.md", "*.ps1", "*.rst", "*.txt", "*.yml", "*.yaml", "*.sh"):
+    for pattern in (
+        "*.md",
+        "*.ps1",
+        "*.rst",
+        "*.txt",
+        "*.yml",
+        "*.yaml",
+        "*.sh",
+        # The claim can also live in a comment header or a package
+        # description, and `client/WuwaTerm.spec` - a Python file - is the
+        # artefact the build claim is ABOUT.
+        "*.py",
+        "*.spec",
+        "*.toml",
+        "*.cfg",
+    ):
         for path in ROOT.rglob(pattern):
             # Relative parts only: an absolute path picks up whatever the
             # checkout happens to live under, so a clone inside a directory
@@ -109,6 +124,8 @@ def test_no_document_claims_the_client_build_is_reproducible():
         # header: the claim can live anywhere a reader would meet it.
         Path(".github") / "workflows" / "ci.yml",
         Path("deploy") / "vps-update.sh",
+        Path("client") / "WuwaTerm.spec",
+        Path("client") / "pyproject.toml",
     ):
         assert ROOT / required in scanned, str(required)
 
