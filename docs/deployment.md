@@ -142,10 +142,25 @@ the other source for it) and forbid building:
 ```bash
 cd /opt/wuwaterm/current
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
-export WUWATERM_RUNTIME_IMAGE="$image"
-docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
+tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
+[ "$tag_id" = "$running_id" ] && pinned="$image"
+echo "${pinned:?that reference no longer names the image this container runs}"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
+
+**That block refuses rather than warns, and both refusals matter.** A container
+records the reference it was created with (`.Config.Image`) and, separately, the
+image it is actually running (`.Image`, an id — which is what this page's
+Traceability Readback compares and what the deployment manifest binds). A tag is
+mutable, and the updater rebuilds and retags `wuwaterm-runtime:<commit>` before
+its rollback trap exists, so a same-commit rerun that aborts in between leaves
+the tag pointing at a fresh, unvalidated image while this container still runs
+the old one. `${…:?}` is what makes each failure stop the command instead of
+printing a warning that the next pasted line ignores: if the container is not
+running there is nothing to pin to, and if the tag has moved the reference is
+not the deployed image — the property this whole step exists for.
 
 Whatever that prints is the port the route below must name. Read the image back
 too — the Traceability Readback at the end of this page requires BOTH running
@@ -249,42 +264,41 @@ property to hold, and the one to check a variant of these commands against, is:
 tag resolves to.** Getting it wrong does not announce itself as the wrong
 image: the runtime entrypoint accepts only the commands its own build knows, so
 an image older than a subcommand refuses that subcommand, and the refusal reads
-like a broken runbook. Take the reference from the running container, exactly
-as the recreate above does:
+like a broken runbook. Resolve the reference exactly as the recreate above does
+— same four lines, same two refusals — and carry it on each command:
 
 ```bash
 cd /opt/wuwaterm/current
 image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
-[ -n "$image" ] || echo "wuwaterm-api is not running: nothing to pin to" >&2
-export WUWATERM_RUNTIME_IMAGE="$image"
-echo "$WUWATERM_RUNTIME_IMAGE"
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api)"
+tag_id="$(docker image inspect --format '{{.Id}}' "${image:?wuwaterm-api is not running: nothing to pin to}")"
+[ "$tag_id" = "$running_id" ] && pinned="$image"
+echo "${pinned:?that reference no longer names the image this container runs}"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
 ```
 
-**Read the echoed value; do not assume it.** `export` reports its own success,
-never the command inside it, so a `docker inspect` that failed — the container
-stopped, renamed, or a deployment torn down half way — leaves the variable set
-to the EMPTY string. Compose's `:-` default treats empty exactly like unset, so
-the commands would drop straight back to `wuwaterm-runtime:local`: the failure
-this section exists to prevent, reached by following this section. What the
-echo must print is `wuwaterm-runtime:<commit>`. If it prints nothing, or the
-`:local` tag, stop — nothing is pinned, and that is the property, not the
-command, failing.
+**The pin travels on the command, and refuses rather than warns.** A bare
+`export` would report its own success and not the command inside it, so a failed
+lookup would leave the variable EMPTY — and Compose's `:-` default treats empty
+exactly like unset, which is `wuwaterm-runtime:local`: the failure this section
+exists to prevent, reached by following this section. `${pinned:?…}` cannot do
+that. A shell where the resolution did not succeed has no `pinned`, so every one
+of these commands stops on its own, including a session where the block above
+was never run, and including the stdin form below. What the `echo` prints is
+`wuwaterm-runtime:<commit>`; there is no path on which it prints `:local`.
 
-The export lasts for that shell session, so it covers the stdin form below as
-well; a new session needs it again. A resolved reference also happens to keep
-the one-shot container from being BUILT — the service carries a `build:` block,
-and a reference resolving to no local image is what sends Compose to build an
-unvalidated one — but that is a consequence of the pin holding, not a second
-guard. It is one more reason to read the echoed value.
+A resolved reference also happens to keep the one-shot container from being
+BUILT — the service carries a `build:` block, and a reference resolving to no
+local image is what sends Compose to build an unvalidated one — but that is a
+consequence of the pin holding, not a second guard.
 
 `device issue` reads the secret from standard input; the service never prints
 credential material. Generate it where it will be stored, then register it:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
 ```
 
 The token is `wtd1.<device_id>.<that secret>`. Only a salted scrypt verifier is

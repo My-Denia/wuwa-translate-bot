@@ -98,12 +98,14 @@ establishes a new one.
 - **Cancellation stops the waiting, not the work.** Translate → Cancel ends
   this client's request: the status line says the request was cancelled and
   the buttons return to their normal state. Whether it stops anything else
-  depends on how early it lands. Caught in the moment before the request is
-  dispatched, nothing has been sent and nothing is spent. After that — and
-  your text is small, so "after that" is almost at once — Cancel no longer
-  reaches the service: it is not told you stopped waiting, and it finishes the
-  translation, model call and all, recording it as an ordinary completed
-  request. Cancelling then frees the application without stopping the work,
+  depends on how early it lands. While the request is still being handed over
+  — waiting for a connection, connecting, or sending — the service does not
+  yet have a whole request to act on, so nothing is translated and nothing is
+  spent. Once it does have the whole request — and your text is small, so that
+  window is short — Cancel no longer reaches the service: it is not told you
+  stopped waiting, and it finishes the translation, model call and all,
+  recording it as an ordinary completed request. Cancelling then frees the
+  application without stopping the work,
   and without un-spending the model budget the request had already committed.
   The answer is discarded unread, and with it the request id, so such a
   request is not one you can quote to an operator afterwards. Pressing

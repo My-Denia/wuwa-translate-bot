@@ -28,9 +28,9 @@ code itself enforces.
   loop and asyncio (`client/src/wuwaterm_client/app.py`). The bridge is what
   makes the UI's wait on an in-flight HTTP request cancellable from the UI
   thread without a worker-thread layer (the wait, not the request: see
-  Timeouts, cancellation, stable errors below). A plain Tk UI would have cost the native look and the
-  async bridge; a web UI would have reintroduced a hosted surface the project
-  deliberately does not have.
+  Timeouts, cancellation, stable errors below). A plain Tk UI would have cost
+  the native look and the async bridge; a web UI would have reintroduced a
+  hosted surface the project deliberately does not have.
 - **httpx >= 0.27, < 1** as the async HTTP client
   (`client/src/wuwaterm_client/api.py`). A synchronous client would block the
   UI or force threads; httpx's `AsyncClient` also carries the explicit
@@ -210,10 +210,13 @@ runner or the client's dependencies.
   (`client/tests/test_api.py::test_cancel_reports_cancellation_not_a_generic_error`;
   `client/tests/test_translate_view_status.py::test_a_cancelled_request_reports_that_it_was_cancelled`;
   the view also covers a cancel that lands between awaits or before the task
-  starts). **Its scope is this process.** A cancel before the task's first
-  step sends nothing, so nothing is spent; that is the only case where cancel
-  cancels anything. Once the request is on the wire — for a short body, almost
-  immediately — nothing that reaches the service cancels it: the work
+  starts). **Its scope is this process.** The `CancelledError` is caught around
+  the whole `httpx` call — pool acquisition, connect, handshake and body write
+  included — so a cancel anywhere before the service has the WHOLE request body
+  leaves it with nothing to act on: no translation, no model spend, and at most
+  a `499` from a disconnect during the read. That window, not "before the task
+  starts", is the boundary, and for a short body it is short. Once the service
+  has the whole request, nothing that reaches it cancels anything: the work
   continues, a model call in flight is still paid for, and the server records
   an ordinary completion rather than a client-gone `499` — the log side of
   that is in `docs/deployment.md`, the user-facing side in

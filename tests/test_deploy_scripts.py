@@ -1551,7 +1551,9 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     """
     text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
 
-    credentials = text.split("### Device Credentials", 1)[1].split("###", 1)[0]
+    # Split on the heading MARKER, so a sub-heading added inside the section
+    # cannot silently shorten what this gate reads.
+    credentials = text.split("### Device Credentials", 1)[1].split("\n### ", 1)[0]
     # Line wrapping is editorial; the phrases below are the property.
     flat = " ".join(credentials.split())
 
@@ -1559,24 +1561,64 @@ def test_documented_one_shot_commands_run_on_the_deployed_image():
     # commands it has to cover.
     pin = "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)\""
     assert pin in credentials
-    assert 'export WUWATERM_RUNTIME_IMAGE="$image"' in credentials
     for subcommand in ("device issue", "device list", "device revoke"):
         assert credentials.index(pin) < credentials.index(subcommand), subcommand
-    # A failed `docker inspect` leaves the variable EMPTY, and Compose's `:-`
-    # default treats empty exactly like unset - straight back to the mutable
-    # tag this whole section exists to avoid, by following this section. So
-    # the value is checked and echoed, not assumed, and the guide says what
-    # the echo must show.
-    assert '[ -n "$image" ]' in credentials
-    assert 'echo "$WUWATERM_RUNTIME_IMAGE"' in credentials
-    assert "Read the echoed value; do not assume it." in flat
-    assert "leaves the variable set to the EMPTY string" in flat
+
+    # `.Config.Image` is the reference the container was CREATED with, and a
+    # tag is mutable: the updater retags `wuwaterm-runtime:<commit>` before its
+    # rollback trap exists, so an aborted same-commit rerun can leave that tag
+    # on a fresh unvalidated image while this container still runs the old one.
+    # The identity of record is the image id, which is what the traceability
+    # readback compares - so the reference is only used once it has been shown
+    # to still name the running id.
+    assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
+        credentials
+    )
+    assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in credentials
+
+    # Every command carries the pin and REFUSES rather than warns. A bare
+    # export would report its own success and leave an EMPTY value behind on a
+    # failed lookup, and Compose's `:-` default treats empty exactly like
+    # unset - straight back to the mutable tag this section exists to avoid,
+    # by following this section.
+    assert "export WUWATERM_RUNTIME_IMAGE" not in credentials
+    assert credentials.count('WUWATERM_RUNTIME_IMAGE="${pinned:?') >= 4
+    assert "The pin travels on the command, and refuses rather than warns." in flat
+
     # The property is stated next to the command, so a reader can tell whether
     # a variant of it is still correct instead of matching the text.
     assert (
         "the one-shot container must be the deployed image, not whatever the "
         "default tag resolves to" in flat
     )
+
+
+def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
+    """The credentials section names the recreate block as its model, so the
+    two must not diverge - and the recreate block is the one with the worse
+    landing.
+
+    `--no-build` prevents a BUILD, not a wrong image: an unguarded reference
+    that resolves to nothing sends `--force-recreate` at the mutable
+    `wuwaterm-runtime:local` tag and puts the SERVING api container on a stale
+    image, where the credentials failure was only a refused subcommand.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    recreate = text.split("**Recreate it on the image it is already on.**", 1)[1]
+    recreate = recreate.split("\n### ", 1)[0]
+
+    assert "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)\"" in (
+        recreate
+    )
+    assert "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api)\"" in (
+        recreate
+    )
+    assert '[ "$tag_id" = "$running_id" ] && pinned="$image"' in recreate
+    assert 'WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}"' in recreate
+    assert "export WUWATERM_RUNTIME_IMAGE" not in recreate
+    # The recreate must still forbid building, which the credential commands
+    # do not need: this one would replace a running container.
+    assert "--no-build" in recreate
 
 
 def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
