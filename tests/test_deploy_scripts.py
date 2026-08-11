@@ -1536,6 +1536,193 @@ def test_documented_api_commands_use_the_configured_port():
     assert "printenv WUWATERM_API_PORT" in text
 
 
+def _fenced_lines(block: str) -> list[str]:
+    """Only the lines inside fenced code blocks.
+
+    A gate that reads prose as well would assert against whatever a future
+    sentence happens to quote, and pass today only because the one prose
+    mention of the command is punctuated without a trailing space.
+    """
+    lines: list[str] = []
+    inside = False
+    for line in block.splitlines():
+        if line.startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            lines.append(line)
+    return lines
+
+
+def _resolution_lines(block: str) -> list[str]:
+    """The image-pin resolution, as a list of lines.
+
+    Both blocks must resolve the pin the same way; the credentials section
+    tells the operator so in as many words. Comparing the lines makes that a
+    check rather than a coincidence of two tests asserting the same literals.
+    """
+    wanted = (
+        'pinned=""',
+        "image=",
+        "running_id=",
+        "tag_id=",
+        '[ -n "$tag_id" ]',
+        # The refusal itself: the credentials section promises "the same
+        # resolution, the same refusals", and a message that drifts in one
+        # block and not the other would keep both gates green otherwise.
+        "echo ",
+    )
+    return [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip().startswith(wanted)
+    ]
+
+
+def test_documented_one_shot_commands_run_on_the_deployed_image():
+    """A one-shot `compose run` resolves the image from the Compose default,
+    not from the deployment.
+
+    The serving containers are created from an immutable
+    `wuwaterm-runtime:<commit>`; the Compose default is the mutable
+    `wuwaterm-runtime:local`. On a host that still carries an old `:local`
+    tag, an unpinned `run` therefore executes a DIFFERENT image than the one
+    deployed, and an image older than a subcommand refuses that subcommand -
+    which reads as a broken runbook rather than as the wrong image. Observed
+    exactly that way on this project's own host while issuing the owner's
+    credential.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+
+    # Split on the heading MARKER, so a sub-heading added inside the section
+    # cannot silently shorten what this gate reads.
+    credentials = text.split("### Device Credentials", 1)[1].split("\n### ", 1)[0]
+    # Line wrapping is editorial; the phrases below are the property.
+    flat = " ".join(credentials.split())
+
+    # The reference comes from the running container, and it comes BEFORE the
+    # commands it has to cover.
+    pin = (
+        "image=\"$(docker inspect --format '{{.Config.Image}}' "
+        'wuwaterm-api 2>/dev/null)"'
+    )
+    assert pin in credentials
+    for subcommand in ("device issue", "device list", "device revoke"):
+        assert credentials.index(pin) < credentials.index(subcommand), subcommand
+
+    # `.Config.Image` is the reference the container was CREATED with, and a
+    # tag is mutable: the updater retags `wuwaterm-runtime:<commit>` before its
+    # rollback trap exists, so an aborted same-commit rerun can leave that tag
+    # on a fresh unvalidated image while this container still runs the old one.
+    # The identity of record is the image id, which is what the traceability
+    # readback compares - so the reference is only used once it has been shown
+    # to still name the running id.
+    assert (
+        "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)\""
+        in credentials
+    )
+    # `${image:?}` sits inside a command substitution, so on a host with no
+    # container it kills only that subshell: `tag_id` and `running_id` are then
+    # both empty and a bare equality would pass VACUOUSLY, on exactly the host
+    # the check exists for. The emptiness test is part of the check.
+    assert (
+        '[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"'
+        in credentials
+    )
+    # ...and the block clears `pinned` first, so a shell that pinned
+    # successfully earlier cannot carry that value into a rerun where the
+    # resolution failed and have the refusals below pass on a stale reference.
+    assert credentials.index('pinned=""') < credentials.index(pin)
+
+    # Every command carries the pin and REFUSES rather than warns. A bare
+    # export would report its own success and leave an EMPTY value behind on a
+    # failed lookup, and Compose's `:-` default treats empty exactly like
+    # unset - straight back to the mutable tag this section exists to avoid,
+    # by following this section.
+    assert "export WUWATERM_RUNTIME_IMAGE" not in credentials
+    # EVERY compose run in the section carries it - counting the ones that do
+    # would leave a fifth, unpinned command added later perfectly green.
+    runs = [
+        line
+        for line in _fenced_lines(credentials)
+        if "docker compose" in line and " run " in line
+    ]
+    assert runs
+    for line in runs:
+        assert line.startswith('WUWATERM_RUNTIME_IMAGE="${pinned:?'), line
+    assert "The pin travels on the command, and refuses rather than warns." in flat
+
+    # The property is stated next to the command, so a reader can tell whether
+    # a variant of it is still correct instead of matching the text.
+    assert (
+        "the one-shot container must be the deployed image, not whatever the "
+        "default tag resolves to" in flat
+    )
+
+
+def test_the_documented_recreate_pins_the_same_way_the_credential_commands_do():
+    """The credentials section names the recreate block as its model, so the
+    two must not diverge - and the recreate block is the one with the worse
+    landing.
+
+    `--no-build` prevents a BUILD, not a wrong image: an unguarded reference
+    that resolves to nothing sends `--force-recreate` at the mutable
+    `wuwaterm-runtime:local` tag and puts the SERVING api container on a stale
+    image, where the credentials failure was only a refused subcommand.
+    """
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    recreate = text.split("**Recreate it on the image it is already on.**", 1)[1]
+    recreate = recreate.split("\n### ", 1)[0]
+
+    assert (
+        "image=\"$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)\""
+        in recreate
+    )
+    assert (
+        "running_id=\"$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)\""
+        in recreate
+    )
+    assert 'WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}"' in recreate
+    assert "export WUWATERM_RUNTIME_IMAGE" not in recreate
+    # The recreate must still forbid building, which the credential commands
+    # do not need: this one would replace a running container.
+    assert "--no-build" in recreate
+    # ...and the port readback is chained to it, so a refused pin cannot leave
+    # the operator reading the port of a container that was never recreated.
+    assert "--force-recreate wuwaterm-api &&" in recreate
+
+    # The two resolutions are compared directly rather than by both tests
+    # happening to assert the same literals.
+    credentials = text.split("### Device Credentials", 1)[1].split("\n### ", 1)[0]
+    assert _resolution_lines(recreate) == _resolution_lines(credentials)
+    assert len(_resolution_lines(recreate)) == 6
+
+
+def test_the_log_guide_says_a_client_cancel_is_not_a_client_gone_record():
+    """`499` is the record for a caller that went away, and a reader can
+    reasonably expect a Cancel button to produce one. It does not.
+
+    Cancelling in the desktop client stops that client from waiting; the
+    request was already sent, nothing tells the service, and the request runs
+    to completion and is recorded with its ordinary status - model cost
+    included. An operator told otherwise would look for `499` records that
+    never arrive and would under-count what the service actually did.
+    """
+    flat = " ".join(
+        (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8").split()
+    )
+
+    assert "A desktop client's Cancel button does not normally produce one." in flat
+    # The two consequences, not just the mechanism.
+    assert "whose cost is spent" in flat
+    assert "has no id the user can quote" in flat
+    # ...and the case that really does stop the work, so the correction does
+    # not overshoot into a second false claim.
+    assert "sends nothing it can act on, so that case leaves no record here" in flat
+    # ...and the cost claim is scoped to requests that reach the model.
+    assert "A dictionary hit returns before the model stage" in flat
+
+
 def test_the_guide_does_not_teach_host_administration_as_the_client_path():
     """The deployment guide is a runbook, and a runbook that documents a
     host-administration channel as the way a desktop client reaches the

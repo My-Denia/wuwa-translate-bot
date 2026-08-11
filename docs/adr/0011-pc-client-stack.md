@@ -26,10 +26,11 @@ code itself enforces.
   maintains both sides.
 - **PySide6 >= 6.7, < 7** for the UI, with **qasync** bridging the Qt event
   loop and asyncio (`client/src/wuwaterm_client/app.py`). The bridge is what
-  makes an in-flight HTTP request cancellable from the UI thread without a
-  worker-thread layer. A plain Tk UI would have cost the native look and the
-  async bridge; a web UI would have reintroduced a hosted surface the project
-  deliberately does not have.
+  makes the UI's wait on an in-flight HTTP request cancellable from the UI
+  thread without a worker-thread layer (the wait, not the request: see
+  Timeouts, cancellation, stable errors below). A plain Tk UI would have cost
+  the native look and the async bridge; a web UI would have reintroduced a
+  hosted surface the project deliberately does not have.
 - **httpx >= 0.27, < 1** as the async HTTP client
   (`client/src/wuwaterm_client/api.py`). A synchronous client would block the
   UI or force threads; httpx's `AsyncClient` also carries the explicit
@@ -45,7 +46,21 @@ code itself enforces.
   machine's PATH, and the build script runs the artifact's `--self-check`
   (imports and constructs everything a normal start does, off-screen) before
   declaring success. A one-file build was not chosen: it unpacks at every
-  start and hides the payload from inspection.
+  start and hides the payload from inspection. The build is version-bounded
+  (a committed spec, dependency ranges in `client/pyproject.toml`), scripted,
+  CI-executed and self-checked. It is **not** reproducible and nothing in it
+  attempts that: there is no client lock file, the interpreter patch release
+  and the `windows-latest` image both float, and there is no timestamp
+  normalisation, hash-seed pinning or two-build comparison. Two builds may
+  therefore differ in both inputs and bytes. Not because the property would be
+  worthless: a byte-identical rebuild is what lets a recipient rebuild in an
+  independent environment and check that the binary they hold corresponds to
+  this source, and nothing here offers that. It answers a different question
+  from the one this distribution has, though. The artifact goes by hand from
+  the owner to the owner, so what is unanswered is authenticity of origin,
+  which signing addresses and a byte-identical rebuild does not. The check
+  that pays for itself at this scale is the artifact's own start-up
+  self-check. Recorded as a candidate control, not as a rejected one.
 - **No code signing** (`WuwaTerm.spec` sets `codesign_identity=None`;
   `client/build.ps1` and `client/README.md` state it). Accepted cost:
   first-run SmartScreen friction on a machine that has never seen the binary.
@@ -199,7 +214,20 @@ runner or the client's dependencies.
   (`client/tests/test_api.py::test_cancel_reports_cancellation_not_a_generic_error`;
   `client/tests/test_translate_view_status.py::test_a_cancelled_request_reports_that_it_was_cancelled`;
   the view also covers a cancel that lands between awaits or before the task
-  starts).
+  starts). **Its scope is this process.** The `CancelledError` is caught around
+  the whole `httpx` call — pool acquisition, connect, handshake and body write
+  included — so a cancel anywhere before the service has the WHOLE request body
+  leaves it with nothing to act on: no translation, no model spend, and at most
+  a `499` from a disconnect during the read. That window, not "before the task
+  starts", is the boundary, and for a short body it is short. Once the service
+  has the whole request, nothing that reaches it cancels anything: the work
+  continues, a model call in flight is still paid for (a dictionary hit
+  returns before the model stage and costs nothing), and the server records
+  an ordinary completion rather than a client-gone `499` — the log side of
+  that is in `docs/deployment.md`, the user-facing side in
+  `client/README.md`. Making cancel actually cancel is a server-side change
+  (a disconnect the service watches for, and orchestration that unwinds on
+  it), not a client wording change, and it is not implemented.
 - Stable error rendering (`errors.py`, `strings.py`): connect-level failures
   become `offline`, a deadline becomes `timeout` (including the service's
   own 504, remapped so a server-side deadline reads as a timeout), a

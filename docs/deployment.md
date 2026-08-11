@@ -141,16 +141,47 @@ the other source for it) and forbid building:
 
 ```bash
 cd /opt/wuwaterm/current
-image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
-export WUWATERM_RUNTIME_IMAGE="$image"
-docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api
-docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
+pinned=""
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
+tag_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"
+[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
+echo "${pinned:?no usable pin: no wuwaterm-api container, or its reference no longer names the image it runs}"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api &&
+  docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
 
-Whatever that prints is the port the route below must name. Read the image back
-too — the Traceability Readback at the end of this page requires BOTH running
-containers to match the manifest, and this step is the one that could break
-that.
+**That block refuses rather than warns, and both refusals matter.** A container
+records the reference it was created with (`.Config.Image`) and, separately, the
+image it is actually running (`.Image`, an id — which is what this page's
+Traceability Readback compares and what the deployment manifest binds). A tag is
+mutable, and the updater rebuilds and retags `wuwaterm-runtime:<commit>` before
+its rollback trap exists, so a same-commit rerun that aborts in between leaves
+the tag pointing at a fresh, unvalidated image while this container still runs
+the old one. Nothing here is left to the operator to notice: `pinned` is set
+only when the reference resolves AND still names the running id, and every
+command that uses it is written so that an unset `pinned` stops it rather than
+falling through. `pinned` is emptied on the first line so a value from an
+earlier successful run in the same shell cannot stand in for one this run
+failed to establish, and `[ -n "$tag_id" ]` is there because two empty strings
+compare equal — without it the check would pass on a host with no container at
+all, which is the one case it most needs to catch. The `&&` on the recreate is
+the same idea for the readback: a port read from a container that was never
+recreated is not the port this subsection just set.
+
+There is exactly ONE refusal, and its message names both situations it can
+mean, because the block cannot tell an operator which. The lookups run inside
+command substitutions, where a failure ends the substitution and not the
+sequence, so no earlier line can be the thing that stops the block — their
+errors are silenced for that reason, leaving one message rather than a docker
+error followed by a claim that contradicts it. A stopped container is not a
+failure at all: `docker inspect` answers for it, and pinning off it is
+correct.
+
+What `printenv` prints is the port the route below must name. The block also
+echoes the reference it is about to use, and the Traceability Readback at the
+end of this page requires BOTH running containers to match the manifest — this
+step is the one that could break that.
 
 Shell access to the host stays what it has always been: the operator's
 administration channel, used for the deployment and credential commands on
@@ -234,20 +265,75 @@ address and translate something.
 ### Device Credentials
 
 There is no registration endpoint. Credentials are issued by the operator on
-the host and shown exactly once:
+the host and shown exactly once.
+
+**Run them on the image the service is already on.** These are one-shot
+containers of the same Compose service, and `docker compose run` resolves the
+image the same way `compose up` does: from `WUWATERM_RUNTIME_IMAGE`, falling
+back to the Compose default `wuwaterm-runtime:local`. The updater never uses
+that default — it creates the serving containers from an immutable
+`wuwaterm-runtime:<source commit>` — so on a host that still carries an older
+`wuwaterm-runtime:local` tag from before, an unpinned `run` starts a container
+from a *different and stale* image while the deployed one keeps serving. The
+property to hold, and the one to check a variant of these commands against, is:
+**the one-shot container must be the deployed image, not whatever the default
+tag resolves to.** Getting it wrong does not announce itself as the wrong
+image: the runtime entrypoint accepts only the commands its own build knows, so
+an image older than a subcommand refuses that subcommand, and the refusal reads
+like a broken runbook. Resolve the reference exactly as the recreate above does
+— the same resolution, the same refusals — and carry it on each command:
 
 ```bash
 cd /opt/wuwaterm/current
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
+pinned=""
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api 2>/dev/null)"
+running_id="$(docker inspect --format '{{.Image}}' wuwaterm-api 2>/dev/null)"
+tag_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"
+[ -n "$tag_id" ] && [ "$tag_id" = "$running_id" ] && pinned="$image"
+echo "${pinned:?no usable pin: no wuwaterm-api container, or its reference no longer names the image it runs}"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device issue --name "owner laptop"
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device list
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm wuwaterm-api device revoke --device-id <id>
 ```
+
+**The pin travels on the command, and refuses rather than warns.** A bare
+`export` would report its own success and not the command inside it, so a failed
+lookup would leave the variable EMPTY — and Compose's `:-` default treats empty
+exactly like unset, which is `wuwaterm-runtime:local`: the failure this section
+exists to prevent, reached by following this section. `${pinned:?…}` cannot do
+that. A shell where the resolution did not succeed has no usable `pinned` — it
+is emptied on the block's first line, so a value left over from an earlier
+successful run cannot stand in for one this run failed to establish — and every
+one of these commands therefore stops on its own, including in a session where
+the block above was never run, and including the stdin form below.
+
+The `echo` is there to say what you are about to run on, not to be validated by
+its shape. `wuwaterm-runtime:<commit>` is the usual answer;
+`wuwaterm-runtime:rollback-<deployment id>` is the right one on a host that is
+currently rolled back, and even `wuwaterm-runtime:local` is right on a host
+whose API container really was created from that tag. What makes the reference
+trustworthy is the id comparison two lines above it, which has already run by
+the time anything is printed — an operator checking the format instead would
+reject a correct pin after a rollback.
+
+A resolved reference also happens to keep the one-shot container from being
+BUILT — the service carries a `build:` block, and a reference resolving to no
+local image is what sends Compose to build an unvalidated one — but that is a
+consequence of the pin holding, not a second guard.
+
+What the check establishes is point-in-time: the reference named the deployed
+image when it was checked, and Compose resolves that reference again on every
+command below. A deployment that retags the same commit **while** a credential
+session is open would move it underneath. That is not something a command in
+this block can close — it is a reason not to issue credentials during a
+deployment, and the reason the Traceability Readback at the end of this page,
+which compares image ids rather than names, is what says what actually ran.
 
 `device issue` reads the secret from standard input; the service never prints
 credential material. Generate it where it will be stored, then register it:
 
 ```bash
-docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
+WUWATERM_RUNTIME_IMAGE="${pinned:?nothing pinned}" docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api   device issue --name "owner laptop" < /path/to/secret
 ```
 
 The token is `wtd1.<device_id>.<that secret>`. Only a salted scrypt verifier is
@@ -284,10 +370,26 @@ complete`:
 ```
 
 That guarantee is about the completion record and nothing else. At `INFO` the
-service also writes the diagnostic lines it has always written — a translation's
-stage and direction, an authentication refusal, a rate-limit refusal — so a
-request can produce several lines in total, and a collector must select on
-`request complete` rather than assume every line has these fields. Every
+service also writes the diagnostic lines it has always written — an
+authentication refusal, a rate-limit refusal, and for a translation this one:
+
+```
+2026-01-01 00:00:00,000 INFO wuwaterm_api translation device=id:<8 hex> kind=exact direction=en request_id=<32 hex>
+```
+
+`kind` is the pipeline stage that answered: `exact` or `fuzzy` from the
+dictionary, `llm` from the model branch, `error` when the pipeline failed,
+`noop` when there was nothing to do. **Read it as the outcome, not as a
+billing record.** `exact`, `fuzzy` and `noop` do mean no model was called.
+The other two prove nothing in either direction: on a host with no model
+configured the pipeline still labels its local fallback `llm` (and this
+surface then refuses the request as unavailable rather than pretending), and
+`error` can follow a provider call that was made, and charged, before it
+failed. What model spend actually is lives with the provider, not here.
+
+A request can therefore produce several lines in total, and a collector must
+select on `request complete` rather than assume every line has that record's
+fields. Every
 request produces the completion record, including the unauthenticated
 `/healthz` and `/readyz` probes, so a monitor polling those is visible in the
 volume. Raising the level above `INFO` drops all of them — that is the trade
@@ -379,6 +481,32 @@ means the caller went away, or the work was cancelled at shutdown, before there
 was a response. Nothing reached the client, so there is no envelope to correlate
 with. A `ClientDisconnect` traceback may follow it — that is the hang-up itself,
 not a fault to chase.
+
+**A desktop client's Cancel button does not normally produce one.** What the
+service can observe is a connection that goes away *while it is still reading
+the request*; a translation body is a short piece of text, delivered long
+before anyone can press a button, so there is nothing left to interrupt. The
+cancel ends the client's wait and closes the client's own connection, and on
+this deployment that hang-up did not reach the service: the request ran to
+completion and was recorded with its ordinary status and its full duration —
+and, where the request needed the model, the model call included, whose cost is
+spent whether or not anyone is still waiting for the answer. (A dictionary hit
+returns before the model stage and costs nothing either way; a `kind=` of
+`exact`, `fuzzy` or `noop` on the translation line rules the model out, with
+the caveats above about the two values that do not rule it in.) Measured here: a
+translation cancelled in the client 0.4 s after it started was recorded
+`status=200 duration_ms=5183.6`, indistinguishable from one whose answer was
+read. Treat `499` as what it says — a caller that went away mid-read, or a
+shutdown — and not as a count of cancellations. (A cancel that lands before the
+service has the whole request sends nothing it can act on, so that case leaves
+no record here, or a `499`, rather than a misleading completion.)
+
+Two consequences for reading these records. A cancelled request is not a
+distinct state in the log: what is recorded is what the SERVICE did, not what a
+user waited for, so log volume and model spend both count requests nobody read.
+And such a request has no id the user can quote — the client never reads the
+response the id arrives in — so finding it means bracketing it in time on its
+route rather than searching for an id.
 
 On a request that failed unexpectedly, the completion record appears **before**
 the traceback rather than after it: the exception passes through the recording

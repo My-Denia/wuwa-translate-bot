@@ -1,12 +1,29 @@
 <#
 .SYNOPSIS
-    Reproducible one-folder PyInstaller build for the WuwaTerm desktop client.
+    Version-bounded, self-checked one-folder PyInstaller build for the
+    WuwaTerm desktop client.
 
 .DESCRIPTION
     Builds client/dist/WuwaTerm/WuwaTerm.exe from client/WuwaTerm.spec using
     the client's own virtual environment (client/.venv). Fails loudly if the
     venv, PySide6, or pyinstaller are missing, rather than falling back to a
     system Python or a different GUI toolkit. No code signing is performed.
+
+    What "version-bounded, self-checked" claims, precisely: the spec is
+    committed, the dependency ranges in client/pyproject.toml bound what may
+    be installed, this exact script is what CI runs on windows-latest, and the
+    artifact it produces is started with --self-check before the build is
+    called a success.
+
+    What it does NOT claim: bit-for-bit reproducibility, nor even identical
+    inputs between two runs. The client has no lock file - its dependencies
+    are ranges (PySide6>=6.7,<7 and pyinstaller>=6.10,<7 among them) - and the
+    interpreter patch release and the CI runner image both float, so a later
+    build can legitimately consume different versions. There is no
+    build-timestamp normalisation, no hash-seed pinning and no two-build
+    comparison here either, so two runs are not expected to produce identical
+    bytes and nothing verifies that they do. Any such guarantee would have to
+    be built and checked; do not read one into this script.
 #>
 
 $ErrorActionPreference = "Stop"
