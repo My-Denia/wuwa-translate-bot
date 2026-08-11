@@ -342,7 +342,9 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
-async def _require_active_device(request: Request, device: Device) -> None:
+async def _require_active_device(
+    request: Request, device: Device, *, serve_on_store_error: bool = False
+) -> None:
     """Refuse if the device was revoked while this request was in flight.
 
     Verification takes a snapshot of the device; a revocation that commits
@@ -351,6 +353,14 @@ async def _require_active_device(request: Request, device: Device) -> None:
     cheap read run at the TOCTOU seams: before the model call and before
     returning. It NARROWS the window best-effort; it does not close it — a
     revocation that commits after this read is still served.
+
+    ``serve_on_store_error`` controls what a TRANSIENT store failure (database
+    locked, disk I/O) means at each seam. Before the model call it is False:
+    fail closed with 503, since nothing has been spent yet. After the model
+    call it is True: the LLM budget slot and the round trip are already spent,
+    so a store read hiccup must not discard a completed translation and invite
+    a second paid retry — log it and serve. Either way a DEFINITIVE ``False``
+    (a real revocation) still rejects with 401.
     """
     try:
         active = await asyncio.to_thread(
@@ -360,12 +370,14 @@ async def _require_active_device(request: Request, device: Device) -> None:
         # A transient store failure on the POST-auth re-check (database is
         # locked, a disk I/O error) is infrastructure, not a credential
         # rejection: answering 401 here would tell a valid device to re-pair.
-        # Reserve unauthorized for a genuine revocation; a hiccup is 503.
         LOGGER.warning(
-            "device re-check store error path=%s request_id=%s",
+            "device re-check store error path=%s request_id=%s serve=%s",
             request.url.path,
             _request_id(request),
+            serve_on_store_error,
         )
+        if serve_on_store_error:
+            return
         raise ApiError(
             ERROR_INTERNAL,
             "device re-check is temporarily unavailable",
@@ -413,6 +425,22 @@ async def authenticated_device(
     # relaxes the bound briefly; it never double-releases or strands a slot.
     try:
         device = await asyncio.to_thread(store.authenticate, token)
+    except (sqlite3.Error, OSError):
+        # The verification READ itself failed (database is locked, a disk I/O
+        # error). That is the store being momentarily unusable, not the
+        # credential being wrong — answer 503 rather than telling a valid device
+        # to re-pair. It leaks nothing probeable: an unreadable store is
+        # device-independent, so the response does not vary with the token.
+        LOGGER.warning(
+            "credential store error on verification path=%s request_id=%s",
+            request.url.path,
+            _request_id(request),
+        )
+        raise ApiError(
+            ERROR_INTERNAL,
+            "credential store is temporarily unavailable",
+            status_code=503,
+        )
     finally:
         slots.release()
     if device is None:
@@ -681,8 +709,10 @@ def _register_routes(app: FastAPI) -> None:
                 ERROR_LLM_UNAVAILABLE, "no translation model is configured"
             )
         # Before returning: close the window between the model call and the
-        # response, so a revocation that commits mid-flight is not served.
-        await _require_active_device(request, device)
+        # response, so a revocation that commits mid-flight is not served. The
+        # work is already paid for here, so a transient store read error serves
+        # the completed translation (a definitive revocation still 401s).
+        await _require_active_device(request, device, serve_on_store_error=True)
         return TranslationResponseBody(
             kind=outcome.kind,
             text=outcome.text,

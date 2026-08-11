@@ -1279,8 +1279,12 @@ def test_every_file_carrying_verifier_material_is_restricted(tmp_path):
         assert not mode & 0o077, (path, oct(mode))
 
 
-def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
-    """No seam may answer differently from every other rejection."""
+def test_a_corrupt_store_is_a_service_unavailable_not_a_rejection(tmp_path, sample_db):
+    """An UNREADABLE store is the store being unusable, not a bad credential.
+
+    It must not be answered as 401 (which would tell a valid device to re-pair);
+    it is 503, and the response is device-independent so nothing is probeable.
+    """
     settings = build_settings(tmp_path, sample_db)
     settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.device_db_path.write_bytes(b"this is not a database at all")
@@ -1296,8 +1300,8 @@ def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
         )
     )
 
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "unauthorized"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
 
 
 def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_db):
@@ -1672,3 +1676,89 @@ def test_a_transient_record_use_store_error_is_503_not_500(tmp_path, sample_db):
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "internal"
+
+
+def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
+    tmp_path, sample_db
+):
+    """The re-check runs at two seams. A transient store error at the SECOND
+    (post-model) seam must not discard an already-completed translation and
+    invite a second paid retry: it logs and serves. The first (pre-model) seam
+    still fails closed."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.is_active
+    calls = {"n": 0}
+
+    def flaky(self, device_id):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the post-model seam only
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, device_id)  # pre-model seam: device is active
+
+    DeviceStore.is_active = flaky
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.is_active = real
+
+    assert response.status_code == 200
+    assert calls["n"] == 2  # both seams ran; the second hit the store error
+
+
+def test_a_locked_store_on_the_auth_read_is_503_a_wrong_secret_is_401(
+    tmp_path, sample_db
+):
+    """The verification READ failing (store unusable) is 503, not 401; a genuine
+    wrong secret is still a credential rejection (401)."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore._verify
+
+    def boom(self, device_id, secret):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore._verify = boom
+    try:
+        locked = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore._verify = real
+
+    assert locked.status_code == 503
+    assert locked.json()["error"]["code"] == "internal"
+
+    # Store readable again: a genuine wrong secret is still a rejection.
+    device2, _ = issue_device(store, "another")
+    wrong = "wtd1.%s.%s" % (device2.device_id, "z" * 40)
+    rejected = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer(wrong),
+        )
+    )
+
+    assert rejected.status_code == 401
+    assert rejected.json()["error"]["code"] == "unauthorized"
