@@ -114,7 +114,11 @@ TERM_QUERY_MAX_LENGTH = 200
 # to fool a scanner. Anything outside this set is escaped rather than
 # enumerated as dangerous.
 _PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@+-]+")
-# Source characters of a raw target that are considered at all.
+# Source characters of a raw target that are considered at all. This is not
+# only a display width: it is also the input bound on the credential check's
+# fixed-point decoding, which is quadratic in the length it is given (see
+# _route_label). Raising it to see more of a scanner's URL raises that work
+# roughly with the square, on the event loop, for an unauthenticated caller.
 RAW_TARGET_LOG_LIMIT = 80
 # The method is recorded from a CLOSED set rather than as it arrived. A method
 # is a caller-chosen token, and this service publishes exactly GET and POST —
@@ -324,7 +328,7 @@ def _log_field(value: object, limit: int) -> str:
 
 
 def _could_carry_a_credential(path: str) -> bool:
-    """Whether a target could contain a token of this service.
+    """Whether the part of a target that could be LOGGED could be a token.
 
     Decoded to a fixed point first. The server percent-decodes once, so a
     caller (or a proxy tidying a URL) that encodes the scheme twice hands us

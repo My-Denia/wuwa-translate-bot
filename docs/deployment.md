@@ -329,17 +329,31 @@ unkeyed here (this container blanks the redaction secret, which belongs to the
 bot) and a leaked line would then be a cheap way to test guesses at the secret.
 
 `method` is likewise recorded by membership, not content: the standard verb when
-it is one, `other` when it is not. This service publishes `GET` and `POST` and
-refuses everything else, so the exact spelling of a refused verb tells an
-operator nothing, and the field cannot be used to write caller-chosen text into
-the log.
-A request that matched a route is named by its **route template**, and an
-unsupported method on a known route counts as matched — the framework picks the
-route first and then refuses the method, so a `405` is named by its template
-like any other. Only a target that matched no route at all is recorded from what
-arrived, escaped and truncated, because that value is chosen by an
-unauthenticated caller and an operator reads it in a terminal. For the same
-reason the server's own access log stays off: it prints raw targets.
+it is one, `other` when it is not. This service publishes `GET` and `POST` (plus
+the `HEAD` the framework pairs with `GET` on `/openapi.json`) and refuses every
+other verb, so the exact spelling of a refused one tells an operator nothing,
+and the field cannot be used to write caller-chosen text into the log.
+
+`route` has three cases, in this order:
+
+1. the request matched a route → its **route template**. An unsupported method
+   on a known route counts as matched: the framework picks the route and then
+   refuses the method, so a `405` is named by its template like any other.
+2. it matched nothing and could be a credential → the literal
+   `credential-shaped`, as above.
+3. it matched nothing else → what arrived, escaped and truncated, because that
+   value is chosen by an unauthenticated caller and an operator reads it in a
+   terminal. An automatic trailing-slash `307` lands here, not in case 1.
+
+For the same reason the server's own access log stays off: it prints raw
+targets.
+
+Two properties a collector's parser can rely on. Every field is **one
+whitespace-delimited token** — an escaped target has its spaces and its `=`
+escaped precisely so it cannot become two — so splitting on whitespace and then
+on the first `=` is a complete parse. And a trailing `~` on the `route` value
+always means the rendering was clipped: it is outside the character set a plain
+value may use, and an escaped one always ends in its closing quote.
 
 On a request that failed unexpectedly, the completion record appears **before**
 the traceback rather than after it: the exception passes through the recording
@@ -348,12 +362,14 @@ together by the same `request_id`.
 
 `WUWATERM_API_LOG_LEVEL` sets how much is written; `INFO` is the default and is
 the level these records are emitted at. `WARNING` keeps the failures and drops
-the per-request records. It is applied the way the chat adapter applies its own
-`WUWATERM_LOG_LEVEL` — as the process level, so it governs third-party loggers
-too, apart from the HTTP client library which is pinned quiet because at `INFO`
-it reports the model endpoint this service was configured with. It is separate
-from `wuwaterm-api serve --log-level`, which is the web server's own startup and
-socket logging and is not passed by the Compose `command:` at all.
+the per-request records. Like the chat adapter's own `WUWATERM_LOG_LEVEL` it is
+applied as the process level, so it governs third-party loggers too — except the
+HTTP client library, which is held at `WARNING` **or at this level, whichever is
+stricter**, because at `INFO` it reports the model endpoint this service was
+configured with. (The chat adapter pins that one flat at `WARNING`; here a
+quieter setting stays quiet.) It is separate from `wuwaterm-api serve
+--log-level`, which is the web server's own startup and socket logging and is
+not passed by the Compose `command:` at all.
 
 ### Cost Topology
 

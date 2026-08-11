@@ -289,6 +289,10 @@ def test_an_automatic_redirect_is_recorded_and_correlates_by_header_only(
     record = fields(captured.completions[0])
     assert record["status"] == "307"
     assert record["request_id"] == response.headers["X-Request-Id"]
+    # The redirect is produced without matching a route, so the target takes
+    # the escaped-value branch rather than being named by a template. Pinned
+    # because the runbook orders those cases and puts this one in the third.
+    assert record["route"] == "/v1/meta/"
 
 
 def test_a_request_refused_before_routing_still_produces_a_record(tmp_path, sample_db):
@@ -599,11 +603,18 @@ def test_a_padded_target_cannot_spend_the_event_loop_on_being_examined(
         response = run(call(app, "GET", padded))
 
     assert response.status_code == 404
-    assert len(captured.completions) == 1
+    assert len(captured.completions) == 1, captured.messages
     # Both the number of passes and the size of each are bounded by the prefix
     # that could be written, not by what the caller sent.
     assert len(passes) <= app_module.RAW_TARGET_LOG_LIMIT, len(passes)
     assert max(passes) <= app_module.RAW_TARGET_LOG_LIMIT, max(passes)
+    # And the other half of the same bound, which is what makes the first half
+    # safe rather than merely cheap: this target ends in a credential marker
+    # beyond the prefix, the check does not see it — and neither does the
+    # record, because the same cut produced both.
+    record = fields(captured.completions[0])
+    assert record["route"] != app_module.CREDENTIAL_SHAPED_TARGET
+    assert "td1" not in record["route"]
 
 
 def test_a_rendered_target_is_bounded_by_what_is_written_not_what_arrived(
@@ -624,6 +635,7 @@ def test_a_rendered_target_is_bounded_by_what_is_written_not_what_arrived(
         response = run(call(app, "GET", expensive))
 
     assert response.status_code == 404
+    assert len(captured.completions) == 1, captured.messages
     record = fields(captured.completions[0])
     assert record["route"].endswith("~")
     assert len(record["route"]) <= 161
@@ -645,6 +657,7 @@ def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
         response = run(call(app, "DELETE", "/healthz"))
 
     assert response.status_code == 405
+    assert len(captured.completions) == 1, captured.messages
     record = fields(captured.completions[0])
     assert record["route"] == "/healthz"
     assert record["method"] == "DELETE"
@@ -669,6 +682,7 @@ def test_a_method_outside_the_known_set_is_recorded_by_membership_only(
         response = run(call(app, device_shaped, "/healthz"))
 
     assert response.status_code == 405
+    assert len(captured.completions) == 1, captured.messages
     record = fields(captured.completions[0])
     assert record["method"] == "other"
     assert device_shaped not in "\n".join(captured.messages)
@@ -693,6 +707,7 @@ def test_an_unmatched_target_cannot_forge_a_field_in_the_record(
         )
 
     assert response.status_code == 404
+    assert len(captured.completions) == 1, captured.messages
     message = captured.completions[0]
     # Neither a whitespace tokenizer nor a scan-anywhere reader can find a
     # second copy of either key.
@@ -748,6 +763,7 @@ def test_a_credential_in_the_request_target_is_never_written_down(
         assert token not in emitted, target
         assert TEST_SECRET not in emitted, target
         assert device.device_id not in emitted, target
+        assert len(captured.completions) == 1, captured.messages
         assert fields(captured.completions[0])["route"] == "credential-shaped"
 
 
@@ -766,6 +782,7 @@ def test_a_hostile_path_that_matched_a_route_is_recorded_as_the_template(
         response = run(call(app, "GET", "/v1/meta?q=%1b%5b31m"))
 
     assert response.status_code == 401
+    assert len(captured.completions) == 1, captured.messages
     assert fields(captured.completions[0])["route"] == "/v1/meta"
 
 

@@ -56,7 +56,12 @@ def configure_logging(level: str) -> None:
 
     ``basicConfig`` is deliberately not forced. It installs a handler when the
     process has none, which is the container case; an embedder that has already
-    configured logging keeps its own arrangement.
+    configured logging keeps its own arrangement. The handler it installs writes
+    to standard error, which is where the chat adapter's records already go.
+
+    ``level`` must already have been through :func:`validate_log_level`; this
+    looks it up rather than parsing it, so an unvalidated name raises here
+    instead of being accepted.
     """
     numeric = logging.getLevelNamesMapping()[level]
     logging.basicConfig(level=numeric, format=LOG_FORMAT)
