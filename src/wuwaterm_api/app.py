@@ -85,16 +85,34 @@ TERM_QUERY_MAX_LENGTH = 200
 #
 # A log line is an output channel with the same rules as a response body. Two
 # of the values in a request record are chosen by the caller — the target and
-# the method — and an operator reads them in a terminal, so they are rendered
-# rather than interpolated: `repr` escapes every control character (a percent-
-# encoded ESC arrives decoded, and `\x1b]0;…\x07` retitles the window that
-# `docker logs` is being read in), and the quotes it adds also make a value
-# containing a space unable to look like a second field.
+# the method — and they are read by an operator in a terminal and by whatever
+# collects the stream, so they are rendered rather than interpolated.
+#
+# Two distinct hazards, and `repr` alone covers only the first:
+#
+# 1. control sequences. A percent-encoded ESC arrives decoded, and
+#    `\x1b]0;…\x07` retitles the window `docker logs` is being read in. `repr`
+#    escapes every character that is not printable, which is all of C0 and C1,
+#    the bidi overrides, the line/paragraph separators, and every space
+#    character except U+0020.
+# 2. FORGED FIELDS. The record is whitespace-delimited `key=value`, and `repr`
+#    leaves U+0020 alone: a target of `/x status=200 device=id:spoofed` would
+#    put a caller's own `status=` and `device=` into the line ahead of the real
+#    ones. Quotes do not help — nothing splitting on whitespace respects them.
+#    So BOTH halves of what makes a field are escaped: the one whitespace
+#    character `repr` keeps, which stops a whitespace tokenizer seeing two
+#    fields, and `=`, which stops anything scanning for `status=` anywhere in a
+#    line finding a caller's copy first. A rendered value can then contain no
+#    field at all. The escapes are unambiguous: `repr` has already doubled any
+#    backslash in the input, so a single-backslash `\x20` or `\x3d` can only be
+#    one these lines introduced.
 # --------------------------------------------------------------------------
 
 # Characters that cannot carry an escape sequence and cannot forge a field
-# boundary. Anything else is escaped rather than enumerated as dangerous.
-_PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@=+-]+")
+# boundary. `=` is excluded for the reason above: `/status=200` needs no space
+# to fool a scanner. Anything outside this set is escaped rather than
+# enumerated as dangerous.
+_PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@+-]+")
 # Long enough for every route this service publishes, short enough that a
 # padded target cannot push the rest of the record out of view.
 RAW_TARGET_LOG_LIMIT = 80
@@ -246,14 +264,15 @@ def _new_request_id() -> str:
 
 
 def _log_field(value: object, limit: int) -> str:
-    """Render a caller-influenced value so a log record stays inert text."""
+    """Render a caller-influenced value as one inert, unsplittable token."""
     text = str(value)
     clipped = text[:limit]
     if clipped == text and _PLAIN_LOG_FIELD.fullmatch(text):
         return text
     # Truncated values are escaped too, so a shortened value is never mistaken
-    # for the whole of what arrived.
-    return repr(clipped)
+    # for the whole of what arrived. The two replacements are not cosmetic: see
+    # the forged-fields hazard above.
+    return repr(clipped).replace(" ", "\\x20").replace("=", "\\x3d")
 
 
 def _route_label(request: Request) -> str:

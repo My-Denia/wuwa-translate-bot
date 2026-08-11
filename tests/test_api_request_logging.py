@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
 from pathlib import Path
 
 import httpx
@@ -90,7 +89,14 @@ class RecordingHandler(logging.Handler):
 
     @property
     def messages(self) -> list[str]:
-        return [record.getMessage() for record in self.records]
+        """What a real handler would WRITE, not just the interpolated message.
+
+        ``Handler.format`` appends the exception text when a record carries
+        ``exc_info``. Scanning ``getMessage()`` alone would therefore let a
+        traceback reach the deployed stream carrying submitted text or
+        credential material while the privacy assertions below stayed green.
+        """
+        return [self.format(record) for record in self.records]
 
     @property
     def completions(self) -> list[str]:
@@ -127,23 +133,33 @@ def captured_records():
         logger.setLevel(previous_level)
 
 
-_FIELD_PATTERNS = {
-    "request_id": r"request_id=(\S+)",
-    "method": r"method=(\S+)",
-    "route": r"route=(.*?) status=",
-    "status": r"status=(\d+)",
-    "duration_ms": r"duration_ms=([0-9.]+)",
-    "device": r"device=(\S+)",
+EXPECTED_FIELDS = {
+    "request_id",
+    "method",
+    "route",
+    "status",
+    "duration_ms",
+    "device",
 }
 
 
 def fields(message: str) -> dict[str, str]:
+    """Parse a record the way a log collector would: split, then partition.
+
+    Deliberately NOT a per-key regex. A regex that looks for `status=` anywhere
+    in the line finds a caller's copy of it if one is allowed to survive into a
+    value, and the parser used to check the record must not be more forgiving
+    than the one an operator's tooling will be. Duplicate keys are refused here
+    for the same reason: that is what a forged field looks like.
+    """
     assert message.startswith(COMPLETION_PREFIX), message
-    parsed = {}
-    for name, pattern in _FIELD_PATTERNS.items():
-        found = re.search(pattern, message)
-        assert found is not None, f"{name} missing from {message!r}"
-        parsed[name] = found.group(1)
+    parsed: dict[str, str] = {}
+    for token in message[len(COMPLETION_PREFIX):].split(" "):
+        key, separator, value = token.partition("=")
+        assert separator, f"{token!r} is not a field in {message!r}"
+        assert key not in parsed, f"duplicate field {key!r} in {message!r}"
+        parsed[key] = value
+    assert set(parsed) == EXPECTED_FIELDS, parsed
     return parsed
 
 
@@ -438,6 +454,49 @@ def test_no_credential_device_id_or_request_text_reaches_any_record(
     assert "device=id:" in emitted
 
 
+def test_the_privacy_scan_covers_the_exception_text_a_handler_would_write(
+    tmp_path, sample_db, monkeypatch
+):
+    """A traceback is part of what gets written, so it is part of what is checked.
+
+    ``Handler.format`` appends the exception text; the interpolated message does
+    not contain it. A scan of messages alone would let a failing request write a
+    traceback to the deployed stream while the privacy assertions stayed green,
+    so the harness scans what a handler would emit.
+    """
+    app, store = build_app(tmp_path, sample_db)
+    device, token = issue_device(store)
+    body_marker = "MARKER-9a2b7e-request-body-text"
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("dictionary stage failed")
+
+    monkeypatch.setattr("wuwaterm_api.app.translate_request_async", boom)
+
+    with captured_records() as captured:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": body_marker},
+                headers={"Authorization": f"Bearer {token}"},
+                raise_app_exceptions=False,
+            )
+        )
+
+    assert response.status_code == 500
+    emitted = "\n".join(captured.messages)
+    # The scan really does reach the traceback...
+    assert "Traceback (most recent call last)" in emitted
+    assert "dictionary stage failed" in emitted
+    # ...and the traceback carries nothing the caller supplied.
+    assert body_marker not in emitted
+    assert token not in emitted
+    assert TEST_SECRET not in emitted
+    assert device.device_id not in emitted
+
+
 def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
     tmp_path, sample_db
 ):
@@ -487,6 +546,38 @@ def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
     assert record["method"] == "DELETE"
 
 
+def test_an_unmatched_target_cannot_forge_a_field_in_the_record(
+    tmp_path, sample_db
+):
+    """The record is whitespace-delimited, and the target may contain spaces.
+
+    A caller who sends `/x status=200 device=id:spoofed` would otherwise put its
+    own status and principal into the line AHEAD of the real ones, and anything
+    reading the stream by splitting on whitespace would believe the first pair
+    it meets. Quoting does not help: nothing that splits on whitespace respects
+    quotes. The rendered value has to be one token.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+
+    with captured_records() as captured:
+        response = run(
+            call(app, "GET", "/missing%20status=200%20device=id:spoofed")
+        )
+
+    assert response.status_code == 404
+    message = captured.completions[0]
+    # Neither a whitespace tokenizer nor a scan-anywhere reader can find a
+    # second copy of either key.
+    assert message.count("status=") == 1, message
+    assert message.count("device=") == 1, message
+    record = fields(message)
+    assert record["status"] == "404"
+    assert record["device"] == "-"
+    assert " " not in record["route"]
+    assert "\\x20" in record["route"]
+    assert "\\x3d" in record["route"]
+
+
 def test_a_hostile_path_that_matched_a_route_is_recorded_as_the_template(
     tmp_path, sample_db
 ):
@@ -528,7 +619,7 @@ def test_serving_installs_the_process_log_handler_at_the_configured_level(
     assert cli.main(["serve"]) == 0
 
     assert len(configured) == 1, configured
-    assert configured[0]["level"] == "DEBUG"
+    assert configured[0]["level"] == logging.DEBUG
     assert "%(levelname)s" in configured[0]["format"]
     assert "%(message)s" in configured[0]["format"]
     assert served, "the server was never started"
@@ -548,7 +639,40 @@ def test_the_log_level_defaults_to_info(tmp_path, sample_db, monkeypatch):
 
     assert cli.main(["serve"]) == 0
 
-    assert configured[0]["level"] == "INFO"
+    assert configured[0]["level"] == logging.INFO
+
+
+def test_quieting_the_http_client_never_relaxes_a_stricter_level(
+    tmp_path, sample_db, monkeypatch
+):
+    """The carve-out is a floor, not a pin.
+
+    Setting a level on a logger makes that level effective for it, and
+    propagation does not re-check the ancestors it passes through. Pinning these
+    at WARNING under a configured ERROR would therefore emit warnings the
+    operator explicitly asked not to see — quieting turned into amplifying.
+    """
+    from wuwaterm_api import cli
+
+    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: None)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+    monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
+    monkeypatch.setenv("WUWATERM_API_STATE_DIR", str(tmp_path / "state-api"))
+
+    previous = {name: logging.getLogger(name).level for name in cli.NOISY_LOGGERS}
+    try:
+        monkeypatch.setenv("WUWATERM_API_LOG_LEVEL", "ERROR")
+        assert cli.main(["serve"]) == 0
+        for name in cli.NOISY_LOGGERS:
+            assert logging.getLogger(name).level == logging.ERROR, name
+
+        monkeypatch.setenv("WUWATERM_API_LOG_LEVEL", "DEBUG")
+        assert cli.main(["serve"]) == 0
+        for name in cli.NOISY_LOGGERS:
+            assert logging.getLogger(name).level == logging.WARNING, name
+    finally:
+        for name, level in previous.items():
+            logging.getLogger(name).setLevel(level)
 
 
 def test_operator_subcommands_never_touch_the_process_log_handler(

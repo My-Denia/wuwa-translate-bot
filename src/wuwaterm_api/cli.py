@@ -58,9 +58,16 @@ def configure_logging(level: str) -> None:
     process has none, which is the container case; an embedder that has already
     configured logging keeps its own arrangement.
     """
-    logging.basicConfig(level=level, format=LOG_FORMAT)
+    numeric = logging.getLevelNamesMapping()[level]
+    logging.basicConfig(level=numeric, format=LOG_FORMAT)
+    # The STRICTER of the two, never a flat WARNING. Setting a level on a
+    # logger makes that level effective for it, and propagation does not
+    # re-check the ancestors it passes through — so pinning these at WARNING
+    # under a configured ERROR would turn the quieting into an amplifier and
+    # emit warnings the operator asked not to see.
+    quiet = max(numeric, logging.WARNING)
     for noisy_logger in NOISY_LOGGERS:
-        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+        logging.getLogger(noisy_logger).setLevel(quiet)
 
 
 def _resolve_bind(args: argparse.Namespace, settings: ApiSettings) -> str:
