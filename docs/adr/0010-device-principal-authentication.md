@@ -197,7 +197,20 @@ chat allowlist, and no Telegram identity confers API access.
   in flight, and the store file itself is a break-glass kill switch the
   request path cannot undo.
 - Positive: verification cost is bounded independently of everything else in
-  the process; unauthenticated traffic cannot starve the owner's token.
+  the process. What that establishes is exactly what `_in_credential_pool`
+  proves and no more: nothing an unauthenticated caller can schedule shares
+  the credential pool's workers, so probes and the dictionary stage cannot
+  displace verification.
+- Negative, and sharper once the surface is publicly routed: the bound is
+  bounded, but ACCESS to it is not reserved. A caller with no credential at
+  all can occupy both slots with well-formed tokens carrying invented device
+  ids, because an unknown id deliberately pays a full derivation before being
+  refused (that is what closes the enumeration oracle). While the slots are
+  occupied the owner's own valid token is shed with `429` at admission. This
+  is a residual availability risk, not a protection: the mitigations available
+  are ingress-side (rate limiting in front of the route) or an admission
+  scheme that reserves capacity for callers already known, and neither exists
+  today.
 - Negative: operators must generate and safeguard secrets themselves; a
   weak-but-32-character secret is accepted, mitigated (not eliminated) by
   scrypt cost.

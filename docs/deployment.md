@@ -125,16 +125,32 @@ Update or remove the line:
 WUWATERM_API_PORT=8788
 ```
 
-Then recreate the API container, because an `.env` edit does not reach a
-container that is already running, and read the port back from the new one:
+A normal `deploy/vps-update.sh` run recreates both containers from the current
+Compose file, so on a host whose `.env` does NOT pin the port there is nothing
+to do here. The manual recreate below is only for a host that pinned the old
+one, because an `.env` edit does not reach a container that is already running.
+
+**Recreate it on the image it is already on.** The updater creates the serving
+containers with an immutable `WUWATERM_RUNTIME_IMAGE=wuwaterm-runtime:<source
+commit>` and `--no-build`; a bare `compose up -d` would instead resolve the
+Compose default `wuwaterm-runtime:local` and, because the service carries a
+`build:` block, BUILD one — an unvalidated image, labelled `unknown`, that
+breaks the manifest's image binding and splits the two surfaces apart. Take the
+reference from the running container (the deployment manifest's `image_ref` is
+the other source for it) and forbid building:
 
 ```bash
 cd /opt/wuwaterm/current
-docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
+image="$(docker inspect --format '{{.Config.Image}}' wuwaterm-api)"
+export WUWATERM_RUNTIME_IMAGE="$image"
+docker compose -f deploy/docker-compose.yml up -d --no-build --force-recreate wuwaterm-api
 docker compose -f deploy/docker-compose.yml exec -T wuwaterm-api printenv WUWATERM_API_PORT
 ```
 
-Whatever that prints is the port the route below must name.
+Whatever that prints is the port the route below must name. Read the image back
+too — the Traceability Readback at the end of this page requires BOTH running
+containers to match the manifest, and this step is the one that could break
+that.
 
 Shell access to the host stays what it has always been: the operator's
 administration channel, used for the deployment and credential commands on
