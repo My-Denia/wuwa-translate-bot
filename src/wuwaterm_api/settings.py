@@ -145,10 +145,14 @@ class ApiSettings:
                 else state_dir / DEVICE_DB_FILENAME
             ),
             device_db_is_default=not (device_db and device_db.strip()),
-            bind=validate_loopback_bind(
-                (os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
-                or DEFAULT_BIND
-            ),
+            # Deliberately NOT validated here. from_env() is called by EVERY
+            # subcommand, including `device revoke` — gating credential
+            # revocation on serve-time network configuration would mean a
+            # mistyped bind blocks the one operation that must always work. The
+            # loopback guard is applied on the serve path, where a socket is
+            # actually bound; see validate_loopback_bind and cli._serve.
+            bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
+            or DEFAULT_BIND,
             port=_env_int(
                 "WUWATERM_API_PORT", DEFAULT_PORT, minimum=1, maximum=65535
             ),

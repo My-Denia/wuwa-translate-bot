@@ -1432,12 +1432,44 @@ def test_validate_loopback_bind_accepts_only_numeric_loopback():
             validate_loopback_bind(bad)
 
 
-def test_from_env_rejects_a_non_loopback_bind(monkeypatch):
-    """The environment override cannot expose the surface on a public interface."""
-    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+def test_serve_rejects_a_non_loopback_env_bind(monkeypatch, tmp_path):
+    """A non-loopback WUWATERM_API_BIND refuses to SERVE (exit 2, nothing bound)."""
+    import wuwaterm_api.cli as cli
 
-    with pytest.raises(ApiConfigError):
-        ApiSettings.from_env()
+    called = {}
+    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    assert cli.main(["serve"]) == 2
+    assert "kw" not in called  # never reached uvicorn.run
+
+
+def test_operator_commands_are_not_gated_on_the_serve_bind(monkeypatch, tmp_path, capsys):
+    """Credential revocation must never depend on serve-time network config.
+
+    The loopback guard belongs on the serve path only: a mistyped or deliberately
+    public WUWATERM_API_BIND must not block `device issue|list|revoke`, which is
+    the one operation that has to work when something is wrong (AC5/AC14).
+    """
+    import wuwaterm_api.cli as cli
+
+    db = tmp_path / "state-api" / "devices.db"
+    monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(db))
+    # A value the serve path refuses outright.
+    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+    store = DeviceStore(db, guard_legacy_default=False)
+    device, _ = issue_device(store, "owner desktop")
+
+    assert cli.main(["device", "list"]) == 0
+    assert cli.main(["device", "revoke", "--device-id", device.device_id]) == 0
+
+    assert capsys.readouterr().out.count(device.device_id) >= 2
+    assert DeviceStore(db, guard_legacy_default=False).authenticate(
+        f"{TOKEN_SCHEME}.{device.device_id}.{TEST_SECRET_BASE}-owner-desktop"
+    ) is None  # revoked, and the revocation went through with a bad bind set
 
 
 def test_serve_refuses_a_non_loopback_host_override(monkeypatch):
@@ -1679,16 +1711,27 @@ def test_a_transient_record_use_store_error_is_503_not_500(tmp_path, sample_db):
 
 
 def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
-    tmp_path, sample_db
+    monkeypatch, tmp_path, sample_db
 ):
     """The re-check runs at two seams. A transient store error at the SECOND
     (post-model) seam must not discard an already-completed translation and
     invite a second paid retry: it logs and serves. The first (pre-model) seam
-    still fails closed."""
+    still fails closed.
+
+    The body is a genuine model-answered translation, so the work being
+    protected here really is a paid model round trip — exactly one of them.
+    """
     import sqlite3
 
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "owner desktop")
+    model_calls: list[tuple[str, object]] = []
+
+    async def answer(locked_text, locks):
+        return "a model answer"
+
+    enable_mock_llm(monkeypatch, model_calls, answer)
+
     real = DeviceStore.is_active
     calls = {"n": 0}
 
@@ -1705,7 +1748,7 @@ def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
                 app,
                 "POST",
                 "/v1/translations",
-                json={"text": "声骸"},
+                json={"text": "这是一个需要模型翻译的长句子"},
                 headers=bearer(token),
             )
         )
@@ -1713,6 +1756,8 @@ def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
         DeviceStore.is_active = real
 
     assert response.status_code == 200
+    assert response.json()["kind"] == "llm"
+    assert len(model_calls) == 1  # the paid call happened once and was not wasted
     assert calls["n"] == 2  # both seams ran; the second hit the store error
 
 
