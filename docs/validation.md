@@ -63,10 +63,11 @@ machine (see [Deployment](deployment.md)).
 
 ## Server-Side Request Records
 
-The HTTP adapter writes one **completion record** per HTTP request — a line
-containing `request complete` — to standard error when it is started by
-`wuwaterm-api serve`. That is the stream the standard library's default handler
-uses, and the one the bot's records already go to.
+At `INFO`, the default, the HTTP adapter writes one **completion record** per
+HTTP request — a line containing `request complete` — to standard error when it
+is started by `wuwaterm-api serve`. That is the stream the standard library's
+default handler uses, and the one the bot's records already go to. Raising the
+level drops those records, and correlation with them.
 
 HTTP is the whole of what this service speaks: it declares no WebSocket route,
 and the `api` extra installs the server without a WebSocket library (pinned by
