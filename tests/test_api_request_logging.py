@@ -564,6 +564,30 @@ def test_an_unmatched_path_is_never_recorded_as_the_caller_wrote_it(
     assert len(fields(message)["route"]) <= 100
 
 
+def test_a_rendered_target_is_bounded_by_what_is_written_not_what_arrived(
+    tmp_path, sample_db
+):
+    """Both bounds are needed, and only the second one bounds the LINE.
+
+    Clipping the source alone lets one character render as ten, so a target
+    inside the source limit can still produce hundreds of columns and push the
+    status, the duration and the principal off the end of a terminal — which is
+    exactly what the limit was introduced to prevent.
+    """
+    app, _ = build_app(tmp_path, sample_db)
+    # Each of these renders as a ten-character escape.
+    expensive = "/" + "%F3%A0%80%81" * 79
+
+    with captured_records() as captured:
+        response = run(call(app, "GET", expensive))
+
+    assert response.status_code == 404
+    record = fields(captured.completions[0])
+    assert record["route"].endswith("~")
+    assert len(record["route"]) <= 161
+    assert record["status"] == "404"
+
+
 def test_an_unsupported_method_on_a_known_route_is_named_by_its_template(
     tmp_path, sample_db
 ):
@@ -624,28 +648,37 @@ def test_a_credential_in_the_request_target_is_never_written_down(
     A client or a proxy that puts the credential in the URL instead of the
     Authorization header produces a path that looks entirely ordinary and is
     well under the truncation limit, and escaping is reversible — so recording
-    it escaped would still write the secret into the log. A target that could be
-    a credential is recorded as a digest of itself and nothing more, which still
-    groups repeats for an operator without being readable.
+    it escaped would still write the secret into the log. Such a target is not
+    recorded at all.
+
+    Not even a digest of it: the redaction helper falls back to an unkeyed
+    hash when no secret is configured, and the API container blanks that
+    variable deliberately, so a digest would be a cheap offline check against
+    guessed secrets. The actionable fact is that a credential reached a URL,
+    not which one.
+
+    The second spelling is the one a literal search misses. The server
+    percent-decodes once, so a doubly-encoded scheme arrives still encoded and
+    one further decode of the recorded line would recover a working token.
     """
     app, store = build_app(tmp_path, sample_db)
     device, token = issue_device(store)
+    spellings = (
+        f"/{token}",
+        # `wtd1.` written as `%2577td1.`, which arrives as `%77td1.`
+        "/%25" + "77" + token[1:],
+    )
 
-    with captured_records() as captured:
-        response = run(call(app, "GET", f"/{token}"))
+    for target in spellings:
+        with captured_records() as captured:
+            response = run(call(app, "GET", target))
 
-    assert response.status_code == 404
-    emitted = "\n".join(captured.messages)
-    assert token not in emitted
-    assert TEST_SECRET not in emitted
-    assert device.device_id not in emitted
-
-    record = fields(captured.completions[0])
-    assert record["route"].startswith("credential-shaped:id:")
-    # The digest is stable, so an operator can still see a repeat.
-    with captured_records() as again:
-        run(call(app, "GET", f"/{token}"))
-    assert fields(again.completions[0])["route"] == record["route"]
+        assert response.status_code == 404, target
+        emitted = "\n".join(captured.messages)
+        assert token not in emitted, target
+        assert TEST_SECRET not in emitted, target
+        assert device.device_id not in emitted, target
+        assert fields(captured.completions[0])["route"] == "credential-shaped"
 
 
 def test_a_hostile_path_that_matched_a_route_is_recorded_as_the_template(

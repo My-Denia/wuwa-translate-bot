@@ -27,6 +27,7 @@ import uuid
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -113,10 +114,18 @@ TERM_QUERY_MAX_LENGTH = 200
 # to fool a scanner. Anything outside this set is escaped rather than
 # enumerated as dangerous.
 _PLAIN_LOG_FIELD = re.compile(r"[A-Za-z0-9._:/@+-]+")
-# Long enough for every route this service publishes, short enough that a
-# padded target cannot push the rest of the record out of view.
+# Source characters of a raw target that are considered at all.
 RAW_TARGET_LOG_LIMIT = 80
 METHOD_LOG_LIMIT = 16
+# And a cap on what is actually WRITTEN. Clipping the source alone does not
+# bound the line: one character can render as ten (`\U000e0001`), so eighty
+# source characters can become eight hundred and push the fields that matter
+# off the end of a terminal. Both bounds are needed — the first keeps the value
+# meaningful, the second keeps the record readable.
+RENDERED_LOG_LIMIT = 160
+# Marks a rendering that hit that cap. Not a space and not `=`, so it cannot
+# become a field boundary of its own.
+TRUNCATION_MARK = "~"
 # What a record names when no device was authenticated. Not `redact_id(None)`:
 # that renders as a digest and would read like a principal.
 NO_PRINCIPAL = "-"
@@ -126,11 +135,25 @@ NO_PRINCIPAL = "-"
 # header produces a target that is otherwise perfectly ordinary to look at, and
 # escaping is reversible, so recording it escaped would still write the secret
 # down. Every token of this service begins with the scheme, so a target that
-# contains it anywhere is not recorded at all — only a digest of it, which still
-# groups repeats without being readable. The query string is never recorded on
-# any path, so nothing there needs the same treatment.
+# contains it is not recorded at all. The query string is never recorded on any
+# path, so nothing there needs the same treatment.
+#
+# Recorded as a bare label with NO digest of the target. A digest would group
+# repeats, which is mildly useful, but `redact_id` falls back to an unkeyed
+# SHA-256 prefix when no redaction secret is configured — and the API container
+# blanks that variable on purpose, because it keys the BOT's redaction. That
+# would turn a leaked line into a cheap offline check against guessed secrets,
+# sidestepping the deliberately expensive derivation the credential store uses.
+# The actionable fact is that a credential reached a URL at all; nothing about
+# WHICH one belongs in a log.
 _CREDENTIAL_MARKER = f"{TOKEN_SCHEME}."
 CREDENTIAL_SHAPED_TARGET = "credential-shaped"
+# Percent-decoding is the one transform between the wire and the decoded path,
+# and the server applies exactly one round of it — so `%2577td1.` arrives as
+# `%77td1.` and a literal search for the marker misses it. Decoding to a fixed
+# point closes the family rather than the spelling; the bound is there because
+# nothing guarantees the input converges.
+_MAX_DECODE_ROUNDS = 4
 
 
 def service_version() -> str:
@@ -283,7 +306,30 @@ def _log_field(value: object, limit: int) -> str:
     # Truncated values are escaped too, so a shortened value is never mistaken
     # for the whole of what arrived. The two replacements are not cosmetic: see
     # the forged-fields hazard above.
-    return repr(clipped).replace(" ", "\\x20").replace("=", "\\x3d")
+    rendered = repr(clipped).replace(" ", "\\x20").replace("=", "\\x3d")
+    if len(rendered) > RENDERED_LOG_LIMIT:
+        rendered = rendered[:RENDERED_LOG_LIMIT] + TRUNCATION_MARK
+    return rendered
+
+
+def _could_carry_a_credential(path: str) -> bool:
+    """Whether a decoded target could contain a token of this service.
+
+    Decoded to a fixed point first. The server percent-decodes once, so a
+    caller (or a proxy tidying a URL) that encodes the scheme twice hands us
+    `%77td1.` — which a literal search does not see, while one more decode
+    recovers a working credential from the recorded line. Matching the family
+    rather than one spelling of it is the whole point.
+    """
+    seen = path
+    for _ in range(_MAX_DECODE_ROUNDS):
+        if _CREDENTIAL_MARKER in seen.lower():
+            return True
+        decoded = unquote(seen)
+        if decoded == seen:
+            return False
+        seen = decoded
+    return _CREDENTIAL_MARKER in seen.lower()
 
 
 def _route_label(request: Request) -> str:
@@ -302,8 +348,8 @@ def _route_label(request: Request) -> str:
     if isinstance(template, str) and template:
         return template
     path = str(request.scope.get("path", ""))
-    if _CREDENTIAL_MARKER in path.lower():
-        return f"{CREDENTIAL_SHAPED_TARGET}:{redact_id(path)}"
+    if _could_carry_a_credential(path):
+        return CREDENTIAL_SHAPED_TARGET
     return _log_field(path, RAW_TARGET_LOG_LIMIT)
 
 

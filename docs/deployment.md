@@ -296,12 +296,15 @@ of which covers quite everything:
 
 | Response | In the JSON body | In `X-Request-Id` |
 |---|---|---|
-| a `/v1` answer that reached its endpoint | yes | yes |
-| any error envelope | yes | yes |
-| an unhandled `500` | yes | **no** — assembled outside the middleware that attaches the header |
+| a `/v1` answer an endpoint returned normally | yes | yes |
+| a handled failure's envelope (`400`, `401`, `403`, `404`, `405`, `413`, `429`, `503`, `504`) | yes | yes |
+| an **unhandled** failure's envelope (`500`) | yes | **no** — assembled after the middleware that attaches the header has unwound |
 | `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
 | `/openapi.json` | **no** — that body is the schema | yes |
 | an automatic trailing-slash `307` | **no** — that response has no body at all | yes |
+
+The rows are exclusive: an unhandled `500` is the third row and not the first
+two, even though it came from a `/v1` endpoint and carries an error envelope.
 
 So for the calls an operator correlates, the body is enough; for a probe, a
 schema read or a redirect, read the header. Either way the id a client reports
