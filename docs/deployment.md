@@ -296,7 +296,7 @@ of which covers quite everything:
 
 | Response | In the JSON body | In `X-Request-Id` |
 |---|---|---|
-| any `/v1` answer | yes | yes |
+| a `/v1` answer that reached its endpoint | yes | yes |
 | any error envelope | yes | yes |
 | an unhandled `500` | yes | **no** — assembled outside the middleware that attaches the header |
 | `/healthz`, `/readyz` | **no** — those bodies are `status` and nothing else | yes |
@@ -317,7 +317,11 @@ for a given device, so requests can be attributed to one machine without the
 log ever holding the device id itself.
 
 What a record deliberately does not contain: no credential, no raw device id,
-no submitted or translated text, and no request target as the caller wrote it.
+no submitted or translated text, no query string, and no request target as the
+caller wrote it. A target that could itself be a credential — a client or proxy
+that puts a token in the URL instead of the `Authorization` header — is not
+recorded at all, only a digest of itself, so repeats still group without the
+secret being written down.
 A request that matched a route is named by its **route template**, and an
 unsupported method on a known route counts as matched — the framework picks the
 route first and then refuses the method, so a `405` is named by its template

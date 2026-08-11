@@ -118,19 +118,36 @@ def captured_records():
     let a request-dependent record added anywhere else carry a credential past a
     green test.
 
+    The serve path's quieting of the HTTP client library is applied here for the
+    same reason, from the same list: it is part of the deployed arrangement, and
+    without it this harness would be capturing a surface the deployed service
+    does not have. That library logs the full URL of every request it MAKES at
+    INFO, which in a test process includes the test client's own calls — a
+    leak this service could not produce and which would make the assertions
+    below about the wrong program.
+
     Deliberately not ``caplog``: the point is what an installed handler sees,
     and pytest's own capture level is global state other tests can move.
     """
+    from wuwaterm_api.cli import NOISY_LOGGERS
+
     logger = logging.getLogger()
     handler = RecordingHandler()
     previous_level = logger.level
+    previous_noisy = {
+        name: logging.getLogger(name).level for name in NOISY_LOGGERS
+    }
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     try:
         yield handler
     finally:
         logger.removeHandler(handler)
         logger.setLevel(previous_level)
+        for name, level in previous_noisy.items():
+            logging.getLogger(name).setLevel(level)
 
 
 EXPECTED_FIELDS = {
@@ -597,6 +614,38 @@ def test_an_unmatched_target_cannot_forge_a_field_in_the_record(
     assert " " not in record["route"]
     assert "\\x20" in record["route"]
     assert "\\x3d" in record["route"]
+
+
+def test_a_credential_in_the_request_target_is_never_written_down(
+    tmp_path, sample_db
+):
+    """The target is caller-supplied, so it can carry the caller's own token.
+
+    A client or a proxy that puts the credential in the URL instead of the
+    Authorization header produces a path that looks entirely ordinary and is
+    well under the truncation limit, and escaping is reversible — so recording
+    it escaped would still write the secret into the log. A target that could be
+    a credential is recorded as a digest of itself and nothing more, which still
+    groups repeats for an operator without being readable.
+    """
+    app, store = build_app(tmp_path, sample_db)
+    device, token = issue_device(store)
+
+    with captured_records() as captured:
+        response = run(call(app, "GET", f"/{token}"))
+
+    assert response.status_code == 404
+    emitted = "\n".join(captured.messages)
+    assert token not in emitted
+    assert TEST_SECRET not in emitted
+    assert device.device_id not in emitted
+
+    record = fields(captured.completions[0])
+    assert record["route"].startswith("credential-shaped:id:")
+    # The digest is stable, so an operator can still see a repeat.
+    with captured_records() as again:
+        run(call(app, "GET", f"/{token}"))
+    assert fields(again.completions[0])["route"] == record["route"]
 
 
 def test_a_hostile_path_that_matched_a_route_is_recorded_as_the_template(

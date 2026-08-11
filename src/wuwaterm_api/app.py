@@ -60,7 +60,7 @@ from wuwaterm.application import (
 from wuwaterm.logging_utils import redact_id
 
 from . import API_VERSION
-from .auth import SCOPE_META, SCOPE_TRANSLATE, Device, DeviceStore
+from .auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, Device, DeviceStore
 from .errors import MESSAGE_BY_CODE, ApiError, error_body
 
 # Framework-raised routing failures mapped onto the published vocabulary.
@@ -120,6 +120,17 @@ METHOD_LOG_LIMIT = 16
 # What a record names when no device was authenticated. Not `redact_id(None)`:
 # that renders as a digest and would read like a principal.
 NO_PRINCIPAL = "-"
+
+# A request target is caller-supplied and can therefore carry a CREDENTIAL: a
+# client or a proxy that puts a token in the URL instead of the Authorization
+# header produces a target that is otherwise perfectly ordinary to look at, and
+# escaping is reversible, so recording it escaped would still write the secret
+# down. Every token of this service begins with the scheme, so a target that
+# contains it anywhere is not recorded at all — only a digest of it, which still
+# groups repeats without being readable. The query string is never recorded on
+# any path, so nothing there needs the same treatment.
+_CREDENTIAL_MARKER = f"{TOKEN_SCHEME}."
+CREDENTIAL_SHAPED_TARGET = "credential-shaped"
 
 
 def service_version() -> str:
@@ -285,12 +296,15 @@ def _route_label(request: Request) -> str:
     partial match before refusing, so a 405 is named by its template like any
     other. Only a target that matched no route at all falls through, and there
     the decoded path is the one identifying thing left — recorded escaped,
-    never as it arrived.
+    never as it arrived, and not at all when it could be a credential.
     """
     template = getattr(request.scope.get("route"), "path", None)
     if isinstance(template, str) and template:
         return template
-    return _log_field(request.scope.get("path", ""), RAW_TARGET_LOG_LIMIT)
+    path = str(request.scope.get("path", ""))
+    if _CREDENTIAL_MARKER in path.lower():
+        return f"{CREDENTIAL_SHAPED_TARGET}:{redact_id(path)}"
+    return _log_field(path, RAW_TARGET_LOG_LIMIT)
 
 
 def _log_principal(request: Request) -> str:
