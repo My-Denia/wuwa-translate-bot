@@ -23,7 +23,7 @@ import argparse
 import sys
 
 from .auth import DeviceStore, DeviceStoreError
-from .settings import ApiConfigError, ApiSettings
+from .settings import ApiConfigError, ApiSettings, validate_loopback_bind
 
 
 def _serve(args: argparse.Namespace) -> int:
@@ -32,6 +32,13 @@ def _serve(args: argparse.Namespace) -> int:
     from .app import create_app
 
     settings = ApiSettings.from_env()
+    # The loopback guard lives HERE, on the only path that binds a socket — not
+    # in from_env, which every operator subcommand calls: `device revoke` must
+    # never be blocked by serve-time network configuration. Both the configured
+    # bind and a --host override go through the same check, before anything is
+    # built or bound, so the override cannot reopen the exposure the setting
+    # closes. ApiConfigError propagates to main() -> exit 2.
+    host = validate_loopback_bind(args.host if args.host is not None else settings.bind)
     store = DeviceStore(
         settings.device_db_path,
         guard_legacy_default=settings.device_db_is_default,
@@ -40,7 +47,7 @@ def _serve(args: argparse.Namespace) -> int:
     app = create_app(settings, device_store=store)
     uvicorn.run(
         app,
-        host=args.host or settings.bind,
+        host=host,
         port=args.port or settings.port,
         log_level=args.log_level,
         access_log=False,

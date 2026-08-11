@@ -349,12 +349,20 @@ class DeviceStore:
     def authenticate(self, token: str) -> Device | None:
         """Return the live device for ``token``, or None. READ ONLY.
 
-        None covers every rejection reason on purpose: unknown device, wrong
-        secret, malformed token, revoked device and an unusable store are all
-        indistinguishable to the caller, so the endpoint cannot be used to
-        enumerate device ids or to probe the server's state. An operator who
-        needs to know WHY a store is unusable gets that at startup, where the
-        message has an audience.
+        None means the CREDENTIAL was not proven: unknown device, wrong secret,
+        malformed token and a revoked device are all indistinguishable, so the
+        endpoint cannot be used to enumerate device ids. These are the only
+        cases that map to 401.
+
+        A store that cannot be READ (``database is locked``, a disk I/O error)
+        is a different thing: the store being momentarily unusable, not the
+        credential being wrong. A ``sqlite3.Error`` from the read therefore
+        PROPAGATES, so the request path can answer 503 rather than tell a valid
+        device to re-pair. This leaks nothing probeable — an unreadable store is
+        device-independent, so the outcome does not vary with the token — and it
+        splits "store unusable" from "credential not proven". A legacy/old-shape
+        store (``DeviceStoreError`` from initialize) is a persistent
+        misconfiguration caught at startup, and stays a uniform rejection.
 
         Usage is deliberately NOT recorded here: a caller that is about to be
         refused by a rate limit must not be able to drive an unbounded stream
@@ -366,17 +374,12 @@ class DeviceStore:
         device_id, secret = parsed
         try:
             self.initialize()
-        except (DeviceStoreError, sqlite3.Error):
-            # Loud at startup, uniform on the request path: a store this
-            # process cannot read is one more indistinguishable rejection, not
-            # a different status a caller could probe for.
+        except DeviceStoreError:
+            # A legacy/old-shape store is a persistent misconfiguration, caught
+            # at startup normally; keep it a uniform rejection. A sqlite3.Error
+            # from initialize is an unreadable store and propagates (below).
             return None
-        try:
-            return self._verify(device_id, secret)
-        except sqlite3.Error:
-            # Any store this process cannot read is one more indistinguishable
-            # rejection, at every seam and not just at open time.
-            return None
+        return self._verify(device_id, secret)
 
     def _verify(self, device_id: str, secret: str) -> Device | None:
         with self._connect() as conn:
@@ -398,14 +401,42 @@ class DeviceStore:
                 return None
         return _row_to_device(row)
 
-    def record_use(self, device_id: str, *, now: str | None = None) -> None:
-        """Stamp last_used_at for an ADMITTED request."""
+    def record_use(self, device_id: str, *, now: str | None = None) -> int:
+        """Stamp last_used_at for an ADMITTED request; return affected rows.
+
+        The UPDATE only touches a row that is still active, so the returned
+        count is 1 for a live device and 0 for one revoked (or removed) between
+        verification and this write. The caller treats a count other than 1 as
+        a revocation that committed in-flight and rejects the request, closing
+        the window where a snapshot taken at verify time would otherwise be
+        served after the device was withdrawn.
+        """
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE devices SET last_used_at = ? WHERE device_id = ?"
                 " AND revoked_at IS NULL",
                 (now or _now(), device_id),
             )
+            return cursor.rowcount
+
+    def is_active(self, device_id: str) -> bool:
+        """Whether ``device_id`` is registered and not revoked, right now.
+
+        READ ONLY, and cheap: a single indexed lookup, run at the request-time
+        TOCTOU seams AFTER the device has already authenticated. Unlike
+        :meth:`authenticate`, a store error here is NOT swallowed into a
+        rejection: this is not an anti-enumeration surface (the caller is a
+        known, verified device), so a transient failure — ``database is
+        locked``, a disk I/O error — must surface as an infrastructure problem
+        and not be misread as the credential being invalid. ``False`` means the
+        device is genuinely absent or revoked; a ``sqlite3.Error`` propagates.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT revoked_at FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+        return row is not None and row["revoked_at"] is None
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:

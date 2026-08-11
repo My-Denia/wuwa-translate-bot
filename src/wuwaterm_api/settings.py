@@ -7,6 +7,7 @@ are reported without echoing the raw value (it may contain a secret).
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,59 @@ from pathlib import Path
 
 class ApiConfigError(ValueError):
     """Raised when the environment cannot produce a usable configuration."""
+
+
+def validate_loopback_bind(value: str) -> str:
+    """Return ``value`` if it is a numeric loopback address, else raise.
+
+    This API is a single-owner surface that must never listen where a remote
+    host can reach it. The bind is therefore required to be a numeric loopback
+    literal (``127.0.0.1``, any ``127.0.0.0/8`` address, or ``::1``). Refused:
+
+    * ``0.0.0.0`` and ``::`` — every interface, the exact exposure hazard;
+    * any routable address — a public or LAN interface;
+    * any hostname, including ``localhost`` — it is not numeric and could
+      resolve, now or later by DNS the operator does not control, to a
+      non-loopback interface. Only an address that is loopback by inspection,
+      never by resolution, is accepted.
+
+    The offending value is not echoed: settings never reflect a raw environment
+    value back, and the fix is the same regardless of what was set. The returned
+    value is the NORMALIZED literal (``str(address)``) so the accepted value is
+    the one that actually binds: brackets are URL syntax, not host syntax, and
+    ``uvicorn.run(host="[::1]")`` raises at bind time, so ``[::1]`` is returned
+    as ``::1`` and surrounding whitespace is dropped.
+    """
+    candidate = (value or "").strip()
+    host = (
+        candidate[1:-1]
+        if candidate.startswith("[") and candidate.endswith("]")
+        else candidate
+    )
+    if "%" in host:
+        # A zone id is accepted by ipaddress (``::1%does-not-exist`` parses AND
+        # reports is_loopback), but the scope is not validated here and
+        # getaddrinfo fails on a nonexistent one — which would escape as a raw
+        # socket error instead of this module's ApiConfigError -> exit 2. The
+        # loopback interface needs no scope, so refuse the whole class rather
+        # than try to resolve it.
+        raise ApiConfigError(
+            "the API bind must be a plain numeric loopback address without a "
+            "zone id, such as 127.0.0.1 or ::1"
+        )
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        raise ApiConfigError(
+            "the API bind must be a numeric loopback address such as "
+            "127.0.0.1 or ::1"
+        ) from None
+    if not address.is_loopback:
+        raise ApiConfigError(
+            "the API bind must be a loopback address such as 127.0.0.1 or ::1; "
+            "binding any other interface would expose this single-owner surface"
+        )
+    return str(address)
 
 
 DEFAULT_BIND = "127.0.0.1"
@@ -102,6 +156,12 @@ class ApiSettings:
                 else state_dir / DEVICE_DB_FILENAME
             ),
             device_db_is_default=not (device_db and device_db.strip()),
+            # Deliberately NOT validated here. from_env() is called by EVERY
+            # subcommand, including `device revoke` — gating credential
+            # revocation on serve-time network configuration would mean a
+            # mistyped bind blocks the one operation that must always work. The
+            # loopback guard is applied on the serve path, where a socket is
+            # actually bound; see validate_loopback_bind and cli._serve.
             bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
             or DEFAULT_BIND,
             port=_env_int(

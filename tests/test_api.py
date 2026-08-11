@@ -526,35 +526,41 @@ def test_model_failure_maps_to_llm_unavailable(monkeypatch, tmp_path, sample_db)
     assert TRANSLATION_UNAVAILABLE_NOTICE not in response.text
 
 
-def test_response_carries_and_echoes_a_request_id(tmp_path, sample_db):
+def test_request_id_is_always_server_generated(tmp_path, sample_db, caplog):
+    """The correlation id is minted server-side; an inbound X-Request-Id is
+    ignored, never echoed and never logged.
+
+    Trusting the header let a caller put its own token (which fits the shape
+    wtd1.<id>.<secret>) into the id, which was then written to the auth-reject
+    log and the error envelope. AC16 forbids a raw credential reaching logs or
+    telemetry, so nothing the caller sends may become the id.
+    """
     app, store = build_client_app(tmp_path, sample_db)
     _, token = issue_device(store, "owner desktop")
 
     generated = run(
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
     )
-    supplied = run(
-        call(
-            app,
-            "POST",
-            "/v1/translations",
-            json={"text": "声骸"},
-            headers={**bearer(token), "X-Request-Id": "client-123"},
+    # Shaped exactly like a device token, and matched the old accept charset.
+    token_shaped = "wtd1.deadbeef.%s" % ("s" * 40)
+    with caplog.at_level("INFO", logger="wuwaterm_api"):
+        supplied = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers={**bearer(token), "X-Request-Id": token_shaped},
+            )
         )
-    )
-    hostile = run(
-        call(
-            app,
-            "POST",
-            "/v1/translations",
-            json={"text": "声骸"},
-            headers={**bearer(token), "X-Request-Id": "bad id with spaces"},
-        )
-    )
 
+    # The server's generated id is what is returned and echoed in the header.
     assert generated.headers["X-Request-Id"] == generated.json()["request_id"]
-    assert supplied.json()["request_id"] == "client-123"
-    assert hostile.json()["request_id"] != "bad id with spaces"
+    assert supplied.headers["X-Request-Id"] == supplied.json()["request_id"]
+    # The client's value did not become the id, on the wire or in a log.
+    assert supplied.json()["request_id"] != token_shaped
+    assert token_shaped not in supplied.text
+    assert token_shaped not in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -616,6 +622,11 @@ def test_model_concurrency_never_exceeds_the_configured_cap(
         rate_limit_per_minute=100,
         llm_calls_per_minute=100,
         request_timeout_seconds=30.0,
+        # This test measures the MODEL concurrency cap, which is a later gate
+        # than credential admission. Give it enough auth slots to admit its
+        # whole burst, so the non-queuing auth admission does not shed requests
+        # before they reach the model cap being measured here.
+        auth_max_concurrency=8,
     )
     _, token = issue_device(store, "owner desktop")
     calls: list[tuple[str, object]] = []
@@ -1192,7 +1203,12 @@ def test_credential_verification_is_bounded_before_any_device_limit(
     finally:
         DeviceStore.authenticate = real
 
-    assert [item.status_code for item in responses] == [401] * 6
+    # Non-queuing admission: an admitted attempt is rejected as a bad
+    # credential (401); an attempt that found the verifier full is shed (429).
+    # Either way the expensive check itself never runs more than the bound.
+    # `401 in` guards against the vacuous all-429 case (verification never ran).
+    statuses = {item.status_code for item in responses}
+    assert 401 in statuses and statuses <= {401, 429}, statuses
     assert state["peak"] == 1, state["peak"]
 
 
@@ -1263,8 +1279,12 @@ def test_every_file_carrying_verifier_material_is_restricted(tmp_path):
         assert not mode & 0o077, (path, oct(mode))
 
 
-def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
-    """No seam may answer differently from every other rejection."""
+def test_a_corrupt_store_is_a_service_unavailable_not_a_rejection(tmp_path, sample_db):
+    """An UNREADABLE store is the store being unusable, not a bad credential.
+
+    It must not be answered as 401 (which would tell a valid device to re-pair);
+    it is 503, and the response is device-independent so nothing is probeable.
+    """
     settings = build_settings(tmp_path, sample_db)
     settings.device_db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.device_db_path.write_bytes(b"this is not a database at all")
@@ -1280,8 +1300,8 @@ def test_a_corrupt_store_is_still_a_uniform_rejection(tmp_path, sample_db):
         )
     )
 
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "unauthorized"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
 
 
 def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_db):
@@ -1327,3 +1347,494 @@ def test_a_cancelled_request_does_not_leak_a_verification_slot(tmp_path, sample_
         call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
     )
     assert recovered.status_code == 200
+
+
+def test_admission_slot_is_released_if_verification_is_cancelled_before_it_runs(
+    tmp_path, sample_db, monkeypatch
+):
+    """The admission slot must be released on the loop, not only in the worker.
+
+    If the to_thread verification job is cancelled while still QUEUED on a
+    saturated executor, the worker never runs — so releasing only inside the
+    worker would leak the slot permanently and wedge every later request into
+    429. Here `to_thread` is cancelled before the worker callable runs, exactly
+    that case, and the slot must still be reacquirable afterwards.
+    """
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    import wuwaterm_api.app as appmod
+
+    app, store = build_client_app(tmp_path, sample_db, auth_max_concurrency=1)
+    _, token = issue_device(store, "owner desktop")
+
+    class _Url:
+        path = "/v1/translations"
+
+    class _State:
+        pass
+
+    class _Req:
+        def __init__(self, app):
+            self.app = app
+            self.url = _Url()
+            self.state = _State()
+
+    async def cancel_before_worker(func, *args, **kwargs):
+        # The awaiting task is cancelled before the queued worker starts.
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(appmod.asyncio, "to_thread", cancel_before_worker)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            await appmod.authenticated_device(_Req(app), creds)
+
+    run(scenario())
+
+    # The slot survived the cancelled-before-it-ran verification.
+    assert app.state.auth_slots.acquire(blocking=False)
+    app.state.auth_slots.release()
+
+
+# --------------------------------------------------------------------------
+# Hardening fixes (gpt5.6 safety critic): loopback bind, auth admission,
+# revocation TOCTOU
+# --------------------------------------------------------------------------
+
+
+def test_validate_loopback_bind_accepts_only_numeric_loopback():
+    """A numeric loopback literal is required; everything else is refused.
+
+    The returned value is the NORMALIZED literal that actually binds — brackets
+    and surrounding whitespace are stripped — so an accepted value can never be
+    one uvicorn then rejects at bind time.
+    """
+    from wuwaterm_api.settings import validate_loopback_bind
+
+    assert validate_loopback_bind("127.0.0.1") == "127.0.0.1"
+    assert validate_loopback_bind("127.255.255.254") == "127.255.255.254"
+    assert validate_loopback_bind("::1") == "::1"
+    assert validate_loopback_bind("[::1]") == "::1"
+    assert validate_loopback_bind(" 127.0.0.1 ") == "127.0.0.1"
+    for bad in (
+        "0.0.0.0",
+        "::",
+        "192.168.0.10",
+        "10.0.0.1",
+        "8.8.8.8",
+        "localhost",
+        "example.com",
+        "",
+        "not-an-address",
+        # Zone-scoped IPv6: ipaddress PARSES these and reports is_loopback, but
+        # the scope is unvalidated and getaddrinfo fails on a nonexistent one,
+        # which would escape as a raw socket error instead of exit 2.
+        "::1%does-not-exist",
+        "::1%eth0",
+        "[::1%eth0]",
+    ):
+        with pytest.raises(ApiConfigError):
+            validate_loopback_bind(bad)
+
+
+def test_serve_rejects_a_zone_scoped_ipv6_bind_with_exit_2(monkeypatch, tmp_path):
+    """A scoped-IPv6 bind must fail as a config error, not a socket error.
+
+    `::1%does-not-exist` satisfies ipaddress.is_loopback, so without the zone-id
+    refusal it reached uvicorn and getaddrinfo raised, escaping main() as an
+    unhandled socket error instead of the intended ApiConfigError -> exit 2.
+    """
+    import wuwaterm_api.cli as cli
+
+    called = {}
+    monkeypatch.setenv("WUWATERM_API_BIND", "::1%does-not-exist")
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    assert cli.main(["serve"]) == 2
+    assert "kw" not in called  # never reached uvicorn.run / getaddrinfo
+
+    # Same for the override path.
+    monkeypatch.delenv("WUWATERM_API_BIND", raising=False)
+    assert cli.main(["serve", "--host", "::1%does-not-exist"]) == 2
+    assert "kw" not in called
+
+
+def test_serve_rejects_a_non_loopback_env_bind(monkeypatch, tmp_path):
+    """A non-loopback WUWATERM_API_BIND refuses to SERVE (exit 2, nothing bound)."""
+    import wuwaterm_api.cli as cli
+
+    called = {}
+    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+    monkeypatch.setenv(
+        "WUWATERM_API_DEVICE_DB_PATH", str(tmp_path / "state-api" / "devices.db")
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    assert cli.main(["serve"]) == 2
+    assert "kw" not in called  # never reached uvicorn.run
+
+
+def test_operator_commands_are_not_gated_on_the_serve_bind(monkeypatch, tmp_path, capsys):
+    """Credential revocation must never depend on serve-time network config.
+
+    The loopback guard belongs on the serve path only: a mistyped or deliberately
+    public WUWATERM_API_BIND must not block `device issue|list|revoke`, which is
+    the one operation that has to work when something is wrong (AC5/AC14).
+    """
+    import wuwaterm_api.cli as cli
+
+    db = tmp_path / "state-api" / "devices.db"
+    monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(db))
+    # A value the serve path refuses outright.
+    monkeypatch.setenv("WUWATERM_API_BIND", "0.0.0.0")
+    store = DeviceStore(db, guard_legacy_default=False)
+    device, _ = issue_device(store, "owner desktop")
+
+    assert cli.main(["device", "list"]) == 0
+    assert cli.main(["device", "revoke", "--device-id", device.device_id]) == 0
+
+    assert capsys.readouterr().out.count(device.device_id) >= 2
+    assert DeviceStore(db, guard_legacy_default=False).authenticate(
+        f"{TOKEN_SCHEME}.{device.device_id}.{TEST_SECRET_BASE}-owner-desktop"
+    ) is None  # revoked, and the revocation went through with a bad bind set
+
+
+def test_serve_refuses_a_non_loopback_host_override(monkeypatch):
+    """The --host override goes through the same guard, before anything binds."""
+    import wuwaterm_api.cli as cli
+
+    called = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: called.setdefault("kw", kw))
+
+    code = cli.main(["serve", "--host", "0.0.0.0"])
+
+    assert code == 2
+    assert "kw" not in called  # never reached uvicorn.run
+
+
+def test_serve_binds_the_validated_loopback_host(monkeypatch):
+    """The happy path binds the validated loopback bind."""
+    import types
+
+    import wuwaterm_api.cli as cli
+
+    captured = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    monkeypatch.setattr(
+        cli, "DeviceStore", lambda *a, **k: types.SimpleNamespace(initialize=lambda: None)
+    )
+    monkeypatch.setattr("wuwaterm_api.app.create_app", lambda *a, **k: object())
+    for name in ("WUWATERM_API_BIND", "WUWATERM_API_PORT"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli.main(["serve"]) == 0
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_auth_admission_sheds_load_when_the_verifier_is_full(tmp_path, sample_db):
+    """When the bounded verification executor is full, an extra credentialed
+    request is shed immediately (429), not queued behind an expensive scrypt.
+
+    With the whole executor occupied, the old code blocked the worker thread on
+    the semaphore and the request only ended at the time budget (504); the fix
+    admits without queuing and returns the back-off code straight away.
+    """
+    app, store = build_client_app(
+        tmp_path, sample_db, auth_max_concurrency=1, request_timeout_seconds=2.0
+    )
+    _, token = issue_device(store, "owner desktop")
+
+    # Occupy the single verification slot so the executor is full.
+    assert app.state.auth_slots.acquire(blocking=False)
+    try:
+        shed = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        app.state.auth_slots.release()
+
+    assert shed.status_code == 429
+    assert shed.json()["error"]["code"] == "rate_limited"
+
+    # With the slot free again the same credential is admitted normally.
+    admitted = run(
+        call(app, "POST", "/v1/translations", json={"text": "声骸"}, headers=bearer(token))
+    )
+    assert admitted.status_code == 200
+
+
+def test_record_use_reports_whether_a_live_row_was_stamped(tmp_path):
+    """record_use returns affected rows and is_active reflects revocation."""
+    store = DeviceStore(tmp_path / "devices.db")
+    device, _ = issue_device(store, "owner desktop")
+
+    assert store.record_use(device.device_id) == 1
+    assert store.is_active(device.device_id) is True
+
+    store.revoke(device.device_id)
+
+    assert store.record_use(device.device_id) == 0
+    assert store.is_active(device.device_id) is False
+    assert store.is_active("does-not-exist") is False
+
+
+def test_a_device_revoked_during_verification_is_refused(tmp_path, sample_db):
+    """TOCTOU: a revocation that commits between the verify snapshot and
+    admission must not be served. record_use stamps zero rows, so admission
+    fails with 401 rather than serving the withdrawn credential."""
+    app, store = build_client_app(tmp_path, sample_db)
+    device, token = issue_device(store, "owner desktop")
+    real = DeviceStore.authenticate
+
+    def revoke_then_return(self, presented):
+        result = real(self, presented)
+        if result is not None:
+            # The operator revokes in the same instant the snapshot is taken.
+            self.revoke(result.device_id)
+        return result
+
+    DeviceStore.authenticate = revoke_then_return
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.authenticate = real
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_a_device_revoked_after_admission_is_refused_before_serving(
+    tmp_path, sample_db
+):
+    """TOCTOU: a revocation that commits after admission but before the response
+    is caught by the active re-check at the serving seam, not served."""
+    app, store = build_client_app(tmp_path, sample_db)
+    device, token = issue_device(store, "owner desktop")
+    real_record = DeviceStore.record_use
+
+    def record_then_revoke(self, device_id, *, now=None):
+        count = real_record(self, device_id, now=now)
+        # Admitted on a live row; the operator revokes before the response is
+        # built.
+        self.revoke(device_id)
+        return count
+
+    DeviceStore.record_use = record_then_revoke
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.record_use = real_record
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_is_active_propagates_a_transient_store_error(tmp_path):
+    """A store failure on the re-check is surfaced, not swallowed into False.
+
+    Swallowing it (as authenticate deliberately does, for anti-enumeration)
+    would misread a locked database as a revoked device and reject a valid one.
+    """
+    import sqlite3
+
+    store = DeviceStore(tmp_path / "devices.db")
+    device, _ = issue_device(store, "owner desktop")
+
+    def boom(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    real = DeviceStore._connect
+    DeviceStore._connect = boom
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            store.is_active(device.device_id)
+    finally:
+        DeviceStore._connect = real
+
+
+def test_a_transient_recheck_store_error_is_503_not_401(tmp_path, sample_db):
+    """A transient store failure on the post-auth re-check must not tell a
+    valid device to re-pair: it is the service-unavailable envelope, not
+    unauthorized."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.is_active
+
+    def boom(self, device_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore.is_active = boom
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.is_active = real
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
+    # The one thing it must never be: a credential rejection.
+    assert response.json()["error"]["code"] != "unauthorized"
+
+
+def test_a_transient_record_use_store_error_is_503_not_500(tmp_path, sample_db):
+    """A transient failure on the admission write is infrastructure (503), not a
+    generic 500 or a credential rejection."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore.record_use
+
+    def boom(self, device_id, *, now=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore.record_use = boom
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.record_use = real
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal"
+
+
+def test_a_post_model_store_hiccup_still_serves_the_paid_translation(
+    monkeypatch, tmp_path, sample_db
+):
+    """The re-check runs at two seams. A transient store error at the SECOND
+    (post-model) seam must not discard an already-completed translation and
+    invite a second paid retry: it logs and serves. The first (pre-model) seam
+    still fails closed.
+
+    The body is a genuine model-answered translation, so the work being
+    protected here really is a paid model round trip — exactly one of them.
+    """
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    model_calls: list[tuple[str, object]] = []
+
+    async def answer(locked_text, locks):
+        return "a model answer"
+
+    enable_mock_llm(monkeypatch, model_calls, answer)
+
+    real = DeviceStore.is_active
+    calls = {"n": 0}
+
+    def flaky(self, device_id):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the post-model seam only
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, device_id)  # pre-model seam: device is active
+
+    DeviceStore.is_active = flaky
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "这是一个需要模型翻译的长句子"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore.is_active = real
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "llm"
+    assert len(model_calls) == 1  # the paid call happened once and was not wasted
+    assert calls["n"] == 2  # both seams ran; the second hit the store error
+
+
+def test_a_locked_store_on_the_auth_read_is_503_a_wrong_secret_is_401(
+    tmp_path, sample_db
+):
+    """The verification READ failing (store unusable) is 503, not 401; a genuine
+    wrong secret is still a credential rejection (401)."""
+    import sqlite3
+
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    real = DeviceStore._verify
+
+    def boom(self, device_id, secret):
+        raise sqlite3.OperationalError("database is locked")
+
+    DeviceStore._verify = boom
+    try:
+        locked = run(
+            call(
+                app,
+                "POST",
+                "/v1/translations",
+                json={"text": "声骸"},
+                headers=bearer(token),
+            )
+        )
+    finally:
+        DeviceStore._verify = real
+
+    assert locked.status_code == 503
+    assert locked.json()["error"]["code"] == "internal"
+
+    # Store readable again: a genuine wrong secret is still a rejection.
+    device2, _ = issue_device(store, "another")
+    wrong = "wtd1.%s.%s" % (device2.device_id, "z" * 40)
+    rejected = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "声骸"},
+            headers=bearer(wrong),
+        )
+    )
+
+    assert rejected.status_code == 401
+    assert rejected.json()["error"]["code"] == "unauthorized"
