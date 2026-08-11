@@ -1029,9 +1029,6 @@ def test_the_api_example_environment_documents_the_log_level():
     assert "WUWATERM_API_LOG_LEVEL=INFO" in text
 
 
-# The environment the runtime image resolves for, taken from its own base
-# image (`python:3.11-slim` in deploy/Dockerfile), not from whatever is running
-# this test. Only the fields the lock's markers actually use need to be right.
 WEBSOCKET_LIBRARIES = {"websockets", "wsproto"}
 
 
@@ -1078,7 +1075,8 @@ def test_no_websocket_library_is_locked_for_any_purpose():
         canonicalize_name(item.name) in WEBSOCKET_LIBRARIES for item in declared
     ), api
     assert not any(
-        canonicalize_name(extra) in WEBSOCKET_LIBRARIES or extra == "standard"
+        canonicalize_name(extra) in WEBSOCKET_LIBRARIES
+        or canonicalize_name(extra) == "standard"
         for item in declared
         for extra in item.extras
     ), api
