@@ -1029,6 +1029,28 @@ def test_the_api_example_environment_documents_the_log_level():
     assert "WUWATERM_API_LOG_LEVEL=INFO" in text
 
 
+# The environment the runtime image resolves for, taken from its own base
+# image (`python:3.11-slim` in deploy/Dockerfile), not from whatever is running
+# this test. Only the fields the lock's markers actually use need to be right.
+IMAGE_ENVIRONMENT = {
+    "sys_platform": "linux",
+    "platform_system": "Linux",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+    "python_version": "3.11",
+    "python_full_version": "3.11.0",
+    "implementation_name": "cpython",
+    "platform_python_implementation": "CPython",
+    "extra": "",
+}
+
+
+def _applies_to_the_image(marker: str | None) -> bool:
+    from packaging.markers import Marker
+
+    return marker is None or Marker(marker).evaluate(IMAGE_ENVIRONMENT)
+
+
 def test_the_api_extra_installs_no_websocket_library():
     """The record covers HTTP requests, and HTTP is all this service speaks.
 
@@ -1074,10 +1096,15 @@ def test_the_api_extra_installs_no_websocket_library():
         if name in closure or name not in locked:
             continue
         closure.add(name)
-        pending.extend(
-            dependency["name"]
-            for dependency in locked[name].get("dependencies", [])
-        )
+        for dependency in locked[name].get("dependencies", []):
+            # Markers are evaluated for the IMAGE, not for whatever is running
+            # this test. `click` wants `colorama` on Windows only; including it
+            # here would mean a Windows-only package that one day pulls a
+            # WebSocket library fails a gate about a Linux image that would
+            # never install it.
+            if not _applies_to_the_image(dependency.get("marker")):
+                continue
+            pending.append(dependency["name"])
 
     assert "uvicorn" in closure, sorted(closure)
     assert not closure & {"websockets", "wsproto"}, sorted(closure)
