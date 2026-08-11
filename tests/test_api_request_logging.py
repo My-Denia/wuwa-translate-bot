@@ -1032,23 +1032,56 @@ def test_the_api_example_environment_documents_the_log_level():
 # The environment the runtime image resolves for, taken from its own base
 # image (`python:3.11-slim` in deploy/Dockerfile), not from whatever is running
 # this test. Only the fields the lock's markers actually use need to be right.
-IMAGE_ENVIRONMENT = {
-    "sys_platform": "linux",
-    "platform_system": "Linux",
-    "os_name": "posix",
-    "platform_machine": "x86_64",
-    "python_version": "3.11",
-    "python_full_version": "3.11.0",
-    "implementation_name": "cpython",
-    "platform_python_implementation": "CPython",
-    "extra": "",
-}
+# The environments the runtime image could resolve for. Taken from its base
+# image (`python:3.11-slim` in deploy/Dockerfile) rather than from whatever runs
+# this test — and left open on the machine, because that base is unpinned and
+# builds on either architecture. A marker counts if it holds on ANY of them,
+# which is the conservative direction for a gate about what may be installed.
+IMAGE_ENVIRONMENTS = [
+    {
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+        "os_name": "posix",
+        "platform_machine": machine,
+        "python_version": "3.11",
+        "python_full_version": "3.11.0",
+        "implementation_name": "cpython",
+        "platform_python_implementation": "CPython",
+        "extra": "",
+    }
+    for machine in ("x86_64", "aarch64")
+]
+
+WEBSOCKET_LIBRARIES = {"websockets", "wsproto"}
 
 
 def _applies_to_the_image(marker: str | None) -> bool:
     from packaging.markers import Marker
 
-    return marker is None or Marker(marker).evaluate(IMAGE_ENVIRONMENT)
+    if marker is None:
+        return True
+    parsed = Marker(marker)
+    return any(parsed.evaluate(environment) for environment in IMAGE_ENVIRONMENTS)
+
+
+def _requested(items) -> list[tuple[str, frozenset[str]]]:
+    """(canonical name, selected extras) for requirement strings.
+
+    Parsed rather than sliced apart, and canonicalised on both sides of every
+    comparison: `WebSockets>=1` and `web_sockets` are the same project to an
+    installer, so a gate that reads names literally is a gate with a spelling
+    to get past.
+    """
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    return [
+        (
+            canonicalize_name(Requirement(item).name),
+            frozenset(canonicalize_name(e) for e in Requirement(item).extras),
+        )
+        for item in items
+    ]
 
 
 def test_the_api_extra_installs_no_websocket_library():
@@ -1064,39 +1097,48 @@ def test_the_api_extra_installs_no_websocket_library():
     """
     import tomllib
 
+    from packaging.utils import canonicalize_name
+
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     api = pyproject["project"]["optional-dependencies"]["api"]
+    declared = _requested(api)
 
-    assert any(item.startswith("uvicorn") for item in api), api
-    assert not any("[standard]" in item for item in api), api
-    for banned in ("websockets", "wsproto"):
-        assert not any(item.startswith(banned) for item in api), api
+    assert any(name == "uvicorn" for name, _ in declared), api
+    assert not any(name in WEBSOCKET_LIBRARIES for name, _ in declared), api
 
     # And the RESOLVED closure, which is what the image installs
-    # (`uv sync --locked --extra api`). A declaration check alone stays green
-    # if a permitted release of something else starts requiring one of these.
+    # (`uv sync --locked --no-dev --extra api`). A declaration check alone stays
+    # green if a permitted release of something else starts requiring one.
     #
     # The closure, not the whole lock: that file is the union over every extra
     # and group, so `pypinyin` is in it for the build extra alone. Failing on a
     # development tool that happens to want a WebSocket library would be a gate
     # that cries wolf, and those get deleted.
-    # Seeded from the mandatory dependencies AS WELL AS the extra: `--extra`
-    # adds to the ordinary set rather than replacing it, so the image really
-    # installs both, and a core dependency that one day wants a WebSocket
-    # library would be just as installed as an API one.
+    #
+    # Seeded from the mandatory dependencies AS WELL AS the extra, because
+    # `--extra` adds to the ordinary set rather than replacing it; and walking
+    # the extras a requirement selects, because those edges live under the
+    # package's optional dependencies and are just as installed.
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-    locked = {package["name"]: package for package in lock["package"]}
+    locked = {
+        canonicalize_name(package["name"]): package for package in lock["package"]
+    }
     closure: set[str] = set()
-    pending = [
-        item.split(">")[0].split("<")[0].split("=")[0].split("[")[0].strip()
-        for item in list(pyproject["project"]["dependencies"]) + list(api)
-    ]
+    visited: set[tuple[str, frozenset[str]]] = set()
+    pending = _requested(list(pyproject["project"]["dependencies"]) + list(api))
     while pending:
-        name = pending.pop()
-        if name in closure or name not in locked:
+        name, extras = pending.pop()
+        if (name, extras) in visited:
             continue
+        visited.add((name, extras))
         closure.add(name)
-        for dependency in locked[name].get("dependencies", []):
+        package = locked.get(name)
+        if package is None:
+            continue
+        edges = list(package.get("dependencies", []))
+        for extra in extras:
+            edges.extend(package.get("optional-dependencies", {}).get(extra, []))
+        for dependency in edges:
             # Markers are evaluated for the IMAGE, not for whatever is running
             # this test. `click` wants `colorama` on Windows only; including it
             # here would mean a Windows-only package that one day pulls a
@@ -1104,7 +1146,14 @@ def test_the_api_extra_installs_no_websocket_library():
             # never install it.
             if not _applies_to_the_image(dependency.get("marker")):
                 continue
-            pending.append(dependency["name"])
+            pending.append(
+                (
+                    canonicalize_name(dependency["name"]),
+                    frozenset(
+                        canonicalize_name(e) for e in dependency.get("extra", [])
+                    ),
+                )
+            )
 
     assert "uvicorn" in closure, sorted(closure)
-    assert not closure & {"websockets", "wsproto"}, sorted(closure)
+    assert not closure & WEBSOCKET_LIBRARIES, sorted(closure)
