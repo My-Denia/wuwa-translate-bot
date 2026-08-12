@@ -77,6 +77,24 @@ class MainWindow(QMainWindow):
     def _refresh_endpoint_label(self) -> None:
         self.endpoint_label.setText(endpoint_status_text(self.config.base_url))
 
+    def _discard_previous_endpoint_state(self) -> None:
+        """Nothing on screen may outlive the address it came from.
+
+        Changing the server address does not stop a request already on its
+        way to the old one, and a reply carries no marking that would let a
+        view know it is stale. Without this, an answer from the PREVIOUS
+        service renders under the new address in the header - the most
+        misleading thing this window can display, and the same class of
+        defect as the silent fallback this whole change exists to remove.
+
+        Each view cancels its own in-flight task through the mechanism it
+        already had, and clears the state that belonged to that endpoint.
+        Nothing here coordinates the cancellations or waits for them: they
+        are fire-and-forget, exactly as the Cancel button's are.
+        """
+        for view in (self.translate_view, self.terms_view, self.status_view):
+            view.reset_for_endpoint_change()
+
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(strings.MENU_FILE)
         settings_action = QAction(strings.SETTINGS_MENU_LABEL, self)
@@ -110,6 +128,7 @@ class MainWindow(QMainWindow):
         would leave settings that do not describe the running client, so the
         refusal keeps the previous address in effect and says why.
         """
+        previous_base_url = self.config.base_url
         try:
             self.api_client.update_base_url(new_config.base_url)
         except ClientError as exc:
@@ -126,6 +145,8 @@ class MainWindow(QMainWindow):
             self.config.request_timeout_seconds,
             self.config.translate_timeout_seconds,
         )
+        if new_config.base_url != previous_base_url:
+            self._discard_previous_endpoint_state()
         # ...and the address on screen, which is the whole point of showing
         # it: a client that has just been configured must stop saying it is
         # not.

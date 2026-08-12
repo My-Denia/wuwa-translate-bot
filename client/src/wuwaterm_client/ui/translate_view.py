@@ -111,8 +111,29 @@ class TranslateView(QWidget):
         self._task = None
 
     def _on_cancel_clicked(self) -> None:
+        self._cancel_in_flight()
+
+    def _cancel_in_flight(self) -> None:
+        """The one place a running translation is stopped. Shared with the
+        endpoint-change reset below, so both go through the same path."""
         if self._task is not None:
             self._task.cancel()
+
+    def reset_for_endpoint_change(self) -> None:
+        """Drop everything that belonged to the previous server address.
+
+        A reply from the OLD endpoint can land after the address has changed,
+        and nothing on it says which server produced it - so it would render
+        in a window whose header now names a different one. The in-flight
+        request is cancelled through the same path the Cancel button uses,
+        and the displayed result goes with it: a translation is an answer
+        from a particular service, and keeping it on screen under a new
+        address would attribute it to a service that never gave it.
+        """
+        self._cancel_in_flight()
+        self.result_edit.setPlainText("")
+        self.status_label.setText("")
+        self._set_idle()
 
     async def _run_translate(self, text: str, to: str | None) -> None:
         try:

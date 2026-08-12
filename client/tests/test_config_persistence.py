@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -163,8 +164,6 @@ def test_on_this_machine_the_configuration_is_not_in_a_temporary_directory() -> 
     The test above proves the derivation; this one proves the value that
     derivation actually produces here is not a disposable location.
     """
-    import tempfile
-
     appdata = os.environ.get("APPDATA")
     assert appdata, "APPDATA is unset, so the client has no roaming profile to use"
 
@@ -197,6 +196,95 @@ def test_a_save_that_fails_partway_leaves_the_previous_file_intact(
     assert config_path(tmp_path).read_text(encoding="utf-8") == before
     assert ClientConfig.load(tmp_path).base_url == "https://api.example.invalid"
     # And no half-written temporary file accumulating in the owner's profile.
+    assert sorted(item.name for item in tmp_path.iterdir()) == [CONFIG_FILE_NAME]
+
+
+def test_a_configuration_file_that_cannot_be_read_is_unconfigured_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Never raises" has to survive a file system that says no.
+
+    A denying ACL, an unreadable parent directory or an I/O error are not
+    "the file is missing", and they are exactly what an external cleanup
+    tool or a half-repaired profile can leave behind. The contract is the
+    same for all of them: this launch has no usable configuration, and the
+    application still starts so the owner can set one.
+    """
+    config_path(tmp_path).write_text(
+        json.dumps({"base_url": "https://api.example.invalid"}), encoding="utf-8"
+    )
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("access is denied")
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+
+    config = ClientConfig.load(tmp_path)
+
+    assert config.base_url is None
+    assert config.is_configured is False
+
+
+def test_load_does_not_consult_stat_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact defect: an existence check outside the guarded read.
+
+    `path.exists()` is a second trip to the file system, and it raises for
+    reasons that are not about existence at all - so a failing `stat` used
+    to escape `load` and abort start-up, in a function whose contract is
+    that it never raises. Making `exists` explode proves it is no longer on
+    the path: a real configuration still loads with it booby-trapped.
+    """
+
+    def explode(*args, **kwargs):
+        raise PermissionError("stat is denied")
+
+    ClientConfig(base_url="https://api.example.invalid").save(base_dir=tmp_path)
+    monkeypatch.setattr(Path, "exists", explode)
+
+    assert ClientConfig.load(tmp_path).base_url == "https://api.example.invalid"
+    # ...and a genuinely absent file is still the unconfigured state, decided
+    # by the read rather than by a pre-check.
+    assert ClientConfig.load(tmp_path / "elsewhere").base_url is None
+
+
+def test_a_failure_before_the_temporary_file_is_owned_closes_its_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mkstemp` hands back a raw descriptor; `fdopen` is what adopts it.
+
+    If `fdopen` fails, nothing owns that descriptor - and the cleanup path
+    would then unlink a file this process still holds open, which on Windows
+    fails and leaks the handle AND leaves the temporary file behind, one per
+    failed save, in the owner's roaming profile.
+    """
+    ClientConfig(base_url="https://api.example.invalid").save(base_dir=tmp_path)
+    before = config_path(tmp_path).read_text(encoding="utf-8")
+
+    descriptors: list[int] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor, name
+
+    def refuse_to_adopt(*args, **kwargs):
+        raise OSError("too many open files")
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(os, "fdopen", refuse_to_adopt)
+
+    with pytest.raises(OSError):
+        ClientConfig(base_url="https://other.example.invalid").save(base_dir=tmp_path)
+
+    assert descriptors, "the test never observed the descriptor it is about"
+    # Closed, so the number is no longer a valid descriptor in this process.
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+    # ...and the failed save changed nothing and left nothing behind.
+    assert config_path(tmp_path).read_text(encoding="utf-8") == before
     assert sorted(item.name for item in tmp_path.iterdir()) == [CONFIG_FILE_NAME]
 
 

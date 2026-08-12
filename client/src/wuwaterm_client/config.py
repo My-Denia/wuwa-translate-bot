@@ -208,10 +208,18 @@ class ClientConfig:
         which the client can pick for itself. The address does not: anything
         missing, unreadable, malformed or unusable leaves ``base_url`` as
         ``None`` and the client unconfigured.
+
+        The read is ATTEMPTED rather than preceded by an existence check. A
+        `path.exists()` in front of it was a second way to touch the file
+        system, outside this try, and `stat` fails for reasons of its own -
+        a denying ACL, an unreadable parent, an I/O error - none of which are
+        "the file is not there". The exception escaped, and a client whose
+        contract is "never raises, fall back to unconfigured" instead failed
+        to start at all. Asking for the bytes answers both questions at once:
+        `FileNotFoundError` and `PermissionError` are both `OSError`, and
+        both mean this launch has no usable configuration.
         """
         path = config_path(base_dir)
-        if not path.exists():
-            return cls()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -257,7 +265,18 @@ class ClientConfig:
             prefix=f".{CONFIG_FILE_NAME}.", dir=path.parent
         )
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            # `mkstemp` returns a RAW descriptor, and `fdopen` is what takes
+            # ownership of it - so a failure IN `fdopen` leaves the descriptor
+            # open and owned by nobody. The cleanup below would then unlink a
+            # file this process still holds a handle to, which on Windows
+            # fails and leaks both. Ownership is transferred or the descriptor
+            # is closed here; there is no third outcome.
+            try:
+                handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with handle:
                 handle.write(json.dumps(payload, indent=2, sort_keys=True))
                 handle.flush()
                 os.fsync(handle.fileno())

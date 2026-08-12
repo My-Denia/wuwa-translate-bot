@@ -75,6 +75,19 @@ class TermsView(QWidget):
             return
         self._task = asyncio.ensure_future(self._run_search(query))
 
+    def reset_for_endpoint_change(self) -> None:
+        """Drop matches that came from the previous server address.
+
+        The dictionary a term was looked up in belongs to a particular
+        service; leaving the table populated after the address changes shows
+        one server's answers under another's name.
+        """
+        if self._task is not None:
+            self._task.cancel()
+        self.table.setRowCount(0)
+        self.status_label.setText("")
+        self.search_button.setEnabled(True)
+
     async def _run_search(self, query: str) -> None:
         self.search_button.setEnabled(False)
         self.status_label.setText(strings.STATUS_BAR_SEARCHING)
