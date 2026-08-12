@@ -1,30 +1,31 @@
+简体中文 | [English](README.en.md)
+
 # WuWa Term Bot
 
-Self-hosted Telegram bot for Wuthering Waves official localization: Chinese
-terms to exact official English and the reverse, with term-locked sentence
-translation in both directions.
+自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。系统由一个 protocol-neutral 应用层同时服务两个 presentation adapter——Telegram bot 与版本化的 HTTP API——另有一个消费该 API 的 Windows 桌面客户端。
 
-The bot is dictionary-first. An exact database hit returns the official string
-from the local SQLite database byte-for-byte and does not call the LLM.
-Direction is auto-detected by script: Chinese source text translates to English
-by default, and English/Latin source text translates to Chinese. Free text in
-either language goes through an OpenAI-compatible endpoint only after known DB
-terms are locked, so official terms are restored verbatim in the target
-language rather than paraphrased.
+服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
 
-## Quick Start
+## 架构概述
 
-WSL/Linux is the primary development environment. Keep the checkout on the WSL
-filesystem, for example under `~/projects/...`, so file watching, permissions,
-line endings, and virtualenv scripts behave like Linux.
+- **应用层**：`src/wuwaterm/application.py` 唯一一次持有 dictionary-first 翻译流水线。它是 protocol-neutral 的——不导入任何表示层模块，也不导入聊天 SDK（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
+- **两个 presentation adapter**：Telegram bot（`src/wuwaterm/bot.py`、`channel.py`）负责命令、会话授权、聊天措辞与富文本标记；版本化的 HTTP API（`src/wuwaterm_api/`）负责版本化路由、设备认证、统一错误信封与纯文本响应。两个对外入口均由这同一条流水线提供服务（[架构文档](docs/architecture.md)）。
+- **device-principal 设备主体认证**：所有 `/v1` 路由都要求设备凭据。凭据可单独吊销，不涉及 Telegram bot 自身的访问控制；凭据存储中只保存加盐 scrypt 校验值（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
+- **Windows 桌面客户端**：`client/` 下的客户端有意不作为 adapter，而是 API 已发布契约的消费方，自身不含任何翻译逻辑。它经由 HTTPS 访问服务（[ADR 0011](docs/adr/0011-pc-client-stack.md)、[ADR 0012](docs/adr/0012-client-transport-selection.md)）。
+- **已发布契约**：API 契约快照提交在 [`docs/api/openapi.json`](docs/api/openapi.json)，由 `scripts/check_api_contract.py` 做漂移门禁。
+
+0.3.0 的发布说明将这一步描述为「API-first release: the Telegram-only bot becomes a multi-adapter system」（[更新日志](CHANGELOG.md)）。以上各点的决策依据见 [ADR 索引](docs/adr/README.md)；模块、请求流与信任边界的维护者地图见 [架构文档](docs/architecture.md)。
+
+## 快速开始
+
+以下命令假定运行在 POSIX shell 中。若在 WSL 下工作，请把工作副本放在 WSL 文件系统上（例如 `~/projects/...`），以便文件监视、权限、换行符与虚拟环境脚本的行为与 Linux 一致。
 
 ```bash
 test -x .venv/bin/python || uv venv .venv
 uv sync --locked --extra dev
 ```
 
-If the WSL image has `python3-venv` and pip installed, the standard-library
-path also works:
+如果 WSL 镜像中已安装 `python3-venv` 与 pip，标准库路径同样可用：
 
 ```bash
 python3 -m venv .venv
@@ -32,12 +33,11 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-Use `uv venv --clear .venv` only when intentionally rebuilding the local
-virtualenv from scratch.
+仅在确实要从零重建本地虚拟环境时才使用 `uv venv --clear .venv`。
 
-## Common Commands
+## 常用命令
 
-Build the local dictionary:
+构建本地词典：
 
 ```bash
 .venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
@@ -45,14 +45,14 @@ Build the local dictionary:
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
 ```
 
-Look up terms and translate a sentence:
+查询术语并翻译整句：
 
 ```bash
 .venv/bin/python -m wuwaterm.cli lookup --db data/terms.db 声骸
 .venv/bin/python -m wuwaterm.cli sentence --db data/terms.db "今汐装备了声骸"
 ```
 
-Run the Telegram bot:
+运行 Telegram bot：
 
 ```bash
 export TELEGRAM_BOT_TOKEN="..."
@@ -60,28 +60,29 @@ export WUWATERM_DB_PATH="data/terms.db"
 .venv/bin/python -m wuwaterm.cli bot
 ```
 
-Telegram command examples:
+运行 HTTP API 适配器（需要 `api` extra，其中包含 FastAPI 与 uvicorn；默认绑定 loopback）：
+
+```bash
+export WUWATERM_DB_PATH="data/terms.db"
+.venv/bin/python -m wuwaterm_api.cli serve
+```
+
+Telegram 命令示例：
 
 - `/tr 声骸` -> `Echo`
 - `/tr Echo` -> `声骸`
-- `/tr --to en 今汐装备了声骸` and `/tr -to en 今汐装备了声骸`
-  force English output
-- `/tr --to zh Jinhsi equipped an Echo` and
-  `/tr -to zh Jinhsi equipped an Echo` force Chinese output
-- `/sentence --to en 今汐装备了声骸` and `/sent --to en 今汐装备了声骸`
-  force English sentence translation
-- `/sentence --to zh Jinhsi equipped an Echo` and
-  `/sent --to zh Jinhsi equipped an Echo` force Chinese sentence translation
+- `/tr --to en 今汐装备了声骸` 与 `/tr -to en 今汐装备了声骸`
+  强制输出英文
+- `/tr --to zh Jinhsi equipped an Echo` 与
+  `/tr -to zh Jinhsi equipped an Echo` 强制输出中文
+- `/sentence --to en 今汐装备了声骸` 与 `/sent --to en 今汐装备了声骸`
+  强制整句译为英文
+- `/sentence --to zh Jinhsi equipped an Echo` 与
+  `/sent --to zh Jinhsi equipped an Echo` 强制整句译为中文
 
-The default remains auto-detected when no direction flag is supplied. To reply
-to a message, send `/tr --to en`, `/tr -to en`, `/sentence --to zh`, or
-`/sent --to zh`; the bot uses the replied-to text with the requested direction.
-For validation, invalid --to values return usage and do not call the LLM; exact
-dictionary hits do not call the LLM. For linked-channel posts, channel
-auto-translation remains auto-detected and does not accept command direction
-flags.
+未给出方向参数时，默认仍为自动判定。要对某条消息作出回复式翻译，发送 `/tr --to en`、`/tr -to en`、`/sentence --to zh` 或 `/sent --to zh`，bot 会按指定方向翻译被回复的文本。就校验而言：非法的 --to 取值只返回用法说明，不调用 LLM；词典精确命中同样不调用 LLM。对于关联频道的贴文，频道自动翻译始终为自动判定方向，不接受命令方向参数。
 
-Run the standard validation set:
+运行标准校验集：
 
 ```bash
 .venv/bin/python scripts/check_repo_hygiene.py
@@ -90,58 +91,40 @@ Run the standard validation set:
 .venv/bin/python -m pytest
 ```
 
-## Data Source And License Boundary
+## 数据来源与许可边界
 
-Primary source:
+主数据源：
 
 - `https://github.com/Arikatsu/WutheringWaves_Data`
-- pinned commit: `dae29691c04ef0f48d0810b5d244fb0b37288c60`
-- pinned version: `GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
+- 钉住提交：`dae29691c04ef0f48d0810b5d244fb0b37288c60`
+- 钉住版本：`GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
 
-Fallback mirror to try manually if the primary source is unavailable:
+主数据源不可用时可手动尝试的备用镜像：
 
-- `https://github.com/Dimbreath/WutheringData` is frozen at 3.1.0
-  (`e9234ffe094b2d944d16b222d31102e8ab32d954`, 2026-03-13) and is kept only
-  as a legacy fallback.
+- `https://github.com/Dimbreath/WutheringData`，仅作为 legacy fallback profile
+  保留，在 `src/wuwaterm/constants.py` 中钉住于
+  `e9234ffe094b2d944d16b222d31102e8ab32d954`。
 
-The active Arikatsu source profile uses sparse checkout for only `README.md`,
-`BinData`, and `Textmaps`. The root README is a required version-provenance
-file. Bulk TextMap data and generated databases are local artifacts and
-are ignored by Git. This project does not redistribute Wuthering Waves game
-data; only a small derived term dictionary is built locally from the public
-source above. All Wuthering Waves game data and in-game terminology are
-© Kuro Games.
+当前启用的 Arikatsu 源 profile 只对 `README.md`、`BinData` 与 `Textmaps` 做稀疏检出。其中根目录的 README 是必需的版本溯源文件。大体量 TextMap 数据与生成的数据库都是本地产物，已被 Git 忽略。本项目不对《鸣潮》游戏数据做任何再分发，只在本地从上述公开源构建一份小规模的派生术语词典。所有《鸣潮》游戏数据与游戏内术语版权归 © Kuro Games 所有。
 
-See [Data Refresh](docs/data-refresh.md) for refresh, build, and verification
-details.
+刷新、构建与校验的细节见[数据刷新](docs/data-refresh.md)。
 
-## Guides
+## 指南
 
-- [Architecture](docs/architecture.md): maintainer map of modules, request
-  flows, trust boundaries, single-instance topology, and ADRs.
-- [Changelog](CHANGELOG.md): notable source changes by release.
-- [Deployment](docs/deployment.md): Docker Compose service on the VPS, `.env`
-  handling, data refresh commands, and smoke checks.
-- [Data Refresh](docs/data-refresh.md): source profiles, local setup, DB build,
-  lookup commands, and data licensing boundaries.
-- [Telegram Behavior](docs/telegram-behavior.md): commands, group authorization,
-  public mode, linked-channel auto-translation, and Telegram-specific limits.
-- [Privacy And LLM](docs/privacy-and-llm.md): dictionary-first privacy boundary,
-  LLM configuration, prompt-injection guard, placeholder integrity, fail-closed
-  settings, and secret handling.
-- [Validation](docs/validation.md): offline validation commands, live smoke
-  caveats, and Windows reference commands.
-- [Release Checklist](docs/release-checklist.md): release metadata, validation,
-  privacy notes, distribution boundaries, and release note template.
+- [架构](docs/architecture.md)：模块、请求流、信任边界、单实例拓扑与 ADR 的维护者地图。
+- [更新日志](CHANGELOG.md)：按发布版本记录的源码变更。
+- [部署](docs/deployment.md)：VPS 上的 Docker Compose 服务、`.env` 处理、数据刷新命令与冒烟检查。
+- [数据刷新](docs/data-refresh.md)：源 profile、本地准备、数据库构建、查询命令与数据许可边界。
+- [Telegram 行为](docs/telegram-behavior.md)：命令、群组授权、公开模式、关联频道自动翻译与 Telegram 侧限制。
+- [HTTP API 契约](docs/api/openapi.json)：版本化 `/v1` 路由已提交的契约快照。
+- [桌面客户端](client/README.md)：HTTP API 的 Windows 客户端，含技术栈、设置、凭据处理与构建方式。
+- [隐私与 LLM](docs/privacy-and-llm.md)：dictionary-first 隐私边界、LLM 配置、提示注入防护、占位符完整性、fail-closed 设置与密钥处理。
+- [校验](docs/validation.md)：离线校验命令、线上冒烟的注意事项与 Windows 参考命令。
+- [发布检查单](docs/release-checklist.md)：发布元数据、校验、隐私说明、分发边界与发布说明模板。
 
-## Deployment Entry
+## 部署入口
 
-The VPS target uses Docker Compose because the current system Python there is
-older than the project target. `/opt/wuwaterm/current` must be a clean Git
-checkout whose `HEAD` can be verified against freshly fetched `origin/main`;
-an exported source copy without `.git` is deliberately rejected. Create
-`/opt/wuwaterm/current/.env` from `deploy/env.example`, set it to mode `600`,
-and run Compose through `deploy/docker-compose.yml`.
+VPS 目标环境使用 Docker Compose，因为该机器上现有的系统 Python 版本低于本项目要求。`/opt/wuwaterm/current` 必须是干净的 Git 工作副本，其 `HEAD` 可与刚拉取的 `origin/main` 校验一致；不带 `.git` 的导出式源码副本会被有意拒绝。请依据 `deploy/env.example` 创建 `/opt/wuwaterm/current/.env`，权限设为 `600`，并通过 `deploy/docker-compose.yml` 运行 Compose。
 
 ```bash
 cd /opt/wuwaterm/current
@@ -149,28 +132,15 @@ docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-da
 WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
 ```
 
-The updater builds and strongly verifies a separate candidate database and an
-immutable source-revision image before it stops the old service. It then
-promotes, starts, smokes, writes an immutable manifest, and atomically publishes
-`.deploy_commit`; any post-promotion failure restores the previous database,
-image, and pointer. The production service uses the `runtime` Docker target and
-only runs the Telegram bot. Data refresh/build/verify use the `builder` target
-through the `wuwaterm-builder` service. The runtime service mounts `data/`
-read-only and uses `state/` for writable `chat_settings.json` and
-`channel_replies.json`.
-When upgrading an older deployment, use `deploy/vps-update.sh` or the
-state-only migration in [Deployment](docs/deployment.md). Both stop the old
-runtime before the validated, atomic one-time migration. Do not manually copy
-state files while the old bot is running. Remove or update old `.env`
-overrides that point those files at `data/`.
-Runtime secrets are injected only into the runtime service through Compose
-`env_file`; the builder has no `env_file`, and `.env` is ignored and excluded
-from the image build context. Full deployment notes are in
-[Deployment](docs/deployment.md).
+更新脚本会先构建并强校验一份独立的候选数据库与一个不可变的源码修订镜像，然后才停止旧服务；随后执行提升、启动、冒烟、写入不可变清单，并原子地发布 `.deploy_commit`。提升之后的任何失败都会回滚数据库、镜像与指针。`deploy/vps-update.sh` 会对两个服务容器一并停止、重启、冒烟与回读，回滚同样覆盖两者。
 
-## Validation Entry
+两个服务容器都出自 `runtime` Docker target 与同一镜像，区别只在入口命令：`bot` 运行 Telegram bot（`wuwaterm-bot`），`api` 运行 HTTP API（`wuwaterm-api`）。runtime 镜像还接受仅供运维使用的 `device` 命令，以一次性容器方式管理凭据，除此之外的命令一律拒绝。数据刷新、构建与校验则通过 `wuwaterm-builder` 服务使用 `builder` target。两个服务容器都以只读方式挂载 `data/`。bot 使用可写的 `state/` 存放 `chat_settings.json` 与 `channel_replies.json`；API 使用与之并列的 `state-api/` 存放自己的设备凭据存储，因此 bot 的读写挂载永远不会覆盖到它。
+升级较早的部署时，请使用 `deploy/vps-update.sh`，或[部署](docs/deployment.md)文档中的仅状态迁移路径。两者都会在经过校验的一次性原子迁移之前停止旧运行时。切勿在旧 bot 仍在运行时手工复制状态文件。请删除或更新那些仍把这些文件指向 `data/` 的旧 `.env` 覆盖项。
+运行时密钥只通过 Compose 的 `env_file` 注入到服务容器；builder 没有 `env_file`，且 `.env` 被忽略并排除在镜像构建上下文之外。完整部署说明见[部署](docs/deployment.md)。
 
-For a full local validation pass, run:
+## 校验入口
+
+完整的本地校验流程：
 
 ```bash
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
@@ -183,18 +153,14 @@ For a full local validation pass, run:
 .venv/bin/python -m pytest
 ```
 
-`scripts/deploy_smoke.py` is a deployment reachability check, not a polling
-handler E2E test. See [Validation](docs/validation.md) for the exact validation
-scope and live Telegram smoke caveats.
+上面的 `goal-runs/` 路径是本地工作产物，已被 Git 忽略；这些文件由运行校验的机器上的脚本创建或读取。
 
-## Maintenance
+`scripts/deploy_smoke.py` 是部署可达性检查，不是长轮询处理链路的端到端测试。确切的校验范围与线上 Telegram 冒烟的注意事项见[校验](docs/validation.md)。
 
-This is a personal hobby project, maintained on a best-effort basis. There is no
-guarantee of responses to issues or pull requests.
+## 维护
 
-## License
+这是个人业余项目，按尽力而为的方式维护。不保证会回应 issue 或 pull request。
 
-Released under the [MIT License](LICENSE), © 2026 My-Denia. The MIT license
-covers this project's source code only, not the upstream Wuthering Waves game
-data or in-game terminology, which are © Kuro Games. See
-[Data Source And License Boundary](#data-source-and-license-boundary).
+## 许可
+
+本项目以 [MIT 许可证](LICENSE)发布，© 2026 My-Denia。该 MIT 许可仅覆盖本项目的源代码，不覆盖上游《鸣潮》游戏数据或游戏内术语——后者版权归 © Kuro Games 所有。参见[数据来源与许可边界](#数据来源与许可边界)。
