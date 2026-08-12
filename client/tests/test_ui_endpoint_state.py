@@ -9,11 +9,14 @@ Real Qt under the offscreen platform (conftest.py), like the other UI tests
 here; the state logic itself is a plain function so it can be checked without
 driving a widget.
 
-Named `test_ui_*` for the same reason the other Qt files are: the suite runs
-in file order, `tests/test_packaging_entry.py` builds its OWN QApplication to
-rehearse a packaged start-up, and libshiboken refuses a second one while a
-session-scoped instance is alive. Every file that keeps a QApplication has to
-sort after it.
+The name is `test_ui_*` to match the other Qt files, and that is now the only
+reason for it. It began as a workaround: `tests/test_packaging_entry.py` built
+its own QApplication in-process, libshiboken refuses a second one while a
+session-scoped instance is alive, and this file - first called
+`test_main_window_endpoint_state.py` - sorted earlier and broke it on sight.
+That constraint is history: the packaging probe runs in a child interpreter
+now, and `test_the_suite_does_not_depend_on_this_file_running_first` keeps it
+that way. A new Qt test file here can be called anything.
 """
 
 from __future__ import annotations
