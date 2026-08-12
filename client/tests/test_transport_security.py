@@ -23,7 +23,11 @@ import pytest
 from wuwaterm_client import strings
 from wuwaterm_client.api import ApiClient
 from wuwaterm_client.config import ClientConfig, endpoint_is_confidential, usable_base_url
-from wuwaterm_client.errors import ERROR_INSECURE_ENDPOINT, ClientError
+from wuwaterm_client.errors import (
+    ERROR_INSECURE_ENDPOINT,
+    ERROR_NOT_CONFIGURED,
+    ClientError,
+)
 
 LOOPBACK = "http://127.0.0.1:8787"
 
@@ -181,16 +185,28 @@ def test_a_refused_address_leaves_the_running_client_where_it_was() -> None:
 
 def test_a_stored_configuration_can_never_carry_a_refused_address(tmp_path) -> None:
     """End to end for the path a real launch takes: whatever is on disk,
-    ClientConfig.load falls back rather than handing the transport an
-    address it will refuse."""
+    ClientConfig.load never hands the transport an address it will refuse.
+
+    What it hands over instead is nothing at all. The loader used to
+    substitute a machine-local development address here, which the transport
+    accepted - so a hand-edited or corrupted file produced a client that was
+    confidently pointed at the wrong place. The refused address now leaves
+    the client unconfigured, and an unconfigured client sends nothing.
+    """
     (tmp_path / "config.json").write_text(
         '{"base_url": "http://198.51.100.7:8787"}', encoding="utf-8"
     )
     config = ClientConfig.load(tmp_path)
 
-    assert config.base_url == ClientConfig().base_url
+    assert config.base_url is None
     client = ApiClient.from_config(config)
-    _close(client)
+    try:
+        assert client.is_configured is False
+        with pytest.raises(ClientError) as raised:
+            asyncio.run(client.get_meta())
+        assert raised.value.code == ERROR_NOT_CONFIGURED
+    finally:
+        _close(client)
 
 
 def test_certificate_verification_is_on_for_the_client_it_actually_builds() -> None:

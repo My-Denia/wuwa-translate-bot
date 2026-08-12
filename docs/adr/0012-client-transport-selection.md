@@ -170,8 +170,12 @@ dialog once, and it is stored in `config.json` (a non-secret file) next to the
 timeouts. The client validates it on entry, on load from disk, and again in
 the transport, with one predicate: a usable base address is `https` to any
 host, or plain `http` only to this machine's own loopback; it may not carry
-user information, a query or a fragment. An address that fails falls back to
-the default rather than reaching the network.
+user information, a query or a fragment. An address that fails never reaches
+the network: since 2026-08-12 there is no default to fall back to, and a
+client with no usable address is explicitly unconfigured — it says so in the
+main window and refuses every request with the code `not_configured` rather
+than substituting a development address for the missing setting (see
+[ADR 0011](0011-pc-client-stack.md)).
 
 Because the base address is pure client configuration and nothing in the
 contract encodes the network path, moving the service to a different endpoint

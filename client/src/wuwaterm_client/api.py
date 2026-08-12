@@ -20,6 +20,7 @@ from .credentials import CredentialStoreUnavailable, read_token
 from .errors import (
     ERROR_CANCELLED,
     ERROR_INSECURE_ENDPOINT,
+    ERROR_NOT_CONFIGURED,
     ERROR_OFFLINE,
     ERROR_TIMEOUT,
     ERROR_UNAUTHORIZED,
@@ -207,13 +208,19 @@ def _require_verifying_transport(transport: "httpx.AsyncBaseTransport | None") -
         raise ClientError(ERROR_INSECURE_ENDPOINT)
 
 
-def _normalized(base_url: object) -> str:
+def _normalized(base_url: str | None) -> str | None:
     """The exact string that is validated is the string that is used.
 
     `usable_base_url` strips before parsing, so a value with surrounding
     whitespace is approved in its stripped form; handing httpx the raw one
     would mean the approved address and the configured address are not the
     same address.
+
+    `None` - an unconfigured client - passes straight through, and so does
+    anything that is not a string at all: annotations are not runtime
+    validation, and returning such a value unchanged is what lets the checks
+    below refuse it as an unusable ADDRESS rather than mistaking it for an
+    absent one.
     """
     return base_url.strip() if isinstance(base_url, str) else base_url
 
@@ -241,11 +248,28 @@ def _require_confidential_endpoint(base_url: str) -> None:
 
 
 class ApiClient:
-    """Bearer-authenticated async client for the wuwaterm HTTP API."""
+    """Bearer-authenticated async client for the wuwaterm HTTP API.
+
+    ``base_url=None`` builds the client in an explicitly UNCONFIGURED state.
+    It is a real state of this application, not a degenerate one: the owner's
+    ``config.json`` disappeared across a reboot once, and every launch after
+    that has to produce a window the owner can open Settings from. So the
+    object is constructible, and every request path refuses with
+    ``ERROR_NOT_CONFIGURED`` - a code of its own, whose message names
+    Settings - instead of the client silently talking to a development
+    address that had been standing in for "no setting".
+
+    Nothing is relaxed to make that state constructible. An address that IS
+    supplied goes through exactly the same `usable_base_url` check as before,
+    the underlying httpx client is given no origin at all until one is
+    configured, and `_request` refuses before it builds anything - so even if
+    that refusal were removed, `_guard_request_target` would still refuse the
+    empty origin below it.
+    """
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str | None,
         *,
         token_provider: TokenProvider = default_token_provider,
         timeout: float = 10.0,
@@ -253,13 +277,19 @@ class ApiClient:
         _test_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         base_url = _normalized(base_url)
-        _require_confidential_endpoint(base_url)
+        if base_url is not None:
+            _require_confidential_endpoint(base_url)
         _require_verifying_transport(_test_transport)
+        self._configured = base_url is not None
         self._token_provider = token_provider
         self._timeout = timeout
         self._translate_timeout = translate_timeout if translate_timeout is not None else timeout
         self._client = httpx.AsyncClient(
-            base_url=base_url,
+            # No origin while unconfigured. Every request path refuses first,
+            # and this is the second refusal underneath it: an empty origin
+            # cannot pass `_guard_request_target`, so there is no arrangement
+            # of this object that sends the device token anywhere.
+            base_url=base_url if base_url is not None else "",
             timeout=timeout,
             transport=_test_transport,
             # Server certificates are always verified. This is httpx's own
@@ -279,21 +309,36 @@ class ApiClient:
             trust_env=False,
         )
 
+    @property
+    def is_configured(self) -> bool:
+        """Whether this client has a server address it may send requests to."""
+        return self._configured
+
     @classmethod
     def from_config(cls, config: ClientConfig) -> "ApiClient":
+        """Build a client for a stored configuration.
+
+        An unconfigured configuration produces an unconfigured client, and
+        that client refuses every request with ``ERROR_NOT_CONFIGURED``
+        rather than sending one. It does NOT quietly acquire an address of
+        its own: `ClientConfig.load` no longer has one to give it.
+        """
         return cls(
             config.base_url,
             timeout=config.request_timeout_seconds,
             translate_timeout=config.translate_timeout_seconds,
         )
 
-    def update_base_url(self, base_url: str) -> None:
+    def update_base_url(self, base_url: str | None) -> None:
         """Point the live client at a new address, or refuse and keep the old.
 
         Raises ClientError(ERROR_INSECURE_ENDPOINT) rather than switching to
-        an address that is not protected in transit. The previous address
-        stays in effect, so a refusal leaves a working client rather than a
-        half-configured one.
+        an address that is not protected in transit, and
+        ClientError(ERROR_NOT_CONFIGURED) for no address at all. The previous
+        address stays in effect either way, so a refusal leaves a working
+        client rather than a half-configured one - and this is also how an
+        unconfigured client becomes a configured one when the owner sets an
+        address in Settings.
 
         The address is normalised the same way it was validated. They used to
         differ: the check strips before parsing, so `" https://host "` passed,
@@ -302,8 +347,11 @@ class ApiClient:
         was not the one approved.
         """
         base_url = _normalized(base_url)
+        if base_url is None:
+            raise ClientError(ERROR_NOT_CONFIGURED)
         _require_confidential_endpoint(base_url)
         self._client.base_url = httpx.URL(base_url)
+        self._configured = True
 
     def update_timeouts(self, timeout: float, translate_timeout: float) -> None:
         """Apply edited timeouts to the live client.
@@ -387,6 +435,12 @@ class ApiClient:
         timeout: float | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
+        # Before the target is resolved, before a header is attached, before
+        # anything reaches the network: a client with no configured address
+        # has nowhere legitimate to send this, and saying so is the whole
+        # point of the unconfigured state.
+        if not self._configured:
+            raise ClientError(ERROR_NOT_CONFIGURED)
         self._guard_request_target(url)
         try:
             response = await self._client.request(

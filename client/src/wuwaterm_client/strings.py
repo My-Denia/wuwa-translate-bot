@@ -22,6 +22,18 @@ STATUS_BAR_READY = "Ready"
 STATUS_BAR_TRANSLATING = "Translating..."
 STATUS_BAR_SEARCHING = "Searching..."
 
+# -- Connection state (main window) ----------------------------------------
+# Shown at all times, above the tabs: which server this client talks to, or
+# that it has none. The unconfigured line names where to fix it, because the
+# state it describes is reached without the owner doing anything - a missing
+# or unreadable config.json puts the client here on the next launch.
+
+ENDPOINT_CONFIGURED = "Server address: {base_url}"
+ENDPOINT_NOT_CONFIGURED = (
+    "Server address: not configured. Set one in File > Settings before "
+    "translating."
+)
+
 STATUS_UNKNOWN_VALUE = "Unknown"
 STATUS_YES = "Yes"
 STATUS_NO = "No"
@@ -154,5 +166,9 @@ ERROR_MSG_INSECURE_ENDPOINT = (
     "That server address would send the device token to another machine "
     "without transport protection, so no request was made. Use an https:// "
     "address, or http:// only for this machine."
+)
+ERROR_MSG_NOT_CONFIGURED = (
+    "No server address is configured, so no request was made. Set the "
+    "server address in Settings."
 )
 STATUS_CANCELLED = "Translation cancelled."

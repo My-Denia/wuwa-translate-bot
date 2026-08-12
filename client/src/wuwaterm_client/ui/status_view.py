@@ -65,6 +65,31 @@ class StatusView(QWidget):
         )
         self.credential_status_value.setText(credential_status)
 
+    def reset_for_endpoint_change(self) -> None:
+        """Forget the metadata the previous server address reported.
+
+        Version, data profile, data commit and term count identify a
+        SERVICE. Left on screen after the address changes they describe the
+        wrong one, and this is the tab an owner reads precisely to find out
+        which service they are talking to.
+
+        The credential-store rows are deliberately untouched: they describe
+        this machine, not the server, and are the same whichever address is
+        configured.
+        """
+        if self._task is not None:
+            self._task.cancel()
+        for value_label in (
+            self.service_version_value,
+            self.data_profile_value,
+            self.data_commit_value,
+            self.term_count_value,
+            self.model_configured_value,
+        ):
+            value_label.setText(strings.STATUS_UNKNOWN_VALUE)
+        self.status_label.setText("")
+        self.refresh_button.setEnabled(True)
+
     def _on_refresh_clicked(self) -> None:
         # The button is disabled inside the coroutine, which does not run
         # until the loop gets a turn. Two activations before that start two

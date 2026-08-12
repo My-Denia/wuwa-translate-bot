@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from wuwaterm_client.config import (
-    DEFAULT_BASE_URL,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_TRANSLATE_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
@@ -53,6 +52,8 @@ def test_config_round_trip(tmp_path: Path) -> None:
 def test_config_load_missing_file_returns_defaults(tmp_path: Path) -> None:
     loaded = ClientConfig.load(base_dir=tmp_path)
     assert loaded == ClientConfig()
+    # The timeouts are the client's own business; the address is not.
+    assert loaded.base_url is None
 
 
 def test_config_load_malformed_file_returns_defaults(tmp_path: Path) -> None:
@@ -61,6 +62,7 @@ def test_config_load_malformed_file_returns_defaults(tmp_path: Path) -> None:
     path.write_text("not json at all {{{", encoding="utf-8")
     loaded = ClientConfig.load(base_dir=tmp_path)
     assert loaded == ClientConfig()
+    assert loaded.base_url is None
 
 
 def test_config_load_ignores_unrecognized_keys(tmp_path: Path) -> None:
@@ -123,13 +125,13 @@ def test_a_non_finite_timeout_falls_back_to_the_default(tmp_path) -> None:
     assert config.translate_timeout_seconds == DEFAULT_TRANSLATE_TIMEOUT_SECONDS
 
 
-def test_a_base_url_of_the_wrong_type_falls_back_to_the_default(tmp_path) -> None:
+def test_a_base_url_of_the_wrong_type_leaves_the_client_unconfigured(tmp_path) -> None:
     """Annotations are not runtime validation: a list would reach httpx."""
     (tmp_path / "config.json").write_text(
         json.dumps({"base_url": ["http://127.0.0.1:8787"]}), encoding="utf-8"
     )
 
-    assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL
+    assert ClientConfig.load(tmp_path).base_url is None
 
 
 def test_an_address_that_cannot_be_used_is_recognized() -> None:
@@ -144,12 +146,12 @@ def test_an_address_that_cannot_be_used_is_recognized() -> None:
     assert not usable_base_url(None)
 
 
-def test_an_unusable_saved_address_falls_back_to_the_default(tmp_path) -> None:
+def test_an_unusable_saved_address_leaves_the_client_unconfigured(tmp_path) -> None:
     (tmp_path / "config.json").write_text(
         json.dumps({"base_url": "http://127.0.0.1:notaport"}), encoding="utf-8"
     )
 
-    assert ClientConfig.load(tmp_path).base_url == DEFAULT_BASE_URL
+    assert ClientConfig.load(tmp_path).base_url is None
 
 
 def test_plain_http_is_only_accepted_for_this_machine() -> None:

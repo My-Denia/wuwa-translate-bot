@@ -28,6 +28,17 @@ the address you give it, and the API contract does not encode the path in any
 way, so changing how the service is published changes nothing here except this
 one string.
 
+**There is no default address.** A fresh installation — and any launch where
+the settings file cannot be read — starts *unconfigured*: the main window
+shows `Server address: not configured` above the tabs, and every request is
+refused with "No server address is configured, so no request was made. Set the
+server address in Settings." instead of being sent anywhere. Earlier versions
+substituted a development address on this machine whenever the setting was
+missing, which turned "your setting is gone" into "the server is unreachable" —
+a confident answer to the wrong question. When an address *is* configured, that
+same line names it, so which server this client is talking to is always on
+screen.
+
 Two forms are accepted, and nothing else:
 
 - `https://<host>[:<port>][/<path prefix>]` — any host. The server
@@ -36,8 +47,9 @@ Two forms are accepted, and nothing else:
   turns verification off.
 - `http://127.0.0.1:<port>` (or `localhost`/`::1`) — this machine only, for a
   development service running on your own computer. Nothing leaves the host,
-  so there is nothing to protect in transit. This is the default,
-  `http://127.0.0.1:8788`.
+  so there is nothing to protect in transit. `http://127.0.0.1:8788` is the
+  example the settings field shows as a hint; it is not filled in for you and
+  is never used unless you type it.
 
 Plain `http://` to any other host is refused, in the settings dialog and again
 in the transport itself before a request is built: the device token travels in
@@ -57,6 +69,33 @@ just the host name.
 > not part of this client's path to the service and never a requirement for
 > using it — the application starts no such process, manages no keys, and
 > needs nothing running beside it. See `docs/deployment.md`.
+
+## Where the settings are kept
+
+The non-secret settings — the server address and the two timeouts — live in
+`%APPDATA%\WuwaTerm\config.json`. That is the *roaming* user profile, which a
+restart preserves and which is not a temporary location. The device token is
+not in that file and never has been; it lives in the Windows Credential
+Manager.
+
+- **A save cannot leave a half-written file.** It writes a temporary file in
+  the same directory, flushes it, and only then replaces the settings file in
+  one step; the settings file is never opened for truncation. An interrupted
+  save therefore leaves either the whole previous file or the whole new one —
+  never a truncated one, which the client would read as unusable and which
+  would now cost you the server address rather than being papered over. This
+  is about an interrupted *write*; it is not a claim about what a power cut
+  leaves on the disk platters.
+- **The file is not recreated for you.** If it is deleted — by hand, or by a
+  disk-cleanup tool — the client starts unconfigured and says so on screen;
+  enter the address again in Settings and it is written back. This is not
+  hypothetical: the file went missing on the owner's machine across a Windows
+  restart on 2026-08-12, while the stored device credential was unaffected.
+- **A hand-edited file is validated, not trusted.** An address the client will
+  not use, one it cannot parse, or JSON it cannot read leaves the client
+  unconfigured; a timeout outside 1–600 seconds is clamped, and a
+  non-numeric one falls back to the default. Nothing from that file reaches
+  the HTTP layer unchecked.
 
 ## Timeouts, retries and reconnection
 
@@ -129,6 +168,12 @@ the token is always a single line that can be pasted as-is. On first launch,
 or later from
 Settings → Enter/Change token, paste it in. The client stores it immediately
 in the Windows Credential Manager and never displays it again.
+
+A first launch therefore asks for two things, in two places: the device token
+in the welcome dialog, and the server address in Settings. The window says
+`Server address: not configured` until the second one is done; the credential
+and the address are stored separately and are lost separately, so it is normal
+to be asked for one and not the other.
 
 ## Removing the stored credential
 
