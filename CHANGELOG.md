@@ -3,7 +3,15 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
-## Unreleased
+## 0.3.0 - 2026-08-12
+
+API-first release: the Telegram-only bot becomes a multi-adapter system. One
+protocol-neutral application layer now serves two presentation adapters — the
+existing Telegram bot and a new versioned HTTP API with revocable
+device-principal authentication — plus a Windows desktop client that consumes
+the API. Game-data pin is unchanged from 0.2.x (Wuthering Waves 3.5.0 /
+resource 3.5.5 / changelist 8059200 at
+`dae29691c04ef0f48d0810b5d244fb0b37288c60`).
 
 ### Maintainer Architecture
 
@@ -74,6 +82,17 @@ does not distribute generated game data or generated SQLite databases.
   artifact's own start-up self-check, so a build that cannot start fails the
   build. A `windows-latest` CI job runs the client suite, builds through the
   same script and uploads the artifact.
+- A missing, unreadable, malformed or unusable `config.json` now leaves the
+  client in an explicit unconfigured state instead of silently substituting a
+  local development address: the main window states the configured server
+  address (or that none is configured, and where to set one), and every
+  request path refuses with the stable code `not_configured` before the
+  credential store is read. The settings field opens empty when unconfigured
+  and never invents an address (#59).
+- Settings saves are atomic (temporary file, fsync, `os.replace`) with
+  descriptor-safe failure cleanup, so an interrupted save cannot leave a
+  truncated settings file; changing the server address cancels in-flight
+  requests and clears answers derived from the previous endpoint (#59).
 
 ### Deployment
 
@@ -138,6 +157,28 @@ does not distribute generated game data or generated SQLite databases.
   reload and one-block rollback, and the readback that has to happen on the
   client machine to mean anything. `docs/validation.md` gains the contract,
   client-transport and client-build gates and where each runs.
+
+### Upgrading From 0.2.1
+
+- Deploy only through `deploy/vps-update.sh` on a clean Git checkout where
+  `HEAD == origin/main` (see `docs/deployment.md`). The updater now manages
+  BOTH serving containers; rollback covers both.
+- The HTTP API is a second, loopback-only container. Its credential store
+  lives in a new `state-api/` directory, a sibling of the bot's `state/`.
+  Devices are registered by an operator over SSH with
+  `wuwaterm-api device issue` (secret supplied on standard input) and revoked
+  with `wuwaterm-api device revoke`. Nothing is exposed publicly by default;
+  publication happens through a reverse-proxy path route the host already
+  serves (see `docs/deployment.md` and ADR 0012).
+- The API's default port is 8788; a `.env` that pins `WUWATERM_API_PORT`
+  wins over the default.
+- The desktop client is built from source with `client/build.ps1` (or taken
+  from the CI artifact); it stores its device credential only in the OS
+  credential manager and starts unconfigured until a server address is set
+  in Settings.
+- No bot state-directory migration and no game-data pin change from 0.2.1.
+  Telegram behaviour is unchanged apart from the shared application layer
+  refactor, which is covered by the existing test suite.
 
 ## 0.2.1 - 2026-08-06
 
