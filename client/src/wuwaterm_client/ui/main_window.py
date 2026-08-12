@@ -4,7 +4,15 @@ Settings and first-run flows."""
 from __future__ import annotations
 
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QDialog, QMainWindow, QMessageBox, QTabWidget, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import strings
 from ..api import ApiClient
@@ -16,6 +24,22 @@ from .settings_dialog import SettingsDialog
 from .status_view import StatusView
 from .terms_view import TermsView
 from .translate_view import TranslateView
+
+
+def endpoint_status_text(base_url: str | None) -> str:
+    """The line the window shows about where its requests go.
+
+    A separate function, and the only place the two states are turned into
+    text, so the state logic can be exercised without driving the widget.
+
+    An unconfigured client has to LOOK unconfigured. The address used to be
+    substituted silently when `config.json` went missing, and the owner then
+    read a connection error - about a machine-local development port they had
+    never chosen - as the service being down.
+    """
+    if base_url is None:
+        return strings.ENDPOINT_NOT_CONFIGURED
+    return strings.ENDPOINT_CONFIGURED.format(base_url=base_url)
 
 
 class MainWindow(QMainWindow):
@@ -34,9 +58,24 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.translate_view, strings.TRANSLATE_TAB_TITLE)
         self.tabs.addTab(self.terms_view, strings.TERMS_TAB_TITLE)
         self.tabs.addTab(self.status_view, strings.STATUS_TAB_TITLE)
-        self.setCentralWidget(self.tabs)
 
+        # Above the tabs rather than in a status bar: it is true of every tab,
+        # and while it says "not configured" it is the only thing on screen
+        # worth acting on.
+        self.endpoint_label = QLabel(self)
+        self.endpoint_label.setWordWrap(True)
+
+        central = QWidget(self)
+        central_layout = QVBoxLayout(central)
+        central_layout.addWidget(self.endpoint_label)
+        central_layout.addWidget(self.tabs)
+        self.setCentralWidget(central)
+
+        self._refresh_endpoint_label()
         self._build_menu()
+
+    def _refresh_endpoint_label(self) -> None:
+        self.endpoint_label.setText(endpoint_status_text(self.config.base_url))
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(strings.MENU_FILE)
@@ -87,6 +126,10 @@ class MainWindow(QMainWindow):
             self.config.request_timeout_seconds,
             self.config.translate_timeout_seconds,
         )
+        # ...and the address on screen, which is the whole point of showing
+        # it: a client that has just been configured must stop saying it is
+        # not.
+        self._refresh_endpoint_label()
         try:
             self.config.save()
         except OSError:

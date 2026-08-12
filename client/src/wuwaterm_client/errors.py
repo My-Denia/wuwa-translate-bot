@@ -49,6 +49,13 @@ ERROR_UNKNOWN = "unknown"
 #      does not verify server certificates. Unreachable from the UI, from
 #      configuration and from the packaged application.
 ERROR_INSECURE_ENDPOINT = "insecure_endpoint"
+# No server address is configured at all: the configuration file is missing,
+# unreadable, malformed, or the address in it is not one this client will use.
+# Distinct from the code above on purpose - "the address you set is unsafe"
+# and "you have not set an address" send the owner to different places - and
+# distinct from `offline`, which is what the client used to report when it
+# silently substituted a development address for a missing setting.
+ERROR_NOT_CONFIGURED = "not_configured"
 
 MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_UNAUTHORIZED: strings.ERROR_MSG_UNAUTHORIZED,
@@ -65,6 +72,7 @@ MESSAGE_BY_CODE: dict[str, str] = {
     ERROR_CANCELLED: strings.STATUS_CANCELLED,
     ERROR_UNKNOWN: strings.ERROR_MSG_UNKNOWN,
     ERROR_INSECURE_ENDPOINT: strings.ERROR_MSG_INSECURE_ENDPOINT,
+    ERROR_NOT_CONFIGURED: strings.ERROR_MSG_NOT_CONFIGURED,
 }
 
 

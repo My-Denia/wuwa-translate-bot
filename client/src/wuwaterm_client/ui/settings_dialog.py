@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import strings
-from ..config import DEFAULT_BASE_URL, ClientConfig, usable_base_url
+from ..config import ClientConfig, usable_base_url
 from ..credentials import (
     CredentialStoreUnavailable,
     active_backend_name,
@@ -33,7 +33,9 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(strings.SETTINGS_TITLE)
         self._config = config
 
-        self.base_url_edit = QLineEdit(config.base_url, self)
+        # Empty when the client is unconfigured: the field shows what is set,
+        # and there is nothing set. The placeholder carries the example.
+        self.base_url_edit = QLineEdit(config.base_url or "", self)
         self.base_url_edit.setPlaceholderText(strings.SETTINGS_BASE_URL_PLACEHOLDER)
 
         self.timeout_spin = QDoubleSpinBox(self)
@@ -138,7 +140,14 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def result_config(self) -> ClientConfig:
-        base_url = self.base_url_edit.text().strip() or DEFAULT_BASE_URL
+        """The edited settings.
+
+        An empty field is `None` - unconfigured - and not a development
+        address substituted for one. `_on_accepted` refuses an empty field
+        before this is reached, so the branch is a floor rather than a path;
+        what it must never do is invent an address nobody typed.
+        """
+        base_url = self.base_url_edit.text().strip() or None
         return ClientConfig(
             base_url=base_url,
             request_timeout_seconds=self.timeout_spin.value(),

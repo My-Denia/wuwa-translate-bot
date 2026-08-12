@@ -124,12 +124,28 @@ config file, a future caller).
   (`127.0.0.1.example.com`) is refused
   (`test_the_transport_refuses_an_address_it_cannot_protect`;
   `client/tests/test_config.py::test_plain_http_is_only_accepted_for_this_machine`).
-  The shipped default is plain HTTP to the numeric loopback address on the
-  service's default API port (8788).
+  There is no shipped default address (amended 2026-08-12, see below); the
+  service's default API port (8788) appears only as the settings field's
+  placeholder text.
+- **No address is better than a wrong one** (amended 2026-08-12). The client
+  originally defaulted `base_url` to plain HTTP on this machine's loopback
+  and fell back to it whenever the stored setting was missing or unusable.
+  A real incident retired that: `%APPDATA%\WuwaTerm\config.json` was found
+  missing after a Windows restart, the client silently adopted the loopback
+  address, and the resulting "could not reach the server" described a machine
+  the owner had never configured it to call. `ClientConfig.base_url` is now
+  `str | None`, `None` meaning UNCONFIGURED; the main window displays the
+  configured address or says it has none, and every request path refuses with
+  the client-only code `not_configured`, whose message names Settings
+  (`client/tests/test_unconfigured_endpoint.py`,
+  `client/tests/test_ui_endpoint_state.py`). `ClientConfig.save` writes
+  through a temporary file and `os.replace`, so an interrupted save cannot
+  leave a truncated file for the next launch to reject
+  (`client/tests/test_config_persistence.py`).
 - **One predicate at every layer.** `usable_base_url` (`config.py`) is
   applied by the settings dialog, by `ClientConfig.load` (an unusable saved
-  address falls back to the default rather than reaching the transport), and
-  by the `ApiClient` constructor and `update_base_url`. It additionally
+  address leaves the client unconfigured rather than reaching the transport),
+  and by the `ApiClient` constructor and `update_base_url`. It additionally
   refuses user information, a query, or a fragment embedded in the address
   (`test_the_transport_is_no_more_permissive_than_the_settings_field`,
   `test_a_stored_configuration_can_never_carry_a_refused_address`). A

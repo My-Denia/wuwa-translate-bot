@@ -13,6 +13,7 @@ import ipaddress
 import json
 import math
 import os
+import tempfile
 import urllib.parse
 from pathlib import Path
 
@@ -21,7 +22,7 @@ import httpx
 APP_DIR_NAME = "WuwaTerm"
 CONFIG_FILE_NAME = "config.json"
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8788"
+# There is deliberately NO default server address. See ClientConfig.base_url.
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
 DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 60.0
 # The same bounds the Settings dialog enforces. A hand-edited config file is
@@ -32,7 +33,15 @@ MAX_TIMEOUT_SECONDS = 600.0
 
 
 def app_data_dir() -> Path:
-    """Per-user app data directory. ``%APPDATA%/WuwaTerm`` on Windows."""
+    """Per-user app data directory. ``%APPDATA%/WuwaTerm`` on Windows.
+
+    ``%APPDATA%`` is the ROAMING profile (``…/AppData/Roaming``), which is
+    where a setting that has to outlive a restart belongs. It is deliberately
+    neither ``%LOCALAPPDATA%/Temp`` nor anything else a disk-cleanup tool
+    treats as disposable: this file is the only record of which server the
+    client talks to, and losing it now costs the owner that address rather
+    than being papered over by a fallback.
+    """
     appdata = os.environ.get("APPDATA")
     if appdata:
         return Path(appdata) / APP_DIR_NAME
@@ -152,23 +161,54 @@ def usable_base_url(value: object) -> bool:
     return True
 
 
-def _sane_base_url(value: object, fallback: str) -> str:
-    """Annotations are not runtime validation: a list here would reach httpx."""
+def _stored_base_url(value: object) -> str | None:
+    """A stored address, or None when there is not a usable one.
+
+    Annotations are not runtime validation: a list here would reach httpx.
+    What is NOT here is a fallback. This used to substitute a development
+    address on this machine for anything it could not accept, and the result
+    was the worst kind of failure - a client that looked configured, pointed
+    at a port nothing was listening on, and reported "could not reach the
+    server" for a configuration problem. A missing or unusable address is now
+    reported as exactly that.
+    """
     if not usable_base_url(value):
-        return fallback
+        return None
     return value.strip()
 
 
 @dataclasses.dataclass(frozen=True)
 class ClientConfig:
-    base_url: str = DEFAULT_BASE_URL
+    """Non-secret client settings.
+
+    ``base_url`` is ``None`` when this client has no server address it can
+    use: the configuration file is missing, unreadable, malformed, or the
+    address it holds is not one this client will send a device token to.
+    That is the UNCONFIGURED state, and it is explicit on purpose - the file
+    really did go missing on the owner's machine once (a reboot, an external
+    cleanup tool; the credential in the OS store survived), and the silent
+    substitution of a local development address turned "your setting is gone"
+    into "the server is down".
+    """
+
+    base_url: str | None = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     translate_timeout_seconds: float = DEFAULT_TRANSLATE_TIMEOUT_SECONDS
 
+    @property
+    def is_configured(self) -> bool:
+        """Whether this configuration names a server address to talk to."""
+        return self.base_url is not None
+
     @classmethod
     def load(cls, base_dir: Path | None = None) -> "ClientConfig":
-        """Load from disk, falling back to defaults for anything missing,
-        unreadable, malformed, or unrecognized. Never raises."""
+        """Load from disk. Never raises.
+
+        Timeouts fall back to their defaults, which are a matter of taste and
+        which the client can pick for itself. The address does not: anything
+        missing, unreadable, malformed or unusable leaves ``base_url`` as
+        ``None`` and the client unconfigured.
+        """
         path = config_path(base_dir)
         if not path.exists():
             return cls()
@@ -188,18 +228,45 @@ class ClientConfig:
             if name in filtered:
                 filtered[name] = _sane_timeout(filtered[name], fallback)
         if "base_url" in filtered:
-            filtered["base_url"] = _sane_base_url(
-                filtered["base_url"], defaults.base_url
-            )
+            filtered["base_url"] = _stored_base_url(filtered["base_url"])
         try:
             return cls(**filtered)
         except TypeError:
             return cls()
 
     def save(self, base_dir: Path | None = None) -> None:
+        """Write the settings to disk atomically.
+
+        The bytes go to a temporary file in the SAME directory, are flushed
+        to the device, and only then replace the target in one ``os.replace``
+        call. What this buys: the target is never opened for truncation, so
+        a crash, a power loss or a full disk part-way through a save cannot
+        leave a truncated ``config.json`` behind. ``load`` would read that as
+        malformed - and a malformed file now costs the owner their server
+        address rather than being papered over by a fallback.
+
+        What it does NOT claim: crash-ordering guarantees. There is no
+        parent-directory fsync (a directory cannot be opened for one on
+        Windows), so this bounds what a HALF-FINISHED WRITE can leave on
+        disk, not what survives a power cut at an arbitrary instant.
+        """
         path = config_path(base_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = dataclasses.asdict(self)
-        path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{CONFIG_FILE_NAME}.", dir=path.parent
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=2, sort_keys=True))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            # A half-written temporary file left behind would accumulate in
+            # the owner's profile, one per failed save.
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
