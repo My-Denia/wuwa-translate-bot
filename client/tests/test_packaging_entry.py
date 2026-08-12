@@ -109,6 +109,55 @@ def test_self_check_starts_up_and_exits_without_a_window() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+_QAPPLICATION = "QApplication"
+
+
+def qapplication_constructions(source: str) -> list[int]:
+    """Line numbers where `source` constructs a QApplication, any spelling.
+
+    The first version of this guard matched one shape - a call whose function
+    is the bare name `QApplication` - and three ordinary ways of writing the
+    same construction walked straight past it:
+
+        QApplication([])                              bare name
+        QtWidgets.QApplication([])                    module attribute
+        from ... import QApplication as QApp; QApp([])   renamed import
+
+    So it would have gone on passing while the ordering constraint it exists
+    to prevent came back. From-imports are resolved to their local names, and
+    ANY attribute call ending in `.QApplication` counts whatever the object
+    in front of the dot is called - which covers `QtWidgets.QApplication`, a
+    renamed module, and a fully qualified `PySide6.QtWidgets.QApplication`
+    alike.
+
+    What this does NOT catch: construction through a value the parser cannot
+    follow - `getattr(QtWidgets, "QApplication")()`, a class looked up in a
+    dict, an exec of assembled text. That is a real limit and it is stated
+    rather than papered over; the guard is here to stop the constraint
+    returning by ordinary edit, which is how it arrived, and no text scan can
+    close the dynamic case.
+    """
+    tree = ast.parse(source)
+
+    local_names = {_QAPPLICATION}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for imported in node.names:
+                if imported.name == _QAPPLICATION:
+                    local_names.add(imported.asname or imported.name)
+
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Name) and function.id in local_names:
+            lines.append(node.lineno)
+        elif isinstance(function, ast.Attribute) and function.attr == _QAPPLICATION:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
 def test_the_suite_does_not_depend_on_this_file_running_first() -> None:
     """The ordering constraint is gone, and this is what keeps it gone.
 
@@ -121,16 +170,61 @@ def test_the_suite_does_not_depend_on_this_file_running_first() -> None:
     "this module does not build one", and an assertion that needed a live
     QApplication to check it would be the same trap one level down.
     """
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    source = Path(__file__).read_text(encoding="utf-8")
 
-    constructed = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "QApplication"
-    ]
-    assert not constructed, "this module must not build a QApplication in-process"
-    # The probe still has to actually run the entry point, or the test above
-    # could be satisfied by doing nothing at all.
+    assert qapplication_constructions(source) == [], (
+        "this module must not build a QApplication in-process"
+    )
+    # The probe still has to actually run the entry point, or the assertion
+    # above could be satisfied by doing nothing at all.
     assert "run([\"WuwaTerm\", SELF_CHECK_FLAG])" in _SELF_CHECK_PROGRAM
+
+
+@pytest.mark.parametrize(
+    ("spelling", "source"),
+    [
+        (
+            "bare name",
+            "from PySide6.QtWidgets import QApplication\nQApplication([])\n",
+        ),
+        (
+            "module attribute",
+            "from PySide6 import QtWidgets\nQtWidgets.QApplication([])\n",
+        ),
+        (
+            "fully qualified attribute",
+            "import PySide6\nPySide6.QtWidgets.QApplication([])\n",
+        ),
+        (
+            "renamed import",
+            "from PySide6.QtWidgets import QApplication as QApp\nQApp([])\n",
+        ),
+        (
+            "renamed module attribute",
+            "from PySide6 import QtWidgets as W\nW.QApplication([])\n",
+        ),
+    ],
+)
+def test_the_ordering_guard_catches_every_spelling(spelling: str, source: str) -> None:
+    """A guard that matches one spelling is a guard that can be walked around
+    without meaning to. Each of these is an ordinary way to write the
+    construction, and the original check saw only the first."""
+    assert qapplication_constructions(source), spelling
+
+
+@pytest.mark.parametrize(
+    ("description", "source"),
+    [
+        ("a different widget", "from PySide6.QtWidgets import QLabel\nQLabel()\n"),
+        ("an unrelated attribute call", "import os\nos.getcwd()\n"),
+        ("the name only mentioned", "widget = None  # QApplication\n"),
+        ("a string, not a call", 'text = "QApplication([])"\n'),
+    ],
+)
+def test_the_ordering_guard_does_not_fire_on_innocent_code(
+    description: str, source: str
+) -> None:
+    """The other half. A check that flagged everything would pass the five
+    cases above while proving nothing at all - including about this file,
+    which mentions the banned construction in prose and in test data."""
+    assert qapplication_constructions(source) == [], description
