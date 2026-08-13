@@ -140,14 +140,42 @@ def test_durable_replace_and_remove_fsync_changed_directories(monkeypatch, tmp_p
 
 
 def test_deployment_docs_do_not_recommend_live_non_atomic_state_copy():
+    """The warning has to reach whoever is reading, in whichever language.
+
+    This guard is about DATA LOSS - copying state files out from under a
+    running bot - not about wording. When the README was split into a Chinese
+    primary document and an English one, the positive assertion kept naming
+    README.md and so began asserting an English sentence against a Chinese
+    file; main went red for a documentation change that had lost nothing.
+
+    Repairing it by pointing the English assertion at README.en.md alone
+    would have been worse than the red: the document a reader actually opens
+    is now the Chinese one, so the guard would still be green while covering
+    only the secondary copy. Each language asserts its own warning.
+
+    The NEGATIVE assertions scan BOTH files. A banned recipe is banned
+    wherever a reader can find it, and a not-in check that names one of two
+    documents is a scope that shrank without anyone deciding to shrink it -
+    the same defect class PR #61 closed elsewhere.
+    """
     text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_en = (ROOT / "README.en.md").read_text(encoding="utf-8")
 
     assert "Do not manually copy these files while the old bot is running" in text
     assert "cp -p data/chat_settings.json state/chat_settings.json" not in text
     assert "cp -p data/channel_replies.json state/channel_replies.json" not in text
-    assert "Do not manually copy\nstate files while the old bot is running" in readme
-    assert "copy any existing `data/chat_settings.json`" not in readme
+
+    # The warning itself, once per language.
+    assert "Do not manually copy\nstate files while the old bot is running" in readme_en
+    assert "切勿在旧 bot 仍在运行时手工复制状态文件" in readme
+
+    # ...and the recipe that warning exists to keep out, in every README a
+    # reader might open.
+    for name, document in (("README.md", readme), ("README.en.md", readme_en)):
+        assert "copy any existing `data/chat_settings.json`" not in document, name
+        assert "cp -p data/chat_settings.json state/chat_settings.json" not in document, name
+        assert "cp -p data/channel_replies.json state/channel_replies.json" not in document, name
 
 
 def test_docker_context_excludes_data_and_runtime_state():
