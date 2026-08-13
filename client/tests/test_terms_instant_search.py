@@ -590,3 +590,41 @@ def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:
         "空结果把请求 ID 行一起藏了"
     )
     assert "req-empty" in view._request_id_label.text()
+
+
+def test_a_successful_retry_releases_the_offline_pause(qapp) -> None:
+    """离线暂停没有恢复定时器,成功的手动重试是唯一能解开它的东西。
+
+    不解开的话:暂停会活得比断网更久,而承载「恢复自动查询」的提示条在渲染
+    结果时已被清掉 —— 于是继续打字什么也不发,屏幕上也没有任何东西说明为什么。
+    """
+    service = _Service()
+    view = TermsView(_client(service))
+
+    view._engage_brake(ERROR_OFFLINE)
+    view._engage_brake(ERROR_OFFLINE)
+    assert view._auto_paused is True
+
+    view._render_result(_held_answer("Jinhsi"))
+
+    assert view._auto_paused is False, "成功的重试之后自动查询仍是暂停的"
+    assert view._offline_streak == 0
+
+
+def test_a_field_level_response_breaks_the_offline_streak(qapp) -> None:
+    """invalid_request 一类同样来自 HTTP 响应,证明服务可达。
+
+    它们在 _engage_brake 之前就 return,于是一次离线 + 一次字段级错误 + 再一次
+    离线会被当成连续两次离线。
+    """
+    from wuwaterm_client.errors import ERROR_INPUT_TOO_LONG, ClientError
+
+    view = TermsView(_client(_Service()))
+
+    view._engage_brake(ERROR_OFFLINE)
+    assert view._offline_streak == 1
+
+    view._render_error(ClientError(ERROR_INPUT_TOO_LONG))
+
+    assert view._offline_streak == 0, "字段级响应也证明服务器可达,连击应打断"
+    assert view._auto_paused is False

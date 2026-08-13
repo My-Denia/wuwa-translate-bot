@@ -247,3 +247,50 @@ def test_an_outcome_from_the_previous_address_is_never_drawn(qapp) -> None:
     assert view.result_edit.toPlainText() == ""
     assert view.translate_button.isEnabled()
     assert not view.cancel_button.isEnabled()
+
+
+def test_retry_sends_what_the_editor_shows_now(qapp) -> None:
+    """重试提交的必须是屏幕上当前的原文。
+
+    提示条在编辑原文时不会消失,所以「重试」曾经重发保存下来的旧原文 —— 于是
+    旧原文的译文渲染在新原文底下,被归给了一段从未产生过它的输入。这与换址
+    清屏要防的是同一件事:答案绝不能出现在并非它来源的文本之下。
+    """
+    sent: list[str] = []
+
+    async def handler(request):
+        import json as _json
+
+        body = _json.loads(request.content.decode("utf-8"))
+        sent.append(body["text"])
+        return httpx.Response(
+            200,
+            json={
+                "kind": "exact",
+                "text": "Resonance Circuit",
+                "direction": "en",
+                "dictionary_miss": False,
+                "request_id": "req-retry",
+            },
+        )
+
+    view = TranslateView(
+        ApiClient(
+            "https://test",
+            _test_transport=httpx.MockTransport(handler),
+            token_provider=lambda: "wtd1.device.secret",
+        )
+    )
+
+    async def scenario() -> None:
+        view.input_edit.setPlainText("原文甲")
+        view._last_request = ("原文甲", None)
+        # 用户在失败之后把原文改成了别的东西。
+        view.input_edit.setPlainText("原文乙")
+        view._retry_last_request()
+        if view._task is not None:
+            await asyncio.gather(view._task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    assert sent == ["原文乙"], f"重试发的是 {sent},不是编辑框当前内容"

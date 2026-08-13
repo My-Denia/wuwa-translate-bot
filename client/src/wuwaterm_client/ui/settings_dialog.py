@@ -352,18 +352,24 @@ class SettingsDialog(QDialog):
 
     def _on_enter_token_clicked(self) -> None:
         dialog = TokenDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        while True:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
             token = dialog.token()
-            if token:
-                try:
-                    store_token(token)
-                except CredentialStoreUnavailable:
-                    self.credential_banner.show_message(
-                        strings.CREDENTIAL_STORE_ERROR_MESSAGE, SEVERITY_DANGER
-                    )
-                    return
-                self.credential_banner.clear()
-                self._refresh_credential_status()
+            if not token:
+                return
+            try:
+                store_token(token)
+            except CredentialStoreUnavailable:
+                # Kept open with the token still in the field. Reporting this
+                # on the card behind a closed dialog threw away what had just
+                # been pasted, and a temporarily unavailable credential store
+                # is exactly the failure where retrying is the right move.
+                dialog.show_store_error(strings.CREDENTIAL_STORE_ERROR_MESSAGE)
+                continue
+            break
+        self.credential_banner.clear()
+        self._refresh_credential_status()
 
     def _on_forget_token_clicked(self) -> None:
         # The one modal left in this dialog, deliberately: deleting the

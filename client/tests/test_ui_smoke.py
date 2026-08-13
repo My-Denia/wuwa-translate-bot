@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from wuwaterm_client.api import ApiClient  # noqa: E402
 from wuwaterm_client.config import ClientConfig  # noqa: E402
@@ -651,3 +651,23 @@ def test_every_area_can_offer_the_token_action(qapp, tmp_path, monkeypatch) -> N
             f"{type(view).__name__} 拿不到令牌入口,分派表的动作无人交付"
         )
         assert view._on_enter_token == window.enter_token
+
+    # ...而且它必须真的能跑。第一版这条测试只断了「回调接上了」,于是接上的
+    # 是一个一按就抛 NameError 的槽(TokenDialog 没有被 import),测试照绿。
+    # 断机制不断结果的教训,原样发生在写这条测试的人身上。
+    # 对话框在这里被替换成一个立即取消的替身:要验的是这个方法能走完,不是
+    # 一个模态窗能不能在测试里弹出来。
+    import wuwaterm_client.ui.main_window as main_window_module
+
+    class _CancelledDialog:
+        def __init__(self, parent=None) -> None:
+            pass
+
+        def exec(self) -> int:
+            return int(QDialog.DialogCode.Rejected)
+
+        def token(self) -> str:  # pragma: no cover - 取消路径不会读它
+            return ""
+
+    monkeypatch.setattr(main_window_module, "TokenDialog", _CancelledDialog)
+    window.enter_token()  # 不得抛出

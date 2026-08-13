@@ -369,12 +369,28 @@ class TranslateView(QWidget):
             self._task.cancel()
 
     def _retry_last_request(self) -> None:
-        if self._last_request is None:
-            return
+        """Send again what the editor shows NOW, not what failed earlier.
+
+        The retry button rides on a banner that survives editing, so it used
+        to resubmit the saved text while the box beside it held something
+        else - and the answer to the old text then rendered under the new
+        source, attributed to input that never produced it. That is the same
+        misattribution the endpoint-change reset exists to prevent, one layer
+        in: an answer must never appear under text it did not come from.
+
+        Reading the editor also makes the button mean one thing in both
+        cases: translate what is on screen.
+        """
         if self._task is not None and not self._task.done():
             return
-        text, to = self._last_request
-        self._start_translate(text, to)
+        text = self.input_edit.toPlainText()
+        if not text.strip():
+            # Nothing to send, and the failure this banner reports no longer
+            # has a subject. Take the banner down rather than leave an action
+            # that would do nothing.
+            self._clear_outcome_surfaces()
+            return
+        self._start_translate(text, self._selected_direction())
 
     async def _run_translate(self, text: str, to: str | None) -> None:
         # Captured here rather than passed in: the outcome of THIS coroutine

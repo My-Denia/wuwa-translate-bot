@@ -515,6 +515,14 @@ class TermsView(QWidget):
         self.banner.clear()
         self._offline_streak = 0
         self._backoff_step = 0
+        # An answer means the reason for pausing is gone. The offline pause
+        # arms no resume timer - nothing about waiting fixes a network that is
+        # down - so the deliberate retry that succeeds is the ONLY thing that
+        # can release it. Without this the pause outlived the outage: the
+        # banner carrying the "resume automatic search" action was cleared a
+        # line above, so typing went on sending nothing with nothing left on
+        # screen to say why.
+        self._resume_auto_search()
         self.table.setRowCount(len(result.matches))
         for row, match in enumerate(result.matches):
             for column, value in enumerate(
@@ -589,6 +597,13 @@ class TermsView(QWidget):
         self.status_label.set_text(strings.STATUS_BAR_LAST_REQUEST_FAILED)
 
         if presentation.surface == SURFACE_FIELD:
+            # These three codes come back in an HTTP RESPONSE, so the service
+            # was reached - the same proof a 429 carries. Returning before the
+            # brake left the offline streak standing across a completed round
+            # trip, so one earlier offline failure plus one of these plus one
+            # later offline failure paused automatic lookup as though the
+            # network had been down twice running.
+            self._offline_streak = 0
             mark_field_invalid(self.query_edit, True)
             self.field_error.show_error(presentation.message)
             self._apply_request_id(exc.request_id)

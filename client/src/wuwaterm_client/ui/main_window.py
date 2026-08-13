@@ -63,6 +63,7 @@ from .first_run_dialog import FirstRunDialog
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
 from .terms_view import TermsView
+from .token_dialog import TokenDialog
 from .translate_view import TranslateView
 
 # The navigation column is fixed: it is a landmark, and a landmark that
@@ -467,19 +468,24 @@ class MainWindow(QMainWindow):
         classification exists to remove.
         """
         dialog = TokenDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        token = dialog.token()
-        if not token:
-            return
-        try:
-            store_token(token)
-        except CredentialStoreUnavailable:
-            self._show_global_banner(
-                strings.CREDENTIAL_STORE_ERROR_MESSAGE,
-                error_presentation.SEVERITY_DANGER,
-            )
-            return
+        while True:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            token = dialog.token()
+            if not token:
+                return
+            try:
+                store_token(token)
+            except CredentialStoreUnavailable:
+                # Re-shown with the token still in it, rather than reporting
+                # the failure somewhere else and dropping what was typed.
+                # The credential store being briefly unavailable is the one
+                # failure here that retrying actually fixes, and making the
+                # owner paste a long secret again to retry is the opposite of
+                # what the dialog's own show_store_error was built for.
+                dialog.show_store_error(strings.CREDENTIAL_STORE_ERROR_MESSAGE)
+                continue
+            break
         # The status area reports whether a credential is stored; it read that
         # when it was built, which was before this.
         self.status_view.refresh_credential_state()
