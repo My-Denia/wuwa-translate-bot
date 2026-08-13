@@ -42,6 +42,7 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from wuwaterm_client import strings  # noqa: E402
 from wuwaterm_client.api import ApiClient, TermMatch, TermsResult  # noqa: E402
+from wuwaterm_client.errors import ERROR_OFFLINE, ERROR_RATE_LIMITED  # noqa: E402
 from wuwaterm_client.ui import terms_view as terms_view_module  # noqa: E402
 from wuwaterm_client.ui.terms_view import TermsView  # noqa: E402
 
@@ -370,7 +371,13 @@ def test_a_new_query_replaces_the_one_in_flight(qapp) -> None:
         view.query_edit.setText("Jinhsi")
         view._on_debounce_elapsed()
 
-        assert view._generation == generation_before + 1
+        # Advanced, not advanced by exactly one: changing the text
+        # invalidates the in-flight request immediately (so a reply landing
+        # inside the debounce window cannot draw the previous query's rows),
+        # and starting the replacement advances it again. What the invariant
+        # needs is that the older generation can no longer render, which is
+        # "strictly greater", not a step size.
+        assert view._generation > generation_before
         assert view._task is not older
 
         await asyncio.gather(older, return_exceptions=True)
@@ -511,3 +518,75 @@ def test_being_told_to_slow_down_stops_the_search_from_typing(qapp) -> None:
 
     view.query_edit.setText("Jinhsi3")
     assert view._debounce_timer.isActive() is True
+
+
+# -- Codex P2 回归门(PR #63 评审发现) --------------------------------------
+
+
+def test_typing_invalidates_the_in_flight_request_before_the_debounce(qapp) -> None:
+    """输入一变,在飞的那次查询就不再能回答它 —— 不等防抖到期。
+
+    原实现只重排防抖:旧请求在此后最多 220 毫秒内仍是「当代」,它的回复若在这
+    个窗口里到达,会通过代号检查,把**上一个查询**的结果与请求 ID 画在新的
+    查询词底下。这条断言的是「作废发生在按键那一刻」。
+    """
+    service = _Service(held={"Jin"})
+    view = TermsView(_client(service))
+
+    async def scenario() -> None:
+        view.query_edit.setText("Jin")
+        view._on_debounce_elapsed()
+        await asyncio.sleep(0.05)
+        older = view._task
+        generation_before = view._generation
+
+        # 只改文本,不触发防抖到期。
+        view.query_edit.setText("Jinhsi")
+
+        assert view._generation > generation_before, (
+            "文本已变而在飞请求仍是当代 —— 它的回复会画在新查询词下"
+        )
+        assert older.cancelled() or older.done() or view._task is not older
+
+        await asyncio.gather(older, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert service.interrupted == ["Jin"]
+
+
+def test_a_rate_limit_breaks_the_offline_streak(qapp) -> None:
+    """429 是服务端答的,证明它可达,离线连击必须归零。
+
+    否则一次离线 + 一次 429 + 再一次离线会被算成「连续两次离线」,把自动查询
+    无限期暂停 —— 中间那次成功的往返被无视了。
+    """
+    view = TermsView(_client(_Service()))
+
+    view._engage_brake(ERROR_OFFLINE)
+    assert view._offline_streak == 1
+
+    view._engage_brake(ERROR_RATE_LIMITED)
+    assert view._offline_streak == 0, "限流响应证明服务器可达,连击应被打断"
+
+    paused = view._engage_brake(ERROR_OFFLINE)
+    assert view._offline_streak == 1
+    assert paused is False, "这只是本轮第一次离线,不应暂停自动查询"
+
+
+def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:
+    """每一次完成的请求都要留下可以拿去问运营方的句柄。
+
+    请求 ID 行原本嵌在结果区里,而空结果与失败都会把结果区整块隐藏 —— 于是
+    最可能被追问的那一类结局,恰好是唯一看不到 ID 的。
+    """
+    service = _Service()
+    view = TermsView(_client(service))
+
+    result = TermsResult(query="无此词", matches=(), request_id="req-empty")
+    view._render_result(result)
+
+    assert view._request_id == "req-empty"
+    assert view._request_id_row.isVisibleTo(view) is True, (
+        "空结果把请求 ID 行一起藏了"
+    )
+    assert "req-empty" in view._request_id_label.text()

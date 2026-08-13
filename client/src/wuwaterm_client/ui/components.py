@@ -18,6 +18,8 @@ never touch a dynamic property directly.
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import Qt, QTimer
@@ -688,7 +690,19 @@ class ScoreBar(QWidget):
         self.set_score(SCORE_MINIMUM)
 
     def set_score(self, value: float) -> None:
-        score = min(max(float(value), SCORE_MINIMUM), SCORE_MAXIMUM)
+        # Non-finite values are refused one layer up, in the response parser,
+        # where an unusable body becomes a reported error. This is the second
+        # floor under that: min/max PROPAGATE NaN rather than clamping it, so
+        # a NaN arriving by any other route would reach `round()` and raise
+        # in the middle of drawing. A widget that cannot draw a number should
+        # draw an empty bar, not take the window down with it.
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = SCORE_MINIMUM
+        if not math.isfinite(number):
+            number = SCORE_MINIMUM
+        score = min(max(number, SCORE_MINIMUM), SCORE_MAXIMUM)
         self._score = score
         filled = int(round(score))
         self._layout.setStretch(0, filled)

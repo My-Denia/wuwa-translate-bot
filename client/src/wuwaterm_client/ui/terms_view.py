@@ -69,7 +69,12 @@ from .components import (
     StatusStrip,
     mark_field_invalid,
 )
-from .error_presentation import ACTION_RETRY, SURFACE_FIELD, presentation_for
+from .error_presentation import (
+    ACTION_ENTER_TOKEN,
+    ACTION_RETRY,
+    SURFACE_FIELD,
+    presentation_for,
+)
 
 _COLUMNS = (
     strings.TERMS_COLUMN_ZH,
@@ -183,8 +188,19 @@ class TermsView(QWidget):
     # the empty-result bridge is the only thing it needs from up there.
     translate_requested = Signal(str)
 
-    def __init__(self, api_client: ApiClient, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        api_client: ApiClient,
+        parent: QWidget | None = None,
+        *,
+        on_enter_token: "object | None" = None,
+    ) -> None:
         super().__init__(parent)
+        # The credential dialog belongs to the window, not to an area. Without
+        # a way to reach it, this view had to drop the "enter a new token"
+        # action the dispatch table assigns to `unauthorized` and `forbidden`
+        # - so the table classified an action that nothing could offer.
+        self._on_enter_token = on_enter_token
         self._api_client = api_client
         self._task: asyncio.Task | None = None
         # Monotonic. Read the module docstring before changing anything that
@@ -248,7 +264,14 @@ class TermsView(QWidget):
         self._copy_button.setObjectName("linkButton")
         self._copy_button.clicked.connect(self._on_copy_request_id)
 
-        request_id_row = QHBoxLayout()
+        # A widget of its own, and deliberately NOT inside the results host.
+        # It used to live in there beside the table, and `_show_empty_card`
+        # hides that whole host - so a lookup that failed, or found nothing,
+        # stored the id and then hid it. The one outcome an operator is most
+        # likely to be asked about was the one with no visible handle, which
+        # is the opposite of what this row is for.
+        self._request_id_row = QWidget(self)
+        request_id_row = QHBoxLayout(self._request_id_row)
         request_id_row.setContentsMargins(0, 0, 0, 0)
         request_id_row.setSpacing(8)
         request_id_row.addWidget(self._request_id_label)
@@ -260,7 +283,6 @@ class TermsView(QWidget):
         results_layout = QVBoxLayout(self._results_host)
         results_layout.setSpacing(8)
         results_layout.addWidget(self.table)
-        results_layout.addLayout(request_id_row)
 
         # One effect object for the whole results block, kept disabled while
         # nothing is loading: a disabled QGraphicsEffect paints nothing extra,
@@ -283,6 +305,7 @@ class TermsView(QWidget):
         layout.addWidget(self.progress)
         layout.addWidget(self.empty_card)
         layout.addWidget(self._results_host, 1)
+        layout.addWidget(self._request_id_row)
         layout.addWidget(self.status_label)
 
         self._debounce_timer = QTimer(self)
@@ -310,6 +333,15 @@ class TermsView(QWidget):
         self.field_error.clear()
         mark_field_invalid(self.query_edit, False)
 
+        # The text no longer matches what is in flight, so what is in flight
+        # can no longer answer it. Re-arming the debounce alone left the old
+        # request current for up to another 220 ms: if its reply landed in
+        # that window it passed the generation check and drew the PREVIOUS
+        # query's rows and request id under the new text. Invalidate here,
+        # start the replacement when the debounce expires - the two were
+        # conflated, and only the starting half belongs on a timer.
+        self._invalidate_in_flight()
+
         raw = self.query_edit.text()
         if not raw.strip():
             self._debounce_timer.stop()
@@ -326,6 +358,10 @@ class TermsView(QWidget):
             # keystroke: the empty card and the banner already say why, and
             # the button is still there for a deliberate attempt.
             self._debounce_timer.stop()
+            # Nothing will replace the request just invalidated, so the
+            # loading state has to come down here rather than wait for a
+            # search that is not coming.
+            self._end_loading()
             return
         self._debounce_timer.start()
 
@@ -428,18 +464,37 @@ class TermsView(QWidget):
                 self._end_loading()
                 self._task = None
 
-    def _abandon_in_flight(self) -> None:
-        """Drop whatever is running, and everything it would have written.
+    def _invalidate_in_flight(self) -> None:
+        """Make whatever is running unable to answer, and leave the screen be.
 
         The generation moves first: a task cancelled before its first step
         never runs its own body, and one cancelled mid-await comes back as an
         ordinary error, so neither can be relied on to clean up after itself.
+
+        `_last_query_sent` is cleared with it. That field means "this query
+        has been asked and an answer is coming"; once the request is
+        abandoned no answer is coming, so leaving it set would let the
+        duplicate gate refuse to re-ask a query nothing is going to answer.
+
+        Split from `_abandon_in_flight` for the typing path: a keystroke
+        invalidates the request but does NOT end the loading state, because
+        the replacement request is 220 ms away. Ending it here made the
+        progress line and the dimmed rows flicker off and on under every
+        keystroke.
         """
         self._generation += 1
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
         self._last_query_sent = None
+
+    def _abandon_in_flight(self) -> None:
+        """Invalidate the request AND take down what it was showing.
+
+        For the paths where nothing replaces it: an emptied field, a sentence,
+        an address change.
+        """
+        self._invalidate_in_flight()
         self._end_loading()
 
     def _begin_loading(self) -> None:
@@ -547,9 +602,15 @@ class TermsView(QWidget):
             actions.append(
                 (strings.ACTION_RESUME_AUTO_SEARCH, self._resume_auto_search)
             )
-        # Codes whose action is "open settings" or "enter a token" arrive here
-        # with no button: this view owns neither dialog, and a button that
-        # does nothing is worse than none. Their messages name the place to go.
+        if (
+            presentation.action == ACTION_ENTER_TOKEN
+            and self._on_enter_token is not None
+        ):
+            actions.append((presentation.action_label, self._on_enter_token))
+        # A code whose action is "open settings" still arrives with no button:
+        # that dialog belongs to the window and this view has no handle on it.
+        # An unwired action is left out rather than drawn, because a button
+        # that does nothing costs a press to discover.
         # Without the id here: the line below renders it, in the same widget
         # and the same place a successful lookup uses. Two copies of one id,
         # each with its own copy button, read as two different ids.
@@ -571,6 +632,13 @@ class TermsView(QWidget):
         is what decides if the banner offers to turn it back on.
         """
         if code == ERROR_RATE_LIMITED:
+            # A 429 came from the service, so the service was reached: the
+            # offline streak is broken whatever it was. Leaving it standing
+            # let one earlier offline failure and one later one add up ACROSS
+            # a successful round trip, and the second one then paused
+            # automatic lookup as though the network had been down twice
+            # running.
+            self._offline_streak = 0
             delay = BACKOFF_MILLISECONDS[
                 min(self._backoff_step, len(BACKOFF_MILLISECONDS) - 1)
             ]

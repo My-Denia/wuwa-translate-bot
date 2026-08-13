@@ -158,9 +158,22 @@ class MainWindow(QMainWindow):
         self.config = config if config is not None else ClientConfig.load()
         self.api_client = ApiClient.from_config(self.config)
 
-        self.translate_view = TranslateView(self.api_client, self)
-        self.terms_view = TermsView(self.api_client, self)
-        self.status_view = StatusView(self.api_client, self)
+        # The two credential-shaped actions the dispatch table classifies are
+        # handed down here. Both dialogs belong to this window, so a view can
+        # only offer them if it is given a way in - and an action the table
+        # names but no view can draw is a promise nothing keeps.
+        self.translate_view = TranslateView(
+            self.api_client,
+            self,
+            on_open_settings=self._on_settings_clicked,
+            on_enter_token=self.enter_token,
+        )
+        self.terms_view = TermsView(
+            self.api_client, self, on_enter_token=self.enter_token
+        )
+        self.status_view = StatusView(
+            self.api_client, self, on_enter_token=self.enter_token
+        )
 
         self.stack = QStackedWidget(self)
         # Index order is the contract PAGE_* above states; the views are
@@ -435,7 +448,41 @@ class MainWindow(QMainWindow):
     def _handler_for_action(self, action: str) -> Callable[[], None] | None:
         if action == error_presentation.ACTION_OPEN_SETTINGS:
             return self._on_settings_clicked
+        if action == error_presentation.ACTION_ENTER_TOKEN:
+            return self.enter_token
         return None
+
+    def enter_token(self) -> None:
+        """Replace the stored credential, from wherever the refusal appeared.
+
+        The dispatch table has always classified `unauthorized` and
+        `forbidden` as "enter a new token", but no view could act on it: this
+        window owns the dialog and the credential store, and the views were
+        left dropping the classified action on the floor. So the table
+        promised a button that nothing drew.
+
+        Reached from an area's banner, so it goes straight to the token
+        dialog rather than to Settings: the thing to fix is one field, and
+        routing through a settings dialog to find it is the extra hop this
+        classification exists to remove.
+        """
+        dialog = TokenDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        token = dialog.token()
+        if not token:
+            return
+        try:
+            store_token(token)
+        except CredentialStoreUnavailable:
+            self._show_global_banner(
+                strings.CREDENTIAL_STORE_ERROR_MESSAGE,
+                error_presentation.SEVERITY_DANGER,
+            )
+            return
+        # The status area reports whether a credential is stored; it read that
+        # when it was built, which was before this.
+        self.status_view.refresh_credential_state()
 
     def _show_refusal(self, exc: ClientError) -> None:
         """Report an address the transport would not take.

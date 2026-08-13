@@ -458,6 +458,13 @@ class TranslateView(QWidget):
         self.cancel_note.clear()
         self.cancel_note.setVisible(False)
         self._render_request_id(None)
+        # The previous translation goes with its badge and its id. Leaving it
+        # was worse than leaving nothing: the text stayed while everything
+        # that said WHERE it came from and WHICH request produced it was
+        # taken down, so a stale answer sat under new source text wearing no
+        # provenance at all - which is exactly how it gets read as the answer
+        # to the input now on screen.
+        self.result_edit.setPlainText("")
 
     def _render_request_id(self, request_id: str | None) -> None:
         """The one row that reports the id, for every outcome alike.

@@ -607,3 +607,47 @@ def test_settings_that_cannot_be_written_still_apply_and_say_so(
     # half of the sentence the banner has to be telling the truth about.
     assert window.api_client._timeout == 42.0
     assert window.config.base_url == "http://127.0.0.1:9999"
+
+
+# -- Codex P2 回归门(PR #63 评审发现) --------------------------------------
+
+
+def test_starting_a_translation_takes_down_the_previous_answer(qapp) -> None:
+    """上一条译文不能留在新请求底下。
+
+    清理只清了徽章、附注、提示条与请求 ID,唯独没清译文本身 —— 于是旧答案原样
+    留在新原文下方,却已经失去了「它从哪来」和「哪次请求produced它」的全部标记,
+    正好会被读成当前输入的回答。
+    """
+    from wuwaterm_client.api import TranslationResult
+
+    view = TranslateView(_dummy_client())
+    view._show_result(
+        TranslationResult(
+            kind="exact", text="Resonance Circuit", direction="en",
+            dictionary_miss=False, request_id="req-1",
+        )
+    )
+    assert view.result_edit.toPlainText() == "Resonance Circuit"
+
+    view._clear_outcome_surfaces()
+
+    assert view.result_edit.toPlainText() == "", "旧译文仍留在屏幕上"
+    assert view.kind_badge.isVisibleTo(view) is False
+
+
+def test_every_area_can_offer_the_token_action(qapp, tmp_path, monkeypatch) -> None:
+    """分派表把 unauthorized / forbidden 归类为「输入新令牌」。
+
+    在此之前没有任何视图能画出这个动作:凭据对话框归主窗口所有,而三个视图都
+    没有拿到入口,于是分派表宣称了一个谁也交付不了的按钮。
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    window = MainWindow(config=ClientConfig())
+
+    assert callable(window.enter_token)
+    for view in (window.translate_view, window.terms_view, window.status_view):
+        assert view._on_enter_token is not None, (
+            f"{type(view).__name__} 拿不到令牌入口,分派表的动作无人交付"
+        )
+        assert view._on_enter_token == window.enter_token

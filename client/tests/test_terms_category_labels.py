@@ -129,3 +129,21 @@ def test_the_credential_backend_row_reads_in_chinese(qapp) -> None:
 
     apply_credential_backend(label, "SomeFutureKeyring")
     assert label.text() == "SomeFutureKeyring"
+
+
+def test_the_score_bar_survives_a_non_finite_value(qapp) -> None:
+    """部件层的第二道底:min/max 会**传播** NaN 而不是把它夹住。
+
+    解析层已经拒绝了非有限值(见 test_error_dispatch),这一条挡的是任何其他
+    途径送进来的 NaN —— 一个画不出数字的部件应当画一根空条,而不是把窗口带走。
+    """
+    import math
+
+    from wuwaterm_client.ui.components import SCORE_MINIMUM, ScoreBar
+
+    bar = ScoreBar()
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar.set_score(bad)
+        assert math.isfinite(bar.score())
+    bar.set_score(float("nan"))
+    assert bar.score() == SCORE_MINIMUM

@@ -9,6 +9,7 @@ service's response (docs/api/openapi.json).
 from __future__ import annotations
 
 import asyncio
+import math
 import ssl
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -66,7 +67,17 @@ def _as_int(value: Any, field: str) -> int:
 def _as_float(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} is not a number")
-    return float(value)
+    number = float(value)
+    # NaN and the infinities are not numbers this client can render. Python's
+    # json accepts all three (they are not JSON, but the parser emits them),
+    # and they pass every check above - then reach a widget, where `round()`
+    # raises deep inside a paint or a layout, OUTSIDE the wrapper that exists
+    # to turn an unusable body into a reported error. Refusing here is what
+    # keeps that promise: the same ValueError every other malformed field
+    # raises, which `_parsed` turns into ClientError(unknown).
+    if not math.isfinite(number):
+        raise ValueError(f"{field} is not a finite number")
+    return number
 
 
 def _as_optional_str(value: Any, field: str) -> "str | None":

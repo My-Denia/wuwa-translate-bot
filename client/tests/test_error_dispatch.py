@@ -117,3 +117,33 @@ def test_every_message_in_the_taxonomy_is_distinct() -> None:
     messages = list(errors.MESSAGE_BY_CODE.values())
 
     assert len(set(messages)) == len(messages)
+
+
+# -- Codex P2 回归门(PR #63 评审发现) --------------------------------------
+
+
+def test_a_non_finite_score_is_refused_by_the_parser() -> None:
+    """NaN 不能穿过解析层进到部件里。
+
+    Python 的 json 会接受 NaN(它不是 JSON,但解析器照收),而它能通过原来的
+    类型检查;真正炸的地方是绘制期的 round(),那已经在「把不可用响应变成
+    ClientError」的包装之外,于是查词任务以未处理异常收场而不是一条内联错误。
+    """
+    import math
+
+    import pytest as _pytest
+
+    from wuwaterm_client.api import TermsResult
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        payload = {
+            "query": "x",
+            "matches": [
+                {"zh": "词", "en": "term", "category": "item",
+                 "score": bad, "reason": "exact"}
+            ],
+            "request_id": "rid",
+        }
+        with _pytest.raises(ValueError):
+            TermsResult.from_json(payload)
+        assert not math.isfinite(bad)

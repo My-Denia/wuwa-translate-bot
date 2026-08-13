@@ -58,8 +58,18 @@ def _card(title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
 
 
 class StatusView(QWidget):
-    def __init__(self, api_client: ApiClient, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        api_client: ApiClient,
+        parent: QWidget | None = None,
+        *,
+        on_enter_token: "object | None" = None,
+    ) -> None:
         super().__init__(parent)
+        # See TermsView: the credential dialog belongs to the window, so the
+        # "enter a new token" action the dispatch table assigns to a rejected
+        # credential can only be offered if the window hands down a way in.
+        self._on_enter_token = on_enter_token
         self._api_client = api_client
         self._task: asyncio.Task | None = None
         # Every refresh carries the generation it began in, and writes nothing
@@ -316,10 +326,15 @@ class StatusView(QWidget):
             self.status_label.set_text(presentation.message)
             return
         actions: tuple = ()
-        if presentation.action == error_presentation.ACTION_RETRY:
-            label = presentation.action_label
-            if label is not None:
-                actions = ((label, self._on_refresh_clicked),)
+        label = presentation.action_label
+        if presentation.action == error_presentation.ACTION_RETRY and label:
+            actions = ((label, self._on_refresh_clicked),)
+        elif (
+            presentation.action == error_presentation.ACTION_ENTER_TOKEN
+            and label
+            and self._on_enter_token is not None
+        ):
+            actions = ((label, self._on_enter_token),)
         # WITH the id, unlike the translate and lookup areas: those two render
         # it in a row of their own, so a copy here would be the second one on
         # screen. This area has no such row - a status refresh has no result
