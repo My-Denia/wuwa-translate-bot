@@ -31,6 +31,17 @@ DEFAULT_TRANSLATE_TIMEOUT_SECONDS = 60.0
 MIN_TIMEOUT_SECONDS = 1.0
 MAX_TIMEOUT_SECONDS = 600.0
 
+# Appearance is a three-state preference, not a boolean: "follow the system"
+# is a distinct choice from either fixed value, and the owner has to be able
+# to pin one when the system setting is not what they want in front of them.
+# The same three literals appear in theme.py, which deliberately imports
+# nothing from here - see the note there, and the test that compares them.
+APPEARANCE_SYSTEM = "system"
+APPEARANCE_LIGHT = "light"
+APPEARANCE_DARK = "dark"
+APPEARANCE_VALUES = (APPEARANCE_SYSTEM, APPEARANCE_LIGHT, APPEARANCE_DARK)
+DEFAULT_APPEARANCE = APPEARANCE_SYSTEM
+
 
 def app_data_dir() -> Path:
     """Per-user app data directory. ``%APPDATA%/WuwaTerm`` on Windows.
@@ -161,6 +172,21 @@ def usable_base_url(value: object) -> bool:
     return True
 
 
+def _stored_appearance(value: object) -> str:
+    """A stored appearance preference, or the default if it is not one of the
+    three the application knows.
+
+    A hand-edited file is the only way an unknown value can arrive, and the
+    answer is the same one the rest of this module gives: fall back rather
+    than carry something unusable into the UI. Unlike the address, falling
+    back here costs nothing - it is a matter of taste, and the client can
+    pick for itself.
+    """
+    if isinstance(value, str) and value in APPEARANCE_VALUES:
+        return value
+    return DEFAULT_APPEARANCE
+
+
 def _stored_base_url(value: object) -> str | None:
     """A stored address, or None when there is not a usable one.
 
@@ -194,6 +220,7 @@ class ClientConfig:
     base_url: str | None = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     translate_timeout_seconds: float = DEFAULT_TRANSLATE_TIMEOUT_SECONDS
+    appearance: str = DEFAULT_APPEARANCE
 
     @property
     def is_configured(self) -> bool:
@@ -204,8 +231,9 @@ class ClientConfig:
     def load(cls, base_dir: Path | None = None) -> "ClientConfig":
         """Load from disk. Never raises.
 
-        Timeouts fall back to their defaults, which are a matter of taste and
-        which the client can pick for itself. The address does not: anything
+        Timeouts and the appearance preference fall back to their defaults,
+        which are a matter of taste and which the client can pick for
+        itself. The address does not: anything
         missing, unreadable, malformed or unusable leaves ``base_url`` as
         ``None`` and the client unconfigured.
 
@@ -237,6 +265,8 @@ class ClientConfig:
                 filtered[name] = _sane_timeout(filtered[name], fallback)
         if "base_url" in filtered:
             filtered["base_url"] = _stored_base_url(filtered["base_url"])
+        if "appearance" in filtered:
+            filtered["appearance"] = _stored_appearance(filtered["appearance"])
         try:
             return cls(**filtered)
         except TypeError:

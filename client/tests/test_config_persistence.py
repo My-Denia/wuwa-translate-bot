@@ -54,6 +54,7 @@ sys.stdout.write(
             "base_url": config.base_url,
             "request_timeout_seconds": config.request_timeout_seconds,
             "translate_timeout_seconds": config.translate_timeout_seconds,
+            "appearance": config.appearance,
             "is_configured": config.is_configured,
         }
     )
@@ -77,6 +78,7 @@ def test_a_saved_configuration_is_really_on_disk(tmp_path: Path) -> None:
         base_url="https://api.example.invalid/wuwaterm-api",
         request_timeout_seconds=11.0,
         translate_timeout_seconds=45.0,
+        appearance="dark",
     )
     config.save(base_dir=tmp_path)
 
@@ -86,6 +88,7 @@ def test_a_saved_configuration_is_really_on_disk(tmp_path: Path) -> None:
         "base_url": "https://api.example.invalid/wuwaterm-api",
         "request_timeout_seconds": 11.0,
         "translate_timeout_seconds": 45.0,
+        "appearance": "dark",
     }
     # Nothing else: an atomic write leaves no temporary file behind.
     assert sorted(item.name for item in tmp_path.iterdir()) == [CONFIG_FILE_NAME]
@@ -103,6 +106,7 @@ def test_a_new_process_reads_back_what_this_one_saved(tmp_path: Path) -> None:
         base_url="https://api.example.invalid",
         request_timeout_seconds=7.5,
         translate_timeout_seconds=42.0,
+        appearance="dark",
     )
     saved.save(base_dir=tmp_path)
 
@@ -121,6 +125,7 @@ def test_a_new_process_reads_back_what_this_one_saved(tmp_path: Path) -> None:
         "base_url": "https://api.example.invalid",
         "request_timeout_seconds": 7.5,
         "translate_timeout_seconds": 42.0,
+        "appearance": "dark",
         "is_configured": True,
     }
 

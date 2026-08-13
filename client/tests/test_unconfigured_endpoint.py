@@ -121,15 +121,25 @@ def test_every_request_path_refuses_while_unconfigured(call: str) -> None:
 
 def test_the_refusal_tells_the_owner_where_to_fix_it() -> None:
     """A stable code is for the program; the message is for the person, and
-    "an unexpected error occurred" would send them nowhere."""
+    "an unexpected error occurred" would send them nowhere.
+
+    The message is written in the language the window is written in, so what
+    is checked here is the word the owner will actually look for on screen -
+    the name of the place this is fixed. The invariant is unchanged: the
+    refusal has to name where to go, and it has to be told apart from the two
+    refusals that send the owner somewhere else.
+    """
     message = message_for(ERROR_NOT_CONFIGURED)
 
     assert message == strings.ERROR_MSG_NOT_CONFIGURED
-    assert "Settings" in message
+    assert "设置" in message
     assert message != strings.ERROR_MSG_UNKNOWN
     # Distinct from the refusal for an address that IS set but is unsafe:
     # the two send the owner to different actions.
     assert message != strings.ERROR_MSG_INSECURE_ENDPOINT
+    # ...and the third pair, so that all three stay distinct rather than two
+    # of them collapsing into one wording nobody can act on.
+    assert strings.ERROR_MSG_UNKNOWN != strings.ERROR_MSG_INSECURE_ENDPOINT
 
 
 def test_an_unconfigured_client_becomes_configured_through_settings() -> None:

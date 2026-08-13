@@ -1,65 +1,129 @@
-# WuwaTerm desktop client
+# WuwaTerm 桌面客户端
 
-A Windows desktop client for the wuwaterm HTTP API. It only calls the API
-and renders what comes back — it never re-implements dictionary lookup,
-direction detection, or any other translation pipeline step.
+面向 Windows 的 wuwaterm 桌面客户端。它只调用 HTTP 接口并展示接口返回的结果 ——
+词典查找、方向判定以及翻译流水线的任何一步,都不在这里重新实现一遍。
 
-This package is not published anywhere (no PyPI, no package registry). It
-lives entirely under `client/` with its own `pyproject.toml` and is not part
-of the `wuwaterm` server wheel.
+本包不发布到任何包索引(没有 PyPI,没有其他仓库)。它完整地住在 `client/` 下,
+有自己的 `pyproject.toml`,不属于 `wuwaterm` 服务端 wheel 的一部分。
 
-## What it does
+界面语言是中文,且只有中文。
 
-- Translates plain text through the shared dictionary-first pipeline
-  (`POST /v1/translations`), with an automatic or forced direction.
-- Looks up official dictionary terms (`GET /v1/terms`).
-- Shows service status: version, data profile, data commit, term count, and
-  whether a translation model is configured (`GET /v1/meta`).
-- Stores exactly one device credential in the Windows Credential Manager via
-  `keyring`. The credential is never written to a config file, and never
-  written to disk in plain text by this application at all.
+## 它能做什么
 
-## Configuring the server address
+- 通过共享的「词典优先」流水线翻译文本(`POST /v1/translations`),方向可自动判定,
+  也可强制指定。
+- 查询官方词典术语(`GET /v1/terms`),**边打边搜**。
+- 展示服务状态:版本、数据剖面、数据提交号、术语条数,以及是否配置了翻译模型
+  (`GET /v1/meta`)。
+- 在 Windows 凭据管理器中保存**一个**设备令牌(经 `keyring`)。该令牌不会写进配置
+  文件,这个程序也从不以明文把它写到磁盘上的任何地方。
 
-Settings → Server address takes one value: the base address of the configured
-secure endpoint the service is published on. Everything else about the network
-path is the deployment's business — this client only makes HTTPS requests to
-the address you give it, and the API contract does not encode the path in any
-way, so changing how the service is published changes nothing here except this
-one string.
+## 界面怎么用
 
-**There is no default address.** A fresh installation — and any launch where
-the settings file cannot be read — starts *unconfigured*: the main window
-shows `Server address: not configured` above the tabs, and every request is
-refused with "No server address is configured, so no request was made. Set the
-server address in Settings." instead of being sent anywhere. Earlier versions
-substituted a development address on this machine whenever the setting was
-missing, which turned "your setting is gone" into "the server is unreachable" —
-a confident answer to the wrong question. When an address *is* configured, that
-same line names it, so which server this client is talking to is always on
-screen.
+窗口左侧是一列导航,三个功能区各有各的位置,互不挤占:
 
-Two forms are accepted, and nothing else:
+| 区域 | 用途 | 快捷键 |
+| --- | --- | --- |
+| 术语查词 | 查官方译名,启动后光标就在这里 | `Ctrl+1` |
+| 文本翻译 | 整段文本翻译,可能调用模型 | `Ctrl+2` |
+| 服务状态 | 服务端版本与数据信息 | `Ctrl+3` |
 
-- `https://<host>[:<port>][/<path prefix>]` — any host. The server
-  certificate is verified on every request, always. There is no setting,
-  command-line argument or environment variable in this application that
-  turns verification off.
-- `http://127.0.0.1:<port>` (or `localhost`/`::1`) — this machine only, for a
-  development service running on your own computer. Nothing leaves the host,
-  so there is nothing to protect in transit. `http://127.0.0.1:8788` is the
-  example the settings field shows as a hint; it is not filled in for you and
-  is never used unless you type it.
+`Ctrl+K` 把焦点移到当前区域的输入框。
 
-Plain `http://` to any other host is refused, in the settings dialog and again
-in the transport itself before a request is built: the device token travels in
-a request header on every call, and an address typed or edited by hand is
-exactly how it would otherwise end up crossing a network in the clear.
+导航栏底部常驻一枚状态芯片,写明这个客户端在跟哪个地址说话,或者说明它还没有地址。
+芯片上写「已配置」而不是「已连接」:在第一次请求成功之前,客户端从未验证过连通性,
+写「已连接」会是一句没有根据的话。
 
-The port is whatever the deployment configured (`WUWATERM_API_PORT`, 8788 by
-default) when you are talking to a service on this machine; for a published
-endpoint the address is whatever the operator gives you, and it is normally
-just the host name.
+### 术语查词:边打边搜
+
+输入即查,不必按回车。约 220 毫秒的停顿之后请求才发出,所以连续打字只会产生一次查询。
+四种情况下不发请求:输入为空、与上次查的完全相同、尚未配置服务器地址,以及输入长到
+像一句话而不是一个术语(这时会提示改用文本翻译区)。
+
+新的输入到达时,上一次还在路上的查询会被取消并被替换 —— 旧查询的任何结局都不会画到
+界面上,所以先发后到的回复不会覆盖新结果。刚查过的词会被记住(最多 32 条),退格回到
+它时不再发请求;**更换服务器地址会清空这份记忆**,因为词典属于某一个具体的服务。
+
+「搜索」按钮和回车键是同一个动作:**立刻查,跳过等待,并且绕过「和上次相同就不查」的
+判断** —— 它同时也是重试入口。请求进行中按钮不会变灰,取消替换让重复点击是安全的。
+
+如果服务端因为请求过密而拒绝,客户端会自动退避(2 秒、4 秒、8 秒封顶)并暂停自动查询,
+面板上给出「恢复自动查询」;连续两次连不上服务器也会这样暂停。
+
+查不到时,空结果卡上会给一个按钮,把刚才那个词直接送到文本翻译区并填好,不必重新输入。
+
+### 翻译结果:这条答案是哪来的
+
+译文旁边有一枚徽章,用**形状、颜色、文字三重**标示来源,任何一种编码单独失效
+(色觉障碍、灰度截图)都还能分辨:
+
+| 徽章 | 含义 |
+| --- | --- |
+| 实心圆点 · 绿 | 词典精确匹配 |
+| 空心圆环 · 琥珀 | 词典模糊匹配 |
+| 圆角方块 · 蓝 | 模型翻译 |
+| 横杠 · 灰 | 无需翻译 |
+
+如果这次翻译没有匹配到任何官方术语,会**再加**一枚琥珀色徽章(「未匹配官方术语」),
+并在译文下方说明该结果不具权威性。它是附加信息,永远不会替换掉来源徽章。
+
+结果块最下面单独一行是请求 ID,右侧可一键复制。**成功和失败用的是同一个控件、同一个
+位置** —— 出了事要拿什么去问运营方,不该因为成败而换地方。
+
+### 出错的时候不会弹窗打断
+
+失败以三种方式就地呈现,取决于错在哪里:
+
+- **区域提示条**:这次请求失败了(连不上、超时、服务端错误、模型不可用或额度用尽、
+  请求过密、凭据被拒),附带「重试」或「输入新令牌」。
+- **字段提示**:错在你刚填的那一格(请求不合法、文本过长、内容过大),输入框描边转红,
+  下方一行说明,焦点回到该格。
+- **全局提示条**:跨区域的事实(尚未配置地址、地址不受保护、设置没能写盘)。
+
+加载中永远是顶部一条细进度线加一行状态文字,不是遮罩,也不是模态。取消不是错误,
+它只在状态行留一句话,不着红色。
+
+整个程序只剩两个会打断操作的对话框:**遗忘令牌的确认**(不可撤销,需要一次真决定)
+和**关于**。
+
+### 外观
+
+「设置 → 外观」有三档:跟随系统、亮色、暗色。默认跟随系统,系统主题切换时窗口会跟着变;
+选定亮色或暗色之后,系统再变也不会顶掉你的选择。这个偏好存在 `config.json` 里。
+
+界面只用 Windows 自带字体(微软雅黑 UI、Segoe UI、宋体等),不下载任何字体或图标资源,
+所有图形都由样式表绘制 —— 客户端在本机自足,离线可用。
+
+## 配置服务器地址
+
+「设置 → 服务器地址」只接受一个值:服务发布所在的那个受保护端点的基地址。网络路径的其他
+一切都是部署方的事 —— 这个客户端只对你给的地址发 HTTPS 请求,而且接口契约里不编码任何
+路径信息,所以改变服务的发布方式,在这里只需要改这一个字符串。
+
+**没有默认地址。** 全新安装,以及任何一次读不到设置文件的启动,都从**未配置**状态开始:
+状态芯片写「未配置」,顶部有一条不可关闭的提示条说明不会发出任何请求,当前区域给出
+三步清单(填地址 / 录令牌 / 开始查询),每一步标出是否已完成。此时提交按钮是灰的,
+自动查询也不会启动。早先的版本会在设置丢失时悄悄换上一个本机开发地址,于是「你的设置没了」
+被显示成「服务器连不上」—— 一个对错误问题给出的确信回答。地址配好之后,那一行就写明它是谁。
+
+只接受两种形式,没有第三种:
+
+- `https://<主机>[:<端口>][/<路径前缀>]` —— 任何主机。每次请求都会验证服务器证书,
+  始终如此。这个程序里没有任何设置、命令行参数或环境变量能把验证关掉。
+- `http://127.0.0.1:<端口>`(或 `localhost`/`::1`)—— **仅限本机**,用于跑在你自己电脑上的
+  开发服务。数据不离开本机,也就没有需要在传输中保护的东西。
+
+设置字段空着时显示的 `https://example.com/wuwaterm-api` 只是一个中性示例,不会替你填上,
+你不输入它就永远不会被使用。它刻意不再是本机开发地址:那个地址正是早先版本在设置丢失时
+悄悄替换上去的那一个,把它摆在空字段里等于把刚删掉的建议又递回给正在决定填什么的人。
+
+指向其他主机的明文 `http://` 会被拒绝 —— 在设置对话框里拒绝一次,在传输层构建请求之前
+再拒绝一次:设备令牌在每一次调用中都随请求头发出,而手工输入或编辑的地址,正是它可能
+以明文穿过网络的那条路。被拒绝时**不会半应用**:超时、地址和磁盘上的文件都不会被改动,
+对话框保持打开,错误就写在出错的那一格下面。
+
+端口由部署方配置(`WUWATERM_API_PORT`,默认 8788),这是在和本机服务通信时;
+对于已发布的端点,地址以运营方给你的为准,通常就是一个主机名。
 
 <!-- operations-note: the single place this client's documentation is allowed
      to name the host administration channel, so that nobody re-introduces it
@@ -70,118 +134,93 @@ just the host name.
 > using it — the application starts no such process, manages no keys, and
 > needs nothing running beside it. See `docs/deployment.md`.
 
-## Where the settings are kept
+## 设置存在哪里
 
-The non-secret settings — the server address and the two timeouts — live in
-`%APPDATA%\WuwaTerm\config.json`. That is the *roaming* user profile, which a
-restart preserves and which is not a temporary location. The device token is
-not in that file and never has been; it lives in the Windows Credential
-Manager.
+非机密的设置 —— 服务器地址、两个超时、外观偏好 —— 存在
+`%APPDATA%\WuwaTerm\config.json`。那是**漫游**用户配置目录,重启后仍在,也不是临时位置。
+设备令牌不在这个文件里,从来也没有过;它在 Windows 凭据管理器中。
 
-- **A save cannot leave a half-written file.** It writes a temporary file in
-  the same directory, flushes it, and only then replaces the settings file in
-  one step; the settings file is never opened for truncation. An interrupted
-  save therefore leaves either the whole previous file or the whole new one —
-  never a truncated one, which the client would read as unusable and which
-  would now cost you the server address rather than being papered over. This
-  is about an interrupted *write*; it is not a claim about what a power cut
-  leaves on the disk platters.
-- **The file is not recreated for you.** If it is deleted — by hand, or by a
-  disk-cleanup tool — the client starts unconfigured and says so on screen;
-  enter the address again in Settings and it is written back. This is not
-  hypothetical: the file went missing on the owner's machine across a Windows
-  restart on 2026-08-12, while the stored device credential was unaffected.
-- **A hand-edited file is validated, not trusted.** An address the client will
-  not use, one it cannot parse, or JSON it cannot read leaves the client
-  unconfigured; a timeout outside 1–600 seconds is clamped, and a
-  non-numeric one falls back to the default. Nothing from that file reaches
-  the HTTP layer unchecked.
+- **一次保存不会留下写了一半的文件。** 它先在同一目录写一个临时文件,刷盘,然后一步
+  替换掉设置文件;设置文件从不以截断方式打开。被中断的保存因此只会留下完整的旧文件或
+  完整的新文件,不会留下截断的那种 —— 客户端会把截断的文件判定为不可用,而那样丢掉的
+  是服务器地址。这说的是被中断的**写入**,不是断电之后磁盘盘片上还剩什么的断言。
+- **文件不会被自动重建。** 如果它被删掉(手动删,或被磁盘清理工具删),客户端会以未配置
+  状态启动并在界面上说明;在设置里重新填一次地址,它就会被写回。这不是假想:2026-08-12
+  这个文件就在一次 Windows 重启后从机主的机器上消失了,而存好的设备凭据毫发无伤。
+- **手工编辑过的文件会被校验,而不是被信任。** 客户端不会使用的地址、它解析不了的地址,
+  或者读不懂的 JSON,都会让客户端停在未配置状态;超出 1–600 秒的超时会被夹到范围内,
+  非数字的超时回落到默认值;无法识别的外观取值回落到「跟随系统」。这个文件里的东西,
+  没有一样能不经检查就到达 HTTP 层。
 
-## Timeouts, retries and reconnection
+## 超时、重试与重连
 
-There is no background connection to lose and nothing to reconnect: each
-action opens an HTTP request on demand through a shared, pooled `httpx` client
-and finishes when the response arrives. Connections are pooled and reused;
-when a pooled connection has been closed by the other side, the next request
-establishes a new one.
+没有需要维持的后台连接,也就没有什么需要重连:每个动作按需打开一个 HTTP 请求,经由共享的
+连接池化 `httpx` 客户端发出,响应到达即结束。连接会被池化复用;当池中的连接已被对端关闭时,
+下一个请求会新建一条。
 
-- **Two timeouts, both configurable.** `request_timeout_seconds` (default
-  10s, Settings → Request timeout) applies to term lookups and status
-  refreshes; `translate_timeout_seconds` (default 60s) applies to
-  `POST /v1/translations`, which may be waiting on a translation model. Values
-  from the settings dialog and from a hand-edited config file are clamped to
-  1–600 seconds.
-- **They are per-operation limits, not a total deadline.** `httpx` applies the
-  value separately to connecting, writing, reading and waiting for a pooled
-  connection, so it bounds how long the client waits *without progress*, not
-  the wall-clock length of the whole call: something that keeps sending bytes
-  can legitimately keep a request open past the configured number. Not the
-  service itself, though — it enforces its own deadline as real elapsed time
-  and answers 504 — so a call that runs long in this way means something
-  between this computer and the service, not the service.
-- **Which limit expires first, on the shipped defaults.** The client's 60s
-  translate timeout is shorter than the service's own request deadline
-  (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS`, 90s by default), so a translation
-  that simply takes too long ends as a client-side timeout, not as the
-  service's 504. The service's deadline becomes the binding one only if you
-  raise the client's translate timeout above it (the client allows up to
-  600s).
-- **A timeout is reported, never retried.** The request stops and the view
-  shows "The request timed out." This client does not retry automatically:
-  a translation request that has already reached the service may have spent
-  model budget, and silently sending it again is not a decision an application
-  should take for you. Press the button again to make a new request.
-- **Unreachable service.** A connection failure is reported as
-  "Could not reach the server…" and leaves the client usable; the next
-  request tries again from scratch. No state is cached across the failure.
-- **Cancellation stops the waiting, not the work.** Translate → Cancel ends
-  this client's request: the status line says the request was cancelled and
-  the buttons return to their normal state. Whether it stops anything else
-  depends on how early it lands. While the request is still being handed over
-  — waiting for a connection, connecting, or sending — the service does not
-  yet have a whole request to act on, so nothing is translated and nothing is
-  spent. Once it does have the whole request — and your text is small, so that
-  window is short — Cancel no longer reaches the service: it is not told you
-  stopped waiting, and it finishes the request, recording it as an ordinary
-  completed one. If that request needed the translation model, the model call
-  runs to the end and is paid for whether or not you are still waiting; a
-  dictionary hit never reaches the model and costs nothing either way.
-  Cancelling then frees the application without stopping the work, and without
-  un-spending anything the request had already committed. The answer is
-  discarded unread, and with it the request id, so such a request is not one
-  you can quote to an operator afterwards. Pressing Translate again makes a new
-  request, and one that reaches the model pays again.
+- **两个超时,都可配置。** `request_timeout_seconds`(默认 10 秒,设置 → 请求超时)用于
+  术语查询与状态刷新;`translate_timeout_seconds`(默认 60 秒)用于 `POST /v1/translations`,
+  因为它可能在等一个翻译模型。来自设置对话框和手工编辑的配置文件的值都会被夹到 1–600 秒。
+- **它们是分阶段的限额,不是总的截止时间。** `httpx` 把这个值分别应用到连接、写入、读取
+  和等待池中连接上,所以它约束的是**没有进展**的等待时长,而不是整个调用的挂钟时间:
+  一个持续在传字节的对端,可以合法地把请求保持得比这个数字更久。服务端本身不是这样 ——
+  它按真实流逝时间执行自己的截止并回答 504 —— 所以一个以这种方式跑很久的调用,说明问题
+  在这台电脑和服务之间,而不在服务本身。
+- **在出厂默认值下,哪个先到期。** 客户端 60 秒的翻译超时短于服务端自己的请求截止
+  (`WUWATERM_API_REQUEST_TIMEOUT_SECONDS`,默认 90 秒),所以一个单纯耗时过长的翻译会以
+  客户端超时收场,而不是服务端的 504。只有当你把客户端的翻译超时调到它之上时(客户端允许
+  到 600 秒),服务端的截止才会成为先到期的那个。
+- **超时会被报告,绝不自动重试。** 请求停止,界面显示「请求超时」。这个客户端不自动重试:
+  一个已经到达服务的翻译请求可能已经花掉了模型额度,而悄悄再发一次不是一个程序该替你做的
+  决定。再按一次按钮就是一次新的请求。
+- **连不上服务。** 连接失败会被报告为「无法连接到服务器…」,客户端仍然可用;下一次请求从头
+  再来。这次失败不会缓存任何状态。
+- **取消停下的是等待,不是工作。** 翻译 → 取消结束的是这个客户端的这次请求:状态行说明请求
+  已被取消,按钮回到常态。它是否还停下了别的什么,取决于它落得多早。在请求还在交付途中时
+  —— 等连接、正在连接、正在发送 —— 服务端手上还没有一个完整的请求可以处理,所以什么都没被
+  翻译,也没有花费。一旦它拿到了完整的请求(而你的文本很短,所以这个窗口很短),取消就不再
+  能够触及服务端:它不会被告知你不等了,它会把这次请求做完,并按一次普通的完成来记录。
+  如果这次请求需要翻译模型,那次模型调用会跑到底并被计费,无论你是否还在等;而词典命中根本
+  不会走到模型那一步,无论如何都不花钱。这时取消让程序腾出手来,但没有停下那份工作,也没有
+  退回请求已经承诺出去的任何开销。答案被读都不读地丢弃,请求 ID 也随之丢弃,所以这样的一次
+  请求事后无法拿去向运营方查询。再按一次翻译是一次新的请求,而到达模型的那一次会再付一次钱。
 
-## Getting and storing a device credential
+上面这一段的语义在英文版本里被仓库的门逐字钉住,原文一并保留在这里,以免中文改写在将来
+悄悄偏离它:
 
-There is no self-registration screen, and the service never generates or
-prints credential material. The operator of the service generates a secret,
-registers it against a device with `wuwaterm-api device issue` (which reads
-the secret from standard input), and hands you the resulting token out of
-band. The token is `wtd1.<device-id>.<that secret>`; the server keeps only a
-salted scrypt verifier of the secret, so nobody can recover the token from
-the server later — if it is lost, the operator revokes that device and
-registers a new one.
+<!-- 下面每一句都必须整句留在同一行:tests/test_client_documentation_claims.py
+     把文本的空白折叠后逐句查找,而 markdown 的引用符会留在折叠结果里,
+     一句被折行就会在中间多出一个 ">" 而找不到。 -->
+> **Cancellation stops the waiting, not the work.**
+> While the request is still being handed over, the service does not yet have a whole request to act on, so nothing is translated and nothing is spent.
+> Once it does have the whole request, Cancel no longer reaches the service: it finishes the request and records it as an ordinary completed one.
+> Cancelling then frees the application without stopping the work, and without un-spending anything the request had already committed.
+> If that request needed the model, the model call is paid for whether or not you are still waiting; a dictionary hit never reaches the model and costs nothing either way.
 
-The secret is at least 32 characters of printable ASCII with no spaces, so
-the token is always a single line that can be pasted as-is. On first launch,
-or later from
-Settings → Enter/Change token, paste it in. The client stores it immediately
-in the Windows Credential Manager and never displays it again.
+## 获取与保存设备凭据
 
-A first launch therefore asks for two things, in two places: the device token
-in the welcome dialog, and the server address in Settings. The window says
-`Server address: not configured` until the second one is done; the credential
-and the address are stored separately and are lost separately, so it is normal
-to be asked for one and not the other.
+没有自助注册界面,服务端也从不生成或打印凭据材料。服务的运营方生成一个密钥,用
+`wuwaterm-api device issue`(从标准输入读取该密钥)把它登记到某台设备上,然后通过带外渠道
+把得到的令牌交给你。令牌形如 `wtd1.<设备 id>.<那个密钥>`;服务端只保存该密钥加盐后的
+scrypt 验证值,所以事后没有人能从服务端把令牌还原出来 —— 一旦丢失,运营方吊销那台设备并
+重新登记一台。
 
-## Removing the stored credential
+密钥至少 32 个可打印 ASCII 字符且不含空格,所以令牌总是可以整行粘贴的一行。首次启动时,
+或之后从「设置 → 输入 / 更改令牌」,把它粘进去即可。旁边的「显示」可以切换明文,便于核对
+首尾。令牌为空时「继续」不可点。客户端会立即把它存进 Windows 凭据管理器,并且不再显示它。
+如果凭据管理器当时不可用,对话框会就地说明并保持打开,可以重试 —— 不会因此把程序关掉。
 
-Settings → Forget token removes the credential from the Windows Credential
-Manager. You can also remove it directly from Windows: open Credential
-Manager → Windows Credentials, find the WuwaTerm entry, and remove it.
+因此首次启动会在两个地方问你两样东西:欢迎对话框里的设备令牌,和设置里的服务器地址。
+在后者完成之前,窗口一直显示未配置;凭据和地址是分开保存、也会分开丢失的,所以只被问到
+其中一个是正常的。
 
-## Building
+## 删除已保存的凭据
+
+「设置 → 遗忘令牌」会把凭据从 Windows 凭据管理器中删除,并要求确认一次(这是本程序仅存的
+两个打断式对话框之一,因为它不可撤销)。你也可以直接从 Windows 删除:打开凭据管理器 →
+Windows 凭据,找到 WuwaTerm 条目并删除。
+
+## 构建
 
 ```
 py "-V:Astral\CPython3.12.13" -m venv client\.venv
@@ -189,15 +228,16 @@ client\.venv\Scripts\python.exe -m pip install -e "client[dev,build]"
 client\build.ps1
 ```
 
-This is a one-folder PyInstaller build; the result is
-`client\dist\WuwaTerm\WuwaTerm.exe`. No code signing is performed.
+这是一次 one-folder 的 PyInstaller 构建,产物是 `client\dist\WuwaTerm\WuwaTerm.exe`。
+不做代码签名。样式表等运行时资源必须列在 `client\WuwaTerm.spec` 的 `RESOURCE_FILES` 里
+才会进入产物;构建脚本会在结束前断言产物中确实存在样式表,`client/tests/test_theme_resources.py`
+则在测试阶段断言 spec 覆盖了 `resources/` 下的每一个文件。
 
-## Running tests
+## 运行测试
 
 ```
-client\.venv\Scripts\python.exe -m pytest -q
+client\.venv\Scripts\python.exe -m pytest
 ```
 
-Tests use a mocked HTTP transport and an in-memory credential-store stand-in;
-no network access, no running server, and no real Windows Credential
-Manager writes are required.
+测试使用被模拟的 HTTP 传输和一个内存中的凭据存储替身:不需要网络、不需要运行中的服务端,
+也不会真的写入 Windows 凭据管理器。

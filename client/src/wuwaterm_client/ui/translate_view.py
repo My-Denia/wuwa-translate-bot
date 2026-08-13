@@ -1,22 +1,65 @@
-"""Multi-line source input, direction selector, translate/cancel, result."""
+"""Source text in, translation out - and every outcome of that round trip.
+
+Three things this view has to get right, none of which are about layout.
+
+The first is WHERE an outcome lands. A translation can end in a failure the
+owner has to act on, in one they have to fix in the box in front of them, or
+in a cancellation they asked for themselves. ``ui/error_presentation`` decides
+which of those each of the fifteen codes is; this file only owns the widgets
+those surfaces are drawn on. A code can therefore never be handled here in a
+way that contradicts how the term-lookup area handles the same code.
+
+The second is that the request id is rendered by ONE widget in ONE place,
+whether the request succeeded, failed, or produced no id at all. It is the
+only handle the owner has when asking an operator what happened on the other
+side, and a row that appears for one outcome and not for another is a row
+nobody learns to look at. With no id there is a placeholder, never a gap.
+
+The third is ordering. ``api._request`` turns a cancellation into an ordinary
+``ClientError``, so a request stopped because the server address changed comes
+back looking like a perfectly renderable outcome. Every write to a widget
+below is therefore guarded by a generation counter: a coroutine started before
+the last reset renders nothing at all, rather than writing the previous
+server's cancellation over a view that has already been cleared for a new one.
+"""
 
 from __future__ import annotations
 
 import asyncio
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import strings
 from ..api import ApiClient, TranslationResult
-from ..errors import ERROR_CANCELLED, ClientError, error_status
+from ..errors import ERROR_CANCELLED, ClientError
+from .components import (
+    Banner,
+    FieldError,
+    KindBadge,
+    ProgressLine,
+    StatusStrip,
+    mark_field_invalid,
+)
+from .error_presentation import (
+    ACTION_ENTER_TOKEN,
+    ACTION_OPEN_SETTINGS,
+    ACTION_RETRY,
+    SURFACE_FIELD,
+    SURFACE_STATUS,
+    ErrorPresentation,
+    presentation_for,
+)
 
 DIRECTION_AUTO = "auto"
 DIRECTION_TO_EN = "en"
@@ -35,24 +78,111 @@ _KIND_LABELS = {
     "noop": strings.KIND_LABEL_NOOP,
 }
 
+# The dictionary-miss mark is a SECOND badge, never a replacement for the
+# kind badge: "no official term stood behind this" is true or false
+# independently of which of the four kinds produced the text, and collapsing
+# the two dimensions into one badge would lose whichever one lost the fight.
+#
+# The kind passed here is not a claim that the match was fuzzy. It selects the
+# only badge shape the stylesheet draws in the warn hue - a hollow ring - and
+# that is the shape the design assigns to this warning.
+_MISS_BADGE_KIND = "fuzzy"
+
+
+class _ElidedValueLabel(QLabel):
+    """A label that shortens its text in the middle and keeps the whole of it.
+
+    Used for the request id, where the two ends are what an owner reads back
+    to an operator and the middle is filler. The untruncated value stays
+    reachable through the tooltip and through `full_text`, so nothing that is
+    shortened on screen is actually lost.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        # Ignored, not Preferred: the label must be allowed to be narrower
+        # than its text, which is the only condition under which eliding does
+        # anything at all.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def full_text(self) -> str:
+        """The value before it was shortened to fit."""
+        return self._full_text
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text)
+        self._apply_elide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        metrics = self.fontMetrics()
+        available = max(self.width(), 0)
+        if available <= 0:
+            self.setText(self._full_text)
+            return
+        self.setText(
+            metrics.elidedText(
+                self._full_text, Qt.TextElideMode.ElideMiddle, available
+            )
+        )
+
 
 class TranslateView(QWidget):
-    def __init__(self, api_client: ApiClient, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        api_client: ApiClient,
+        parent: QWidget | None = None,
+        *,
+        on_open_settings: "object | None" = None,
+        on_enter_token: "object | None" = None,
+    ) -> None:
         super().__init__(parent)
         self._api_client = api_client
         self._task: asyncio.Task | None = None
+        # Bumped every time the view starts caring about a different request.
+        # A coroutine compares the value it captured against this one before
+        # touching a widget; see the module docstring.
+        self._generation = 0
+        self._last_request: tuple[str, str | None] | None = None
+        self._request_id: str | None = None
+        # Supplied by whoever owns the settings and token flows. An action
+        # with no handler is left off the banner rather than drawn as a
+        # button that does nothing when pressed.
+        self._on_open_settings = on_open_settings
+        self._on_enter_token = on_enter_token
+
+        # A hairline at the top of the area, never a modal and never an
+        # overlay: the owner keeps reading and editing while a request runs.
+        self.progress_line = ProgressLine(self)
+
+        self.banner = Banner(self)
 
         self.input_edit = QPlainTextEdit(self)
         self.input_edit.setPlaceholderText(strings.INPUT_PLACEHOLDER)
+        # Editing the text is the fix for every field-level error, so the
+        # first keystroke takes the red outline back off.
+        self.input_edit.textChanged.connect(self._on_input_changed)
+
+        self.field_error = FieldError(self)
 
         self.direction_combo = QComboBox(self)
         for value, label in _DIRECTION_ITEMS:
             self.direction_combo.addItem(label, value)
 
         self.translate_button = QPushButton(strings.TRANSLATE_BUTTON, self)
+        self.translate_button.setObjectName("primaryButton")
         self.translate_button.clicked.connect(self._on_translate_clicked)
 
+        # Always present, disabled while idle. Appearing only during a request
+        # would move the whole button row sideways at the exact moment the
+        # owner is reaching for it.
         self.cancel_button = QPushButton(strings.CANCEL_BUTTON, self)
+        self.cancel_button.setObjectName("secondaryButton")
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
         self.cancel_button.setEnabled(False)
 
@@ -60,64 +190,98 @@ class TranslateView(QWidget):
         self.result_edit.setReadOnly(True)
         self.result_edit.setPlaceholderText(strings.RESULT_PLACEHOLDER)
 
-        self.status_label = QLabel(self)
+        self.kind_badge = KindBadge(self)
+        self.kind_badge.setVisible(False)
+        self.miss_badge = KindBadge(self)
+        self.miss_badge.setVisible(False)
+
+        self.miss_note = QLabel(self)
+        self.miss_note.setObjectName("emptySubtitle")
+        self.miss_note.setWordWrap(True)
+        self.miss_note.setVisible(False)
+
+        self.request_id_label = _ElidedValueLabel(self)
+        self.request_id_label.setObjectName("monoLabel")
+        self.request_id_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.request_id_copy_button = QPushButton(
+            strings.REQUEST_ID_COPY_BUTTON, self
+        )
+        self.request_id_copy_button.setObjectName("linkButton")
+        self.request_id_copy_button.clicked.connect(self._on_copy_request_id_clicked)
+
+        # What cancelling did and did not do. Kept apart from the status line
+        # so the status line can stay the one-line terminal word.
+        self.cancel_note = QLabel(self)
+        self.cancel_note.setObjectName("emptySubtitle")
+        self.cancel_note.setWordWrap(True)
+        self.cancel_note.setVisible(False)
+
+        self.status_label = StatusStrip(self)
 
         input_label = QLabel(strings.INPUT_LABEL, self)
         direction_label = QLabel(strings.DIRECTION_LABEL, self)
         result_label = QLabel(strings.RESULT_LABEL, self)
+        request_id_row_label = QLabel(strings.REQUEST_ID_ROW_LABEL, self)
 
-        direction_row = QHBoxLayout()
-        direction_row.addWidget(direction_label)
-        direction_row.addWidget(self.direction_combo)
-        direction_row.addStretch(1)
+        source_row = QHBoxLayout()
+        source_row.addWidget(input_label)
+        source_row.addStretch(1)
+        source_row.addWidget(direction_label)
+        source_row.addWidget(self.direction_combo)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.translate_button)
         button_row.addWidget(self.cancel_button)
         button_row.addStretch(1)
 
+        result_row = QHBoxLayout()
+        result_row.addWidget(result_label)
+        result_row.addWidget(self.kind_badge)
+        result_row.addWidget(self.miss_badge)
+        result_row.addStretch(1)
+
+        request_id_row = QHBoxLayout()
+        request_id_row.addWidget(request_id_row_label)
+        request_id_row.addWidget(self.request_id_label, 1)
+        request_id_row.addWidget(self.request_id_copy_button)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(input_label)
+        layout.addWidget(self.progress_line)
+        layout.addWidget(self.banner)
+        layout.addLayout(source_row)
         layout.addWidget(self.input_edit)
-        layout.addLayout(direction_row)
+        layout.addWidget(self.field_error)
         layout.addLayout(button_row)
-        layout.addWidget(result_label)
+        layout.addLayout(result_row)
         layout.addWidget(self.result_edit)
+        layout.addWidget(self.miss_note)
+        layout.addLayout(request_id_row)
+        layout.addWidget(self.cancel_note)
         layout.addWidget(self.status_label)
 
-    def _selected_direction(self) -> str | None:
-        value = self.direction_combo.currentData()
-        if value == DIRECTION_AUTO:
-            return None
-        return value
+        self._render_request_id(None)
 
-    def _on_translate_clicked(self) -> None:
-        text = self.input_edit.toPlainText()
-        if not text.strip():
-            return
-        self._set_busy(True)
-        self._task = asyncio.ensure_future(
-            self._run_translate(text, self._selected_direction())
-        )
-        # A task cancelled before its first step never runs its own body, so
-        # the coroutine's own finally never executes and the buttons would
-        # stay in the busy state for good. The callback runs either way.
-        self._task.add_done_callback(self._on_task_finished)
+    # -- public API --------------------------------------------------------
 
-    def _on_task_finished(self, task: asyncio.Task) -> None:
-        if task.cancelled():
-            self._show_error(ClientError(ERROR_CANCELLED))
-        self._set_idle()
-        self._task = None
+    @property
+    def current_request_id(self) -> str | None:
+        """The id currently on screen, or None when the row shows a placeholder."""
+        return self._request_id
 
-    def _on_cancel_clicked(self) -> None:
-        self._cancel_in_flight()
+    def prefill(self, text: str) -> None:
+        """Put `text` in the source box and hand it the keyboard.
 
-    def _cancel_in_flight(self) -> None:
-        """The one place a running translation is stopped. Shared with the
-        endpoint-change reset below, so both go through the same path."""
-        if self._task is not None:
-            self._task.cancel()
+        Used when the term lookup found nothing and the owner chose to send
+        the same words to the model instead: retyping what was just typed is
+        the kind of small tax that makes people stop using the second area at
+        all. Nothing is sent - the owner still decides whether to spend a
+        model call.
+        """
+        self.input_edit.setPlainText(text)
+        self.input_edit.moveCursor(QTextCursor.MoveOperation.End)
+        self.input_edit.setFocus()
 
     def reset_for_endpoint_change(self) -> None:
         """Drop everything that belonged to the previous server address.
@@ -129,33 +293,142 @@ class TranslateView(QWidget):
         and the displayed result goes with it: a translation is an answer
         from a particular service, and keeping it on screen under a new
         address would attribute it to a service that never gave it.
+
+        Advancing the generation is the other half of the same guarantee.
+        Cancelling does not stop the coroutine from reaching a renderable
+        outcome - the API client reports a cancellation as an ordinary error -
+        so without this the cleared view would immediately be written over
+        with the old request's ending.
         """
         self._cancel_in_flight()
+        self._generation += 1
+        self._task = None
+        self._last_request = None
         self.result_edit.setPlainText("")
-        self.status_label.setText("")
+        self.status_label.clear()
+        self._clear_outcome_surfaces()
         self._set_idle()
 
+    # -- request lifecycle -------------------------------------------------
+
+    def _selected_direction(self) -> str | None:
+        value = self.direction_combo.currentData()
+        if value == DIRECTION_AUTO:
+            return None
+        return value
+
+    def _on_input_changed(self) -> None:
+        if self.field_error.is_showing():
+            self.field_error.clear()
+            mark_field_invalid(self.input_edit, False)
+
+    def _on_translate_clicked(self) -> None:
+        text = self.input_edit.toPlainText()
+        if not text.strip():
+            # Refusing in silence reads as a broken button. The complaint
+            # belongs on the box that is empty, not in a box above it.
+            self.field_error.show_error(strings.FIELD_ERROR_EMPTY_INPUT)
+            mark_field_invalid(self.input_edit, True)
+            self.input_edit.setFocus()
+            return
+        self._start_translate(text, self._selected_direction())
+
+    def _start_translate(self, text: str, to: str | None) -> None:
+        self._generation += 1
+        generation = self._generation
+        self._last_request = (text, to)
+        self._clear_outcome_surfaces()
+        self._set_busy(True)
+        self._task = asyncio.ensure_future(self._run_translate(text, to))
+        # A task cancelled before its first step never runs its own body, so
+        # the coroutine's own finally never executes and the buttons would
+        # stay in the busy state for good. The callback runs either way.
+        self._task.add_done_callback(
+            lambda task, expected=generation: self._on_task_finished(task, expected)
+        )
+
+    def _on_task_finished(self, task: asyncio.Task, generation: int) -> None:
+        if not self._is_current(generation):
+            return
+        if task.cancelled():
+            self._show_error(ClientError(ERROR_CANCELLED))
+        self._set_idle()
+        self._task = None
+
+    def _on_cancel_clicked(self) -> None:
+        task = self._task
+        if task is None or task.done():
+            return
+        self._cancel_in_flight()
+        self._enter_cancelling()
+
+    def _cancel_in_flight(self) -> None:
+        """The one place a running translation is stopped. Shared with the
+        endpoint-change reset below, so both go through the same path."""
+        if self._task is not None:
+            self._task.cancel()
+
+    def _retry_last_request(self) -> None:
+        if self._last_request is None:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        text, to = self._last_request
+        self._start_translate(text, to)
+
     async def _run_translate(self, text: str, to: str | None) -> None:
+        # Captured here rather than passed in: the outcome of THIS coroutine
+        # may only be drawn while the view still cares about it, and every
+        # exit below - success, error, cancellation - checks against it.
+        generation = self._generation
+        self._last_request = (text, to)
         try:
             result = await self._api_client.translate(text, to=to)
         except ClientError as exc:
-            self._show_error(exc)
+            if self._is_current(generation):
+                self._show_error(exc)
         except asyncio.CancelledError:
             # Cancelling between awaits does not pass through the API
             # client's own handler, so the outcome is rendered here as well.
             # Without this the view would sit at "translating" for good.
-            self._show_error(ClientError(ERROR_CANCELLED))
+            if self._is_current(generation):
+                self._show_error(ClientError(ERROR_CANCELLED))
         else:
-            self._show_result(result)
+            if self._is_current(generation):
+                self._show_result(result)
         finally:
-            self._set_idle()
-            self._task = None
+            if self._is_current(generation):
+                self._set_idle()
+                self._task = None
+
+    def _is_current(self, generation: int) -> bool:
+        return generation == self._generation
+
+    # -- button and progress states ----------------------------------------
 
     def _set_busy(self, busy: bool) -> None:
-        self.translate_button.setEnabled(not busy)
-        self.cancel_button.setEnabled(busy)
         if busy:
-            self.status_label.setText(strings.STATUS_BAR_TRANSLATING)
+            self._enter_running()
+        else:
+            self._set_idle()
+
+    def _enter_running(self) -> None:
+        self.translate_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.progress_line.start()
+        self.status_label.set_text(strings.STATUS_BAR_TRANSLATING)
+
+    def _enter_cancelling(self) -> None:
+        """Neither button does anything until the task actually ends.
+
+        Leaving Cancel enabled invites a second press that cancels nothing,
+        and re-enabling Translate here would let a new request start while
+        the old one is still unwinding. The terminal wording is written by
+        the done callback, not from here.
+        """
+        self.translate_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.status_label.set_text(strings.STATUS_CANCELLING)
 
     def _set_idle(self) -> None:
         """Return the buttons to their resting state WITHOUT touching the
@@ -164,15 +437,144 @@ class TranslateView(QWidget):
         before it can be read."""
         self.translate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        self.progress_line.stop()
+
+    # -- rendering ---------------------------------------------------------
+
+    def _clear_outcome_surfaces(self) -> None:
+        """Take down everything the PREVIOUS outcome put on screen.
+
+        Called before a request starts and when the address changes. The
+        source text is deliberately not part of this: it is the owner's own
+        input, and a failed request is exactly when they need it kept.
+        """
+        self.banner.clear()
+        self.field_error.clear()
+        mark_field_invalid(self.input_edit, False)
+        self.kind_badge.setVisible(False)
+        self.miss_badge.setVisible(False)
+        self.miss_note.clear()
+        self.miss_note.setVisible(False)
+        self.cancel_note.clear()
+        self.cancel_note.setVisible(False)
+        self._render_request_id(None)
+
+    def _render_request_id(self, request_id: str | None) -> None:
+        """The one row that reports the id, for every outcome alike.
+
+        With no id it shows a placeholder rather than collapsing: a row that
+        comes and goes changes the height of everything under it and teaches
+        the eye to stop looking there.
+        """
+        self._request_id = request_id
+        shown = request_id if request_id else strings.REQUEST_ID_PLACEHOLDER
+        self.request_id_label.set_full_text(shown)
+        self.request_id_copy_button.setEnabled(request_id is not None)
+
+    def _on_copy_request_id_clicked(self) -> None:
+        if not self._request_id:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._request_id)
+            self.status_label.set_text(strings.STATUS_COPIED)
 
     def _show_result(self, result: TranslationResult) -> None:
+        self.banner.clear()
+        self.field_error.clear()
+        mark_field_invalid(self.input_edit, False)
+        self.cancel_note.clear()
+        self.cancel_note.setVisible(False)
+
         self.result_edit.setPlainText(result.text)
-        kind_label = _KIND_LABELS.get(result.kind, result.kind)
-        note = strings.DICTIONARY_MISS_NOTE if result.dictionary_miss else ""
-        request_line = strings.REQUEST_ID_LABEL.format(request_id=result.request_id)
-        parts = [part for part in (kind_label, note, request_line) if part]
-        self.status_label.setText(" | ".join(parts))
+
+        # An unknown kind keeps the service's own word for it; only the shape
+        # degrades. Inventing a translation for a kind this release has never
+        # seen would be the client speaking for the service.
+        self.kind_badge.set_kind(result.kind, _KIND_LABELS.get(result.kind, result.kind))
+        self.kind_badge.setVisible(True)
+
+        self.miss_badge.set_kind(_MISS_BADGE_KIND, strings.DICTIONARY_MISS_BADGE)
+        self.miss_badge.setVisible(result.dictionary_miss)
+        self.miss_note.setText(strings.DICTIONARY_MISS_NOTE)
+        self.miss_note.setVisible(result.dictionary_miss)
+
+        self._render_request_id(result.request_id)
+        self.status_label.set_text(strings.STATUS_BAR_DONE)
 
     def _show_error(self, exc: ClientError) -> None:
+        presentation = presentation_for(exc.code)
         self.result_edit.setPlainText("")
-        self.status_label.setText(error_status(exc))
+        self.kind_badge.setVisible(False)
+        self.miss_badge.setVisible(False)
+        self.miss_note.clear()
+        self.miss_note.setVisible(False)
+        # The id belongs to the failed request just as much as to a
+        # successful one, and it is the failed ones an operator gets asked
+        # about. Same widget, same place, id or placeholder.
+        self._render_request_id(exc.request_id)
+
+        if presentation.surface == SURFACE_STATUS:
+            # The owner asked for this. It is a confirmation, so it goes on
+            # the quiet line and never into a coloured box.
+            self.banner.clear()
+            self.field_error.clear()
+            mark_field_invalid(self.input_edit, False)
+            self.status_label.set_text(presentation.message)
+            self.cancel_note.setText(strings.STATUS_CANCELLED_NOTE)
+            self.cancel_note.setVisible(True)
+            return
+
+        self.cancel_note.clear()
+        self.cancel_note.setVisible(False)
+
+        if presentation.surface == SURFACE_FIELD:
+            # The fault is in the text the owner is looking at, so the
+            # message goes against that text and the keyboard goes with it.
+            self.banner.clear()
+            self.field_error.show_error(presentation.message)
+            mark_field_invalid(self.input_edit, True)
+            self.input_edit.setFocus()
+            self.status_label.set_text(strings.STATUS_BAR_LAST_REQUEST_FAILED)
+            return
+
+        # Everything else is drawn in this area's banner - including the two
+        # window-wide codes, whose permanent home is the global banner above
+        # the areas. They are shown here as well rather than dropped: this
+        # view raised the request, and an area that answers a press with
+        # nothing at all is worse than one that repeats a warning.
+        self.field_error.clear()
+        mark_field_invalid(self.input_edit, False)
+        # Deliberately WITHOUT the request id: this view renders it a few
+        # lines up, in the row that is the same widget in the same place for
+        # a success and a failure. Passing it here as well put the id, and a
+        # second copy button, on screen twice for one failed request - which
+        # invites the reader to wonder whether they are two different ids.
+        self.banner.show_message(
+            presentation.message,
+            presentation.severity,
+            actions=self._banner_actions(presentation),
+        )
+        self.status_label.set_text(strings.STATUS_BAR_LAST_REQUEST_FAILED)
+
+    def _banner_actions(self, presentation: ErrorPresentation) -> tuple:
+        """The one offer a banner makes, or nothing at all.
+
+        An action whose handler was never wired in is left out rather than
+        drawn: a button that does nothing when pressed is a worse answer than
+        no button, because it costs a press to find out.
+        """
+        label = presentation.action_label
+        if presentation.action is None or label is None:
+            return ()
+        if presentation.action == ACTION_RETRY:
+            return ((label, self._retry_last_request),)
+        if presentation.action == ACTION_OPEN_SETTINGS:
+            if self._on_open_settings is None:
+                return ()
+            return ((label, self._on_open_settings),)
+        if presentation.action == ACTION_ENTER_TOKEN:
+            if self._on_enter_token is None:
+                return ()
+            return ((label, self._on_enter_token),)
+        return ()

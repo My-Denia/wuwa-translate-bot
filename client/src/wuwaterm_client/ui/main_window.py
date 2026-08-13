@@ -1,45 +1,150 @@
-"""Top-level window: tabs for translate / term lookup / status, plus the
-Settings and first-run flows."""
+"""The window the three areas live in, and the two flows that decide what the
+client is allowed to do at all.
+
+Four things here are structural rather than cosmetic.
+
+The areas are switched by a navigation column, not by tabs. Tabs put the three
+areas on one line and gave nothing a permanent home; the column has a foot,
+and the foot is where the address this client talks to is stated - once, in
+one widget, visible from every area.
+
+That statement is the reason this file exists in the shape it does. The client
+used to substitute a machine-local development address whenever its settings
+file could not be read, and nothing on screen said which address was in use,
+so a missing ``config.json`` looked exactly like an unreachable service. The
+chip, the global banner and the setup checklist are three non-overlapping
+sentences about that one state: what it is, what it costs, and where to fix
+it. None of the three asks the network anything.
+
+Nothing that refuses is a modal any more, with two exceptions the owner
+confirmed: the destructive "forget this credential" question, and About. A
+refusal that steals focus and then disappears leaves no trace of what was
+refused; a refusal on a banner or against the field that caused it stays
+readable while the owner fixes it.
+
+And a refusal must not half-apply. The address goes to the live transport
+first because it is the only part that can be refused, and every line that
+follows - timeouts, the discard of the previous endpoint's state, the chip,
+the file on disk - is downstream of that one check.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtGui import QAction
+import inspect
+from collections.abc import Callable
+
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
-    QTabWidget,
+    QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import strings
 from ..api import ApiClient
-from ..config import ClientConfig
+from ..config import ClientConfig, usable_base_url
 from ..credentials import CredentialStoreUnavailable, has_token, store_token
-from ..errors import ClientError
+from ..errors import (
+    ERROR_INSECURE_ENDPOINT,
+    ERROR_NOT_CONFIGURED,
+    ClientError,
+    message_for,
+)
+from . import error_presentation
+from .components import Banner, EmptyStateCard, EndpointChip
 from .first_run_dialog import FirstRunDialog
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
 from .terms_view import TermsView
 from .translate_view import TranslateView
 
+# The navigation column is fixed: it is a landmark, and a landmark that
+# resizes with the window stops being one. The content area takes the rest.
+NAV_BAR_WIDTH = 168
+
+# Enough for the widest area (the term table's five columns) without a
+# horizontal scrollbar, and no larger than a 1366x768 laptop can show.
+WINDOW_MINIMUM_SIZE = (960, 640)
+WINDOW_DEFAULT_SIZE = (1100, 720)
+
+# The order the owner meets the areas in, and the index each keeps for the
+# lifetime of the window: term lookup first because it is the reflex action,
+# translation second because it is the one that spends money, service status
+# last because it is only read when something already looks wrong.
+PAGE_TERMS = 0
+PAGE_TRANSLATE = 1
+PAGE_STATUS = 2
+
 
 def endpoint_status_text(base_url: str | None) -> str:
-    """The line the window shows about where its requests go.
+    """The one-sentence description of where this client's requests go.
 
-    A separate function, and the only place the two states are turned into
-    text, so the state logic can be exercised without driving the widget.
+    A separate function, and the only place the two states are turned into a
+    sentence, so the state logic can be exercised without driving the widget.
 
     An unconfigured client has to LOOK unconfigured. The address used to be
     substituted silently when `config.json` went missing, and the owner then
     read a connection error - about a machine-local development port they had
     never chosen - as the service being down.
+
+    The chip shows a short word and a shortened address because it has to fit
+    a 168px column; this sentence is what the window reports to assistive
+    technology, so the state is never only available to someone who can read
+    an elided string in a small font.
     """
     if base_url is None:
         return strings.ENDPOINT_NOT_CONFIGURED
     return strings.ENDPOINT_CONFIGURED.format(base_url=base_url)
+
+
+def base_url_refusal(base_url: str | None) -> str | None:
+    """Why this address would be refused, or None if it would be accepted.
+
+    The transport is still the authority - `_apply_settings` below keeps its
+    own try/except around `update_base_url`, and that is what actually
+    protects the running client. This exists so the refusal can be shown
+    where the owner can act on it: on the field they typed it into, WHILE the
+    dialog is still open, instead of after it has closed over a value the
+    client will never use.
+
+    Two checks, in the order the transport makes them, and against the SAME
+    predicate `ApiClient` applies (`usable_base_url`) rather than a second
+    copy of the confidentiality rule - a pre-flight that can disagree with the
+    thing it stands in front of is worse than no pre-flight.
+    """
+    if base_url is None or not str(base_url).strip():
+        return message_for(ERROR_NOT_CONFIGURED)
+    if not usable_base_url(base_url):
+        return message_for(ERROR_INSECURE_ENDPOINT)
+    return None
+
+
+def _accepts_validator(factory: object) -> bool:
+    """Whether `factory` will take a `validator=` keyword.
+
+    The settings dialog is asked to check the address before it closes, which
+    it can only do if it has been given something to check with. Passing the
+    callback blindly would turn a dialog that does not take one yet - or a
+    stand-in a test substitutes - into a TypeError at the moment the owner
+    opens Settings, which is precisely the screen they went there to fix.
+    """
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return False
+    if "validator" in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 class MainWindow(QMainWindow):
@@ -48,52 +153,101 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(strings.APP_TITLE)
+        self.setMinimumSize(*WINDOW_MINIMUM_SIZE)
+        self.resize(*WINDOW_DEFAULT_SIZE)
         self.config = config if config is not None else ClientConfig.load()
         self.api_client = ApiClient.from_config(self.config)
 
-        self.tabs = QTabWidget(self)
         self.translate_view = TranslateView(self.api_client, self)
         self.terms_view = TermsView(self.api_client, self)
         self.status_view = StatusView(self.api_client, self)
-        self.tabs.addTab(self.translate_view, strings.TRANSLATE_TAB_TITLE)
-        self.tabs.addTab(self.terms_view, strings.TERMS_TAB_TITLE)
-        self.tabs.addTab(self.status_view, strings.STATUS_TAB_TITLE)
 
-        # Above the tabs rather than in a status bar: it is true of every tab,
-        # and while it says "not configured" it is the only thing on screen
-        # worth acting on.
-        self.endpoint_label = QLabel(self)
-        self.endpoint_label.setWordWrap(True)
+        self.stack = QStackedWidget(self)
+        # Index order is the contract PAGE_* above states; the views are
+        # inserted in that order and never reordered afterwards.
+        self.stack.addWidget(self.terms_view)
+        self.stack.addWidget(self.translate_view)
+        self.stack.addWidget(self.status_view)
+
+        self.nav_buttons: list[QPushButton] = []
+        nav_bar = self._build_navigation()
+
+        # Above every area rather than inside one: what it says - no address,
+        # or an address that was refused - is true of all three, and while it
+        # is showing it is the only thing on screen worth acting on.
+        self.global_banner = Banner(self)
+
+        # The same fact as a checklist, for the state where the client cannot
+        # send anything at all. Drawn from configuration and the credential
+        # store only; it costs no request to show.
+        self.setup_card = EmptyStateCard(self)
+
+        content = QWidget(self)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(16, 16, 16, 16)
+        content_layout.setSpacing(12)
+        content_layout.addWidget(self.global_banner)
+        content_layout.addWidget(self.setup_card)
+        content_layout.addWidget(self.stack, 1)
 
         central = QWidget(self)
-        central_layout = QVBoxLayout(central)
-        central_layout.addWidget(self.endpoint_label)
-        central_layout.addWidget(self.tabs)
+        central_layout = QHBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(nav_bar)
+        central_layout.addWidget(content, 1)
         self.setCentralWidget(central)
 
-        self._refresh_endpoint_label()
         self._build_menu()
+        self._build_shortcuts()
+        self._connect_translate_bridge()
 
-    def _refresh_endpoint_label(self) -> None:
-        self.endpoint_label.setText(endpoint_status_text(self.config.base_url))
+        self.show_page(PAGE_TERMS)
+        self._refresh_endpoint_state()
 
-    def _discard_previous_endpoint_state(self) -> None:
-        """Nothing on screen may outlive the address it came from.
+    # -- construction ------------------------------------------------------
 
-        Changing the server address does not stop a request already on its
-        way to the old one, and a reply carries no marking that would let a
-        view know it is stale. Without this, an answer from the PREVIOUS
-        service renders under the new address in the header - the most
-        misleading thing this window can display, and the same class of
-        defect as the silent fallback this whole change exists to remove.
+    def _build_navigation(self) -> QFrame:
+        """The column: product name, the three areas, then the address chip.
 
-        Each view cancels its own in-flight task through the mechanism it
-        already had, and clears the state that belonged to that endpoint.
-        Nothing here coordinates the cancellations or waits for them: they
-        are fire-and-forget, exactly as the Cancel button's are.
+        A QFrame rather than a bare QWidget because it carries a background
+        and a border, and a bare QWidget draws neither from a stylesheet.
         """
-        for view in (self.translate_view, self.terms_view, self.status_view):
-            view.reset_for_endpoint_change()
+        nav_bar = QFrame(self)
+        nav_bar.setObjectName("navBar")
+        nav_bar.setFixedWidth(NAV_BAR_WIDTH)
+
+        brand = QLabel(strings.APP_TITLE, nav_bar)
+        brand.setObjectName("sectionTitle")
+
+        layout = QVBoxLayout(nav_bar)
+        layout.setContentsMargins(12, 16, 12, 16)
+        layout.setSpacing(4)
+        layout.addWidget(brand)
+        layout.addSpacing(16)
+
+        for index, label in (
+            (PAGE_TERMS, strings.NAV_ITEM_TERMS),
+            (PAGE_TRANSLATE, strings.NAV_ITEM_TRANSLATE),
+            (PAGE_STATUS, strings.NAV_ITEM_STATUS),
+        ):
+            button = QPushButton(label, nav_bar)
+            button.setObjectName("navItem")
+            button.setCheckable(True)
+            # Siblings under one parent, so Qt keeps exactly one checked and
+            # the current area cannot be un-selected into nothing.
+            button.setAutoExclusive(True)
+            button.clicked.connect(
+                lambda _checked=False, page=index: self.show_page(page)
+            )
+            layout.addWidget(button)
+            self.nav_buttons.append(button)
+
+        layout.addStretch(1)
+
+        self.endpoint_chip = EndpointChip(nav_bar)
+        layout.addWidget(self.endpoint_chip)
+        return nav_bar
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu(strings.MENU_FILE)
@@ -109,14 +263,239 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_about_clicked)
         help_menu.addAction(about_action)
 
+    def _build_shortcuts(self) -> None:
+        """Reaching an area, and its input, without the mouse.
+
+        Kept together because they are one feature: switching areas from the
+        keyboard is pointless if the caret then has to be placed by hand.
+        """
+        self._shortcuts: list[QShortcut] = []
+        for sequence, page in (
+            ("Ctrl+1", PAGE_TERMS),
+            ("Ctrl+2", PAGE_TRANSLATE),
+            ("Ctrl+3", PAGE_STATUS),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(lambda target=page: self.show_page(target))
+            self._shortcuts.append(shortcut)
+        focus_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        focus_shortcut.activated.connect(self.focus_current_input)
+        self._shortcuts.append(focus_shortcut)
+
+    def _connect_translate_bridge(self) -> None:
+        """Carry a term-lookup query over to translation, if the lookup area
+        offers one.
+
+        The bridge closes the one gap the layout leaves open: a lookup that
+        found nothing is exactly the moment the owner wants the model, and
+        without this they retype the query in another area. It is connected
+        defensively because the signal belongs to the lookup area, and a
+        window that refuses to construct because a signal has not been added
+        yet takes the whole application with it.
+        """
+        signal = getattr(self.terms_view, "translate_requested", None)
+        connect = getattr(signal, "connect", None)
+        if callable(connect):
+            connect(self._on_translate_requested)
+
+    # -- navigation --------------------------------------------------------
+
+    def show_page(self, index: int) -> None:
+        """Bring one area to the front and mark its navigation item.
+
+        Both halves in one place: a shortcut that changed the stack without
+        the button, or a button that changed the button without the stack,
+        would leave the column naming an area that is not on screen.
+        """
+        if not 0 <= index < self.stack.count():
+            return
+        self.stack.setCurrentIndex(index)
+        for position, button in enumerate(self.nav_buttons):
+            button.setChecked(position == index)
+
+    def focus_current_input(self) -> None:
+        """Put the caret in whatever the current area's main input is.
+
+        The area knows which of its widgets that is; this asks it and falls
+        back to focusing the area itself, so an area that has not published a
+        `focus_input` still ends up somewhere the keyboard can work.
+        """
+        page = self.stack.currentWidget()
+        if page is None:
+            return
+        focuser = getattr(page, "focus_input", None)
+        if callable(focuser):
+            focuser()
+            return
+        page.setFocus()
+
+    def _on_translate_requested(self, query: str) -> None:
+        self.show_page(PAGE_TRANSLATE)
+        prefill = getattr(self.translate_view, "prefill", None)
+        if callable(prefill):
+            prefill(query)
+            return
+        editor = getattr(self.translate_view, "input_edit", None)
+        if editor is not None:
+            editor.setPlainText(query)
+            editor.setFocus()
+
+    # -- endpoint state ----------------------------------------------------
+
+    def _refresh_endpoint_state(self) -> None:
+        """Restate the address everywhere it is claimed, from one reading.
+
+        The chip, the global banner and the checklist are three views of a
+        single fact. Refreshing them together is what keeps them from
+        disagreeing - a window that says "not configured" in one corner and
+        shows an address in another is worse than one that says nothing.
+        """
+        self._refresh_endpoint_chip()
+        self._refresh_global_banner()
+        self._refresh_setup_card()
+
+    def _refresh_endpoint_chip(self) -> None:
+        base_url = self.config.base_url
+        configured = base_url is not None
+        if configured:
+            state_text = strings.ENDPOINT_CHIP_CONFIGURED
+            address_text = base_url
+            tooltip = strings.ENDPOINT_CHIP_TOOLTIP_CONFIGURED.format(
+                base_url=base_url
+            )
+        else:
+            state_text = strings.ENDPOINT_CHIP_NOT_CONFIGURED
+            address_text = strings.ENDPOINT_CHIP_NO_ADDRESS
+            tooltip = strings.ENDPOINT_CHIP_TOOLTIP_NOT_CONFIGURED
+        self.endpoint_chip.set_state(configured, state_text, address_text, tooltip)
+        # The chip is short by necessity; the full sentence is what a screen
+        # reader gets, so the state is not only available to someone who can
+        # read an elided address.
+        self.endpoint_chip.setAccessibleName(endpoint_status_text(base_url))
+
+    def _refresh_global_banner(self) -> None:
+        """Show the standing "nothing will be sent" notice, or take it down.
+
+        Not closable: it does not report an event that has passed, it reports
+        the condition the client is in, and dismissing it would leave a
+        window that sends nothing and does not say so.
+        """
+        if self.config.base_url is None:
+            self._show_global_banner(
+                strings.GLOBAL_BANNER_NOT_CONFIGURED,
+                error_presentation.SEVERITY_WARN,
+                action=error_presentation.ACTION_OPEN_SETTINGS,
+                closable=False,
+            )
+            return
+        self.global_banner.clear()
+
+    def _refresh_setup_card(self) -> None:
+        """The checklist for a client that cannot send anything yet.
+
+        Read from `config.base_url` and the credential store, and from
+        nothing else: the state this describes is precisely the one in which
+        no request may be made, so asking the service would be both
+        impossible and beside the point.
+        """
+        if self.config.base_url is not None:
+            self.setup_card.setVisible(False)
+            return
+        credential_stored = has_token()
+        # set_content first, because only it sets the card's heading; the
+        # checklist call that follows replaces the body.
+        self.setup_card.set_content(strings.SETUP_STEPS_TITLE)
+        self.setup_card.set_steps(
+            (
+                (strings.SETUP_STEP_BASE_URL, False),
+                (strings.SETUP_STEP_TOKEN, credential_stored),
+                (strings.SETUP_STEP_QUERY, False),
+            ),
+            (strings.ACTION_OPEN_SETTINGS, self._on_settings_clicked),
+        )
+        self.setup_card.setVisible(True)
+
+    def _show_global_banner(
+        self,
+        text: str,
+        severity: str,
+        action: str | None = None,
+        closable: bool = True,
+    ) -> None:
+        actions: tuple[tuple[str, Callable[[], None]], ...] = ()
+        if action is not None:
+            label = error_presentation.ACTION_LABEL_BY_ACTION.get(action)
+            handler = self._handler_for_action(action)
+            if label is not None and handler is not None:
+                actions = ((label, handler),)
+        self.global_banner.show_message(
+            text, severity, actions=actions, closable=closable
+        )
+
+    def _handler_for_action(self, action: str) -> Callable[[], None] | None:
+        if action == error_presentation.ACTION_OPEN_SETTINGS:
+            return self._on_settings_clicked
+        return None
+
+    def _show_refusal(self, exc: ClientError) -> None:
+        """Report an address the transport would not take.
+
+        On the global banner because that is where the dispatch table puts
+        both address refusals, and because the refusal is true of every area
+        rather than of one request. It stays until the address is settled
+        while the client has none - closing it would hide the only remaining
+        statement that nothing is being sent - and is dismissable once there
+        is a working address to fall back on.
+        """
+        presentation = error_presentation.presentation_for(exc.code)
+        self._show_global_banner(
+            exc.message,
+            presentation.severity,
+            action=presentation.action,
+            closable=self.config.base_url is not None,
+        )
+
+    def _discard_previous_endpoint_state(self) -> None:
+        """Nothing on screen may outlive the address it came from.
+
+        Changing the server address does not stop a request already on its
+        way to the old one, and a reply carries no marking that would let a
+        view know it is stale. Without this, an answer from the PREVIOUS
+        service renders under the new address in the chip - the most
+        misleading thing this window can display, and the same class of
+        defect as the silent fallback this whole change exists to remove.
+
+        Each view cancels its own in-flight task through the mechanism it
+        already had, and clears the state that belonged to that endpoint.
+        Nothing here coordinates the cancellations or waits for them: they
+        are fire-and-forget, exactly as the Cancel button's are.
+        """
+        for view in (self.translate_view, self.terms_view, self.status_view):
+            view.reset_for_endpoint_change()
+
+    # -- settings ----------------------------------------------------------
+
     def _on_settings_clicked(self) -> None:
-        dialog = SettingsDialog(self.config, self)
+        dialog = self._new_settings_dialog()
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._apply_settings(dialog.result_config())
         # Whether or not the dialog was accepted: entering, changing or
         # forgetting a token inside it writes to the credential store
         # immediately, and Cancel does not undo that.
         self.status_view.refresh_credential_state()
+        self._refresh_setup_card()
+
+    def _new_settings_dialog(self) -> QDialog:
+        """Hand the dialog the address check, so it can refuse before closing.
+
+        This is the whole of the control-flow change behind the inlined
+        refusal: the check used to run after `exec()` returned, by which time
+        the dialog - and the field the owner would have to correct - was
+        already gone.
+        """
+        if _accepts_validator(SettingsDialog):
+            return SettingsDialog(self.config, self, validator=base_url_refusal)
+        return SettingsDialog(self.config, self)
 
     def _apply_settings(self, new_config: ClientConfig) -> None:
         """Adopt an accepted settings change, or refuse it whole.
@@ -127,16 +506,17 @@ class MainWindow(QMainWindow):
         or writing it to disk, where it would come back at the next launch -
         would leave settings that do not describe the running client, so the
         refusal keeps the previous address in effect and says why.
+
+        Zero half-application is the invariant, and the ordering is what
+        enforces it: on the refusal path `self.config`, the timeouts, the
+        in-flight requests and the file on disk are all still untouched,
+        because every one of them is written after the raising call.
         """
         previous_base_url = self.config.base_url
         try:
             self.api_client.update_base_url(new_config.base_url)
         except ClientError as exc:
-            QMessageBox.warning(
-                self,
-                strings.SETTINGS_INVALID_BASE_URL_TITLE,
-                exc.message,
-            )
+            self._show_refusal(exc)
             return
         self.config = new_config
         # Timeouts too, or the saved settings and the running client
@@ -145,50 +525,89 @@ class MainWindow(QMainWindow):
             self.config.request_timeout_seconds,
             self.config.translate_timeout_seconds,
         )
-        if new_config.base_url != previous_base_url:
+        address_changed = new_config.base_url != previous_base_url
+        if address_changed:
             self._discard_previous_endpoint_state()
         # ...and the address on screen, which is the whole point of showing
         # it: a client that has just been configured must stop saying it is
-        # not.
-        self._refresh_endpoint_label()
+        # not. This also takes down any refusal banner the last attempt left.
+        self._refresh_endpoint_state()
+        if address_changed:
+            # Three areas going empty at once reads as data loss unless
+            # something says it was deliberate. Informational, and closable:
+            # it reports something that has already finished happening.
+            self.global_banner.show_message(
+                strings.ENDPOINT_CHANGED_BANNER,
+                error_presentation.SEVERITY_INFO,
+            )
+            self.endpoint_chip.flash()
         try:
             self.config.save()
         except OSError:
             # The settings still take effect for this session; what the
-            # owner must not be left believing is that they were kept.
-            QMessageBox.warning(
-                self,
-                strings.SETTINGS_TITLE,
+            # owner must not be left believing is that they were kept. It
+            # replaces the address-changed notice above because it is the
+            # more consequential of the two, and the banner holds one
+            # message at a time by design.
+            self.global_banner.show_message(
                 strings.SETTINGS_NOT_SAVED_MESSAGE,
+                error_presentation.SEVERITY_WARN,
             )
 
     def _on_about_clicked(self) -> None:
-        QMessageBox.information(self, strings.MENU_ABOUT, strings.ABOUT_TEXT)
+        # Built rather than called through the static helper, so its one
+        # button carries this application's wording instead of the English
+        # Qt supplies for a translation that is not installed.
+        about = QMessageBox(self)
+        about.setWindowTitle(strings.MENU_ABOUT)
+        about.setText(strings.ABOUT_TEXT)
+        about.setIcon(QMessageBox.Icon.Information)
+        about.setStandardButtons(QMessageBox.StandardButton.Ok)
+        about.button(QMessageBox.StandardButton.Ok).setText(strings.DIALOG_OK_BUTTON)
+        about.exec()
+
+    # -- first run ---------------------------------------------------------
 
     def ensure_credential(self) -> bool:
         """Run the first-run flow if no device credential is stored yet.
 
         Returns True once a credential is present (already stored, or just
         entered); False if the user chose to quit instead.
+
+        A credential store that cannot be written is NOT a reason to return
+        True: the whole point of the return value is that no window opens
+        without a credential. It is also not a reason to return False, which
+        would close the application over a vault that is momentarily
+        unavailable - so the failure is reported inside the dialog and the
+        dialog is offered again. Only `reject` - the Quit button - ends this.
         """
         if has_token():
             return True
         dialog = FirstRunDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        while dialog.exec() == QDialog.DialogCode.Accepted:
             token = dialog.token()
-            if token:
-                try:
-                    store_token(token)
-                except CredentialStoreUnavailable:
-                    QMessageBox.critical(
-                        self,
-                        strings.CREDENTIAL_STORE_ERROR_TITLE,
-                        strings.CREDENTIAL_STORE_ERROR_MESSAGE,
-                    )
+            if not token:
+                # The dialog refuses an empty token before it accepts, so
+                # this is a dialog that is not behaving like one; retrying it
+                # would spin rather than get anywhere.
+                return False
+            try:
+                store_token(token)
+            except CredentialStoreUnavailable:
+                reporter = getattr(dialog, "show_store_error", None)
+                if not callable(reporter):
+                    # Nowhere to put the failure means nothing for the owner
+                    # to retry against; refusing entry is the safe end of
+                    # this branch, and it is the behaviour that predates the
+                    # inline report.
                     return False
-                # The status view read the credential state when it was
-                # built, which was before this. Without the refresh it keeps
-                # reporting a missing credential for the whole session.
-                self.status_view.refresh_credential_state()
-                return True
+                reporter(strings.CREDENTIAL_STORE_ERROR_MESSAGE)
+                continue
+            # The status view read the credential state when it was built,
+            # which was before this. Without the refresh it keeps reporting a
+            # missing credential for the whole session - and the setup
+            # checklist would keep showing step two unfinished.
+            self.status_view.refresh_credential_state()
+            self._refresh_setup_card()
+            return True
         return False

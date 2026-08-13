@@ -66,11 +66,51 @@ SRC_ROOT = CLIENT_ROOT / "src"
 # known parent package". See client/main.py.
 ENTRY_POINT = CLIENT_ROOT / "main.py"
 
+# The stylesheets are the only non-code files the application reads at run
+# time, and a build that ships without them starts perfectly well and looks
+# like an unstyled prototype - which the artifact's own --self-check cannot
+# see, because it constructs the window and never looks at it.
+#
+# They are listed BY NAME rather than collected with a pattern. A pattern
+# cannot be wrong, but it also cannot be reviewed: what is packaged would stop
+# being visible in this committed file. The list is what
+# client/tests/test_theme_resources.py compares against the directory, so a
+# resource added without a line here is a red test rather than a silently
+# unstyled build.
+RESOURCES_DIR = SRC_ROOT / "wuwaterm_client" / "resources"
+RESOURCES_TARGET = "resources"
+RESOURCE_FILES = (
+    "theme_light.qss",
+    "theme_dark.qss",
+)
+RESOURCE_DATAS = [
+    (str(RESOURCES_DIR / name), RESOURCES_TARGET) for name in RESOURCE_FILES
+]
+
+# Qt 自带部件的中文:输入框右键菜单(撤销/剪切/复制/粘贴/全选)和标准按钮的
+# 默认名。这些字从来不经过这个程序的任何一次 setText,所以静态门看不见它们,
+# 缺了就是一个界面上一半中文一半英文。翻译文件随 PySide6 一起分发,从它自己
+# 的 translations 目录取,不复制进仓库——复制一份就会和装着的 PySide6 版本各
+# 走各的。目标目录必须是 PySide6/translations,因为运行时是靠 Qt 自己报告的
+# 翻译路径找它的。
+def _qt_translation_datas():
+    try:
+        import PySide6
+    except ImportError:
+        return []
+    source = Path(PySide6.__file__).parent / "translations" / "qtbase_zh_CN.qm"
+    if not source.is_file():
+        return []
+    return [(str(source), "PySide6/translations")]
+
+
+QT_TRANSLATION_DATAS = _qt_translation_datas()
+
 a = Analysis(
     [str(ENTRY_POINT)],
     pathex=[str(SRC_ROOT)],
     binaries=OPENSSL_BINARIES,
-    datas=[],
+    datas=RESOURCE_DATAS + QT_TRANSLATION_DATAS,
     hiddenimports=[
         "keyring.backends.Windows",
     ],
