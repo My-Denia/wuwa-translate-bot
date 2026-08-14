@@ -24,3 +24,29 @@ def test_repo_hygiene_detects_runtime_state_paths():
     assert is_runtime_state_path("chat_settings.json")
     assert is_runtime_state_path(".chat_settings.abc")
     assert not is_runtime_state_path("src/wuwaterm/settings.py")
+
+
+def test_repo_hygiene_detects_a_database_by_content_not_by_name(tmp_path):
+    """A database is a database whichever name it arrives under.
+
+    The suffix rule was necessary and not sufficient: a test that pointed a
+    device store at a deliberately invalid path wrote a real SQLite file into
+    the repository root under a name with no extension, nothing recognised it,
+    and it was committed and merged. Detection is now by the sixteen bytes
+    SQLite writes at offset zero, so the name is irrelevant.
+    """
+    from scripts.check_repo_hygiene import SQLITE_MAGIC, looks_like_a_database
+
+    disguised = tmp_path / "!!not-a-valid-value!!"
+    disguised.write_bytes(SQLITE_MAGIC + b"\x00" * 64)
+    assert looks_like_a_database(disguised)
+
+    ordinary = tmp_path / "notes.md"
+    ordinary.write_text("just text", encoding="utf-8")
+    assert not looks_like_a_database(ordinary)
+
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    assert not looks_like_a_database(empty)
+
+    assert not looks_like_a_database(tmp_path / "does-not-exist")

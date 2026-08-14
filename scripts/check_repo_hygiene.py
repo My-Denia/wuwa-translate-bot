@@ -57,12 +57,36 @@ def is_runtime_state_path(rel: str) -> bool:
     )
 
 
+# SQLite writes this at offset 0 of every database file it creates.
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def looks_like_a_database(path: Path) -> bool:
+    """Identify a database by its CONTENT, not by what it is called.
+
+    The suffix check below is necessary and was not sufficient. A test that
+    pointed a device store at a deliberately silly path wrote a real SQLite
+    file into the repository root under a name with no extension at all; the
+    suffix rule did not see it, nothing else did either, and it was committed.
+    A database is a database whichever name it arrives under, and the first
+    sixteen bytes say so.
+    """
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC
+    except OSError:
+        return False
+
+
 def main() -> int:
     failures: list[str] = []
     for path in candidate_files():
         rel = path.relative_to(ROOT).as_posix()
         if rel.endswith((".db", ".sqlite", ".sqlite3")):
             failures.append(f"tracked generated DB: {rel}")
+            continue
+        if path.is_file() and looks_like_a_database(path):
+            failures.append(f"tracked database file (detected by content): {rel}")
             continue
         if is_runtime_state_path(rel):
             failures.append(f"tracked runtime state: {rel}")
