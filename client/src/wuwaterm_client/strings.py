@@ -219,7 +219,6 @@ ENDPOINT_CHANGED_SUBTITLE = "重新发起请求即可获取新服务器的结果
 ACTION_RETRY = "重试"
 ACTION_OPEN_SETTINGS = "打开设置"
 ACTION_ENTER_TOKEN = "输入新令牌"
-ACTION_RESUME_AUTO_SEARCH = "恢复自动查询"
 ACTION_DISMISS = "关闭"
 
 # -- Standard dialog buttons -----------------------------------------------
@@ -285,7 +284,6 @@ GLOBAL_BANNER_NOT_CONFIGURED = "尚未配置服务器地址，因此不会发出
 GLOBAL_BANNER_INSECURE_ENDPOINT = (
     "当前服务器地址不会被使用，因此不会发出任何请求。请改用受保护的地址。"
 )
-BANNER_AUTO_SEARCH_PAUSED = "已暂停自动查询，以免继续触发服务端的频率限制。"
 
 FIELD_ERROR_EMPTY_INPUT = "请先输入内容。"
 FIELD_ERROR_TOKEN_REQUIRED = "请输入设备令牌。"

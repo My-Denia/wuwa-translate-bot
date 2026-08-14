@@ -32,7 +32,6 @@ only be noise from the machine talking to itself.
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -53,13 +52,9 @@ from PySide6.QtWidgets import (
 
 from .. import strings
 from ..api import ApiClient, TermsResult
-from ..errors import (
-    ERROR_CANCELLED,
-    ERROR_OFFLINE,
-    ERROR_RATE_LIMITED,
-    ClientError,
-)
+from ..errors import ERROR_CANCELLED, ClientError
 from .components import (
+    NO_REQUEST,
     Banner,
     EmptyStateCard,
     FieldError,
@@ -93,19 +88,6 @@ DEBOUNCE_MILLISECONDS = 220
 # a sentence rather than a term. `GET /v1/terms` would answer it with an empty
 # table, which reads as "no such term" instead of "wrong tool".
 MAX_TERM_LENGTH = 40
-
-# What the service asks for when it says the caller is going too fast, then
-# twice that, then a ceiling. Held here rather than computed so the ceiling is
-# a value someone chose and not an overflow nobody noticed.
-BACKOFF_MILLISECONDS = (2000, 4000, 8000)
-
-# Two refusals in a row are a network that is down, not one request that lost
-# a race. Continuing to search on every keystroke against it is pure noise.
-OFFLINE_STREAK_LIMIT = 2
-
-# Enough that backspacing through a word never asks twice for the same thing,
-# small enough that a session's worth of answers is not held indefinitely.
-CACHE_CAPACITY = 32
 
 # Results from the previous query stay on screen while the next one runs, at
 # this opacity. Clearing the table on each keystroke makes it blink empty
@@ -208,11 +190,7 @@ class TermsView(QWidget):
         # and the newer search it would otherwise overwrite.
         self._generation = 0
         self._last_query_sent: str | None = None
-        self._cache: "OrderedDict[str, TermsResult]" = OrderedDict()
         self._request_id: str | None = None
-        self._auto_paused = False
-        self._backoff_step = 0
-        self._offline_streak = 0
 
         self.banner = Banner(self)
 
@@ -313,11 +291,7 @@ class TermsView(QWidget):
         self._debounce_timer.setInterval(DEBOUNCE_MILLISECONDS)
         self._debounce_timer.timeout.connect(self._on_debounce_elapsed)
 
-        self._resume_timer = QTimer(self)
-        self._resume_timer.setSingleShot(True)
-        self._resume_timer.timeout.connect(self._resume_auto_search)
-
-        self._apply_request_id(None)
+        self._apply_request_id()
         self._apply_endpoint_state()
         self._show_idle_state()
 
@@ -353,10 +327,10 @@ class TermsView(QWidget):
             self._abandon_in_flight()
             self._show_sentence_state(raw.strip())
             return
-        if not self._api_client.is_configured or self._auto_paused:
-            # Gate three, and the brake. Neither is an error to report on a
-            # keystroke: the empty card and the banner already say why, and
-            # the button is still there for a deliberate attempt.
+        if not self._api_client.is_configured:
+            # Gate three. Not an error to report on a keystroke: the empty
+            # card already says why, and the button is still there for a
+            # deliberate attempt.
             self._debounce_timer.stop()
             # Nothing will replace the request just invalidated, so the
             # loading state has to come down here rather than wait for a
@@ -395,21 +369,10 @@ class TermsView(QWidget):
             # `_request` refuses an unconfigured client on its own, and that
             # refusal - not this line - is what makes the guarantee.
             return
-        if not manual:
-            if self._auto_paused:
-                return
-            cached = self._cache_get(query)
-            if cached is not None:
-                # A held answer still has to displace whatever is running.
-                # Backspacing from a query that is in flight into one that is
-                # cached would otherwise draw the cached rows and then have
-                # them overwritten, seconds later, by the reply to a query
-                # that is no longer in the field.
-                self._abandon_in_flight()
-                self._render_result(cached)
-                return
-            if query == self._last_query_sent:
-                return
+        if not manual and query == self._last_query_sent:
+            # Gate two. The manual path skips it on purpose: pressing the
+            # button on unchanged text is how a failed lookup is retried.
+            return
         self._start_search(query)
 
     @staticmethod
@@ -456,7 +419,6 @@ class TermsView(QWidget):
         else:
             if generation != self._generation:
                 return
-            self._cache_put(query, result)
             self._end_loading()
             self._render_result(result)
         finally:
@@ -513,16 +475,6 @@ class TermsView(QWidget):
 
     def _render_result(self, result: TermsResult) -> None:
         self.banner.clear()
-        self._offline_streak = 0
-        self._backoff_step = 0
-        # An answer means the reason for pausing is gone. The offline pause
-        # arms no resume timer - nothing about waiting fixes a network that is
-        # down - so the deliberate retry that succeeds is the ONLY thing that
-        # can release it. Without this the pause outlived the outage: the
-        # banner carrying the "resume automatic search" action was cleared a
-        # line above, so typing went on sending nothing with nothing left on
-        # screen to say why.
-        self._resume_auto_search()
         self.table.setRowCount(len(result.matches))
         for row, match in enumerate(result.matches):
             for column, value in enumerate(
@@ -601,22 +553,14 @@ class TermsView(QWidget):
             # was reached - the same proof a 429 carries. Returning before the
             # brake left the offline streak standing across a completed round
             # trip, so one earlier offline failure plus one of these plus one
-            # later offline failure paused automatic lookup as though the
-            # network had been down twice running.
-            self._offline_streak = 0
             mark_field_invalid(self.query_edit, True)
             self.field_error.show_error(presentation.message)
             self._apply_request_id(exc.request_id)
             return
 
-        paused = self._engage_brake(exc.code)
         actions: list[tuple[str, Callable[[], None]]] = []
         if presentation.action == ACTION_RETRY:
             actions.append((presentation.action_label, self._on_search_clicked))
-        if paused:
-            actions.append(
-                (strings.ACTION_RESUME_AUTO_SEARCH, self._resume_auto_search)
-            )
         if (
             presentation.action == ACTION_ENTER_TOKEN
             and self._on_enter_token is not None
@@ -636,61 +580,6 @@ class TermsView(QWidget):
         )
         self._apply_request_id(exc.request_id)
 
-    # -- the brake ---------------------------------------------------------
-
-    def _engage_brake(self, code: str) -> bool:
-        """Stop searching on every keystroke when the answers say to.
-
-        Searching as you type multiplies request volume against a service
-        this change is not allowed to modify, so the client has to be the one
-        that backs off. Returns whether automatic searching was paused, which
-        is what decides if the banner offers to turn it back on.
-        """
-        if code == ERROR_RATE_LIMITED:
-            # A 429 came from the service, so the service was reached: the
-            # offline streak is broken whatever it was. Leaving it standing
-            # let one earlier offline failure and one later one add up ACROSS
-            # a successful round trip, and the second one then paused
-            # automatic lookup as though the network had been down twice
-            # running.
-            self._offline_streak = 0
-            delay = BACKOFF_MILLISECONDS[
-                min(self._backoff_step, len(BACKOFF_MILLISECONDS) - 1)
-            ]
-            self._backoff_step += 1
-            self._pause_auto_search()
-            # A timer, not a sleep and not a thread: the wait has to be
-            # interruptible by the owner pressing the button, and this view
-            # has no business owning anything that outlives the window.
-            self._resume_timer.start(delay)
-            return True
-        if code == ERROR_OFFLINE:
-            self._offline_streak += 1
-            if self._offline_streak >= OFFLINE_STREAK_LIMIT:
-                # No timer here. Nothing about waiting fixes a network that
-                # is down, and the owner is the one who will know when it is
-                # back.
-                self._pause_auto_search()
-                return True
-            return False
-        self._offline_streak = 0
-        return False
-
-    def _pause_auto_search(self) -> None:
-        self._auto_paused = True
-        self._debounce_timer.stop()
-        self.status_label.set_text(strings.BANNER_AUTO_SEARCH_PAUSED)
-
-    def _resume_auto_search(self) -> None:
-        self._resume_timer.stop()
-        if not self._auto_paused:
-            return
-        self._auto_paused = False
-        self._offline_streak = 0
-        self.status_label.clear()
-        if self.banner.is_showing():
-            self.banner.clear()
-
     # -- states ------------------------------------------------------------
 
     def _show_idle_state(self, after_endpoint_change: bool = False) -> None:
@@ -702,7 +591,7 @@ class TermsView(QWidget):
         other describes a client that has never been asked anything.
         """
         self.table.setRowCount(0)
-        self._apply_request_id(None)
+        self._apply_request_id()
         if not self._api_client.is_configured:
             # Not the checklist's heading: the window is already showing that
             # card directly above this one, and two cards with one title read
@@ -732,7 +621,7 @@ class TermsView(QWidget):
         that and hands the text to the area that can do something with it.
         """
         self.table.setRowCount(0)
-        self._apply_request_id(None)
+        self._apply_request_id()
         self.empty_card.set_content(
             strings.TERMS_SENTENCE_HINT_TITLE,
             strings.TERMS_SENTENCE_HINT_SUBTITLE,
@@ -764,21 +653,32 @@ class TermsView(QWidget):
             "" if configured else strings.TOOLTIP_NEEDS_ENDPOINT
         )
 
-    def _apply_request_id(self, request_id: str | None) -> None:
-        """Always laid out, with or without an id.
+    def _apply_request_id(self, request_id: str | None = NO_REQUEST) -> None:
+        """The id row, for every request outcome and for nothing else.
 
-        It is the only handle the owner has when asking an operator what
-        happened, so it does not move between success and failure - and it
-        does not disappear either, which would change the block's height as
-        results come and go.
+        Three states, not two - the same distinction the banner makes, and
+        for the same reason. A lookup that FAILED or found nothing still gets
+        the row, with a placeholder when it carried no id: it does not move
+        between success and failure, because it is the only handle the owner
+        has when asking an operator what happened, and a row that appears for
+        one outcome and not another is a row nobody learns to look at.
+
+        But a screen where no lookup has happened - first paint, an emptied
+        field, a client with no address - has no id to be missing. Printing
+        "request ID: -" there invites the owner to go asking about a call this
+        client never made.
         """
-        self._request_id = request_id
-        shown = request_id if request_id else strings.REQUEST_ID_PLACEHOLDER
+        applicable = request_id is not NO_REQUEST
+        self._request_id = request_id if applicable else None
+        self._request_id_row.setVisible(applicable)
+        if not applicable:
+            return
+        shown = self._request_id if self._request_id else strings.REQUEST_ID_PLACEHOLDER
         self._request_id_label.setText(
             strings.REQUEST_ID_LABEL.format(request_id=shown)
         )
         self._request_id_label.setToolTip(shown)
-        self._copy_button.setEnabled(request_id is not None)
+        self._copy_button.setEnabled(self._request_id is not None)
 
     def _on_copy_request_id(self) -> None:
         if not self._request_id:
@@ -791,41 +691,33 @@ class TermsView(QWidget):
 
     # -- the cache ---------------------------------------------------------
 
-    def _cache_get(self, query: str) -> TermsResult | None:
-        result = self._cache.get(query)
-        if result is not None:
-            self._cache.move_to_end(query)
-        return result
-
-    def _cache_put(self, query: str, result: TermsResult) -> None:
-        self._cache[query] = result
-        self._cache.move_to_end(query)
-        while len(self._cache) > CACHE_CAPACITY:
-            self._cache.popitem(last=False)
-
     # -- endpoint change ---------------------------------------------------
+
+    def focus_input(self) -> None:
+        """Where Ctrl+K puts the caret in this area.
+
+        Published as a method because the window must not know which widget
+        each area calls its input - and because a window that guesses would
+        focus the page container instead, which looks like the shortcut did
+        nothing at all.
+        """
+        self.query_edit.setFocus()
+        self.query_edit.selectAll()
 
     def reset_for_endpoint_change(self) -> None:
         """Drop everything that came from the previous server address.
 
         A term's translation belongs to the dictionary one particular service
         was serving; leaving the table populated after the address changes
-        shows one server's answers under another's name. The cache is part of
-        that - it is the same answers, one layer down, and a cached hit after
-        the address changed would put them back on screen without a request.
+        shows one server's answers under another's name.
 
         The in-flight task is cancelled, and the generation moves with it, so
         the `cancelled` that `_request` produces from that cancellation is
         discarded rather than rendered over the empty state left here.
         """
         self._abandon_in_flight()
-        self._cache.clear()
         self.banner.clear()
         self.field_error.clear()
         mark_field_invalid(self.query_edit, False)
-        self._resume_timer.stop()
-        self._auto_paused = False
-        self._backoff_step = 0
-        self._offline_streak = 0
         self._apply_endpoint_state()
         self._show_idle_state(after_endpoint_change=True)

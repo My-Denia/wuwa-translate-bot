@@ -261,6 +261,10 @@ class TranslateView(QWidget):
         layout.addWidget(self.cancel_note)
         layout.addWidget(self.status_label)
 
+        # The first paint has to agree with the endpoint too, not only every
+        # state reached afterwards.
+        self._apply_endpoint_state()
+
         self._render_request_id(None)
 
     # -- public API --------------------------------------------------------
@@ -269,6 +273,10 @@ class TranslateView(QWidget):
     def current_request_id(self) -> str | None:
         """The id currently on screen, or None when the row shows a placeholder."""
         return self._request_id
+
+    def focus_input(self) -> None:
+        """Where Ctrl+K puts the caret in this area."""
+        self.input_edit.setFocus()
 
     def prefill(self, text: str) -> None:
         """Put `text` in the source box and hand it the keyboard.
@@ -451,9 +459,30 @@ class TranslateView(QWidget):
         status line: every outcome has just written its own text there, and
         clearing it here is how a rendered error or request id disappears
         before it can be read."""
-        self.translate_button.setEnabled(True)
+        # Resting state is not always "enabled": an unconfigured client has
+        # nowhere to send this. Enabling unconditionally here is what made
+        # the button clickable on the setup screen even after the endpoint
+        # state had disabled it.
+        self._apply_endpoint_state()
         self.cancel_button.setEnabled(False)
         self.progress_line.stop()
+
+    def _apply_endpoint_state(self) -> None:
+        """Submit is disabled while there is no address to submit to.
+
+        The lookup and status areas both did this; this one did not, so on
+        the unconfigured setup screen - where the whole point is that no
+        request will be made - the translate button stayed live and a press
+        started a task whose only possible outcome was `not_configured`. The
+        transport refuses it anyway, so this is not the safety boundary; it
+        is the difference between a screen that says what it will do and one
+        that has to be tried to find out.
+        """
+        configured = self._api_client.is_configured
+        self.translate_button.setEnabled(configured)
+        self.translate_button.setToolTip(
+            "" if configured else strings.TOOLTIP_NEEDS_ENDPOINT
+        )
 
     # -- rendering ---------------------------------------------------------
 

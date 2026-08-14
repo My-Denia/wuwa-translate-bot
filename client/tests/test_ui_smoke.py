@@ -275,7 +275,6 @@ def test_only_the_last_of_several_term_searches_reaches_the_screen(qapp) -> None
     assert view.table.item(0, 0).text() == "Jinhsi"
     assert view._request_id == "req-Jinhsi"
     assert view.status_label.text() == strings.STATUS_BAR_DONE
-    assert list(view._cache) == ["Jinhsi"]
     # ...and the two replaced searches left nothing behind them: no banner, no
     # loading state, no task the view still believes is running.
     assert view.banner.is_showing() is False
@@ -354,10 +353,8 @@ def test_an_older_term_search_writes_nothing_however_it_ends(qapp) -> None:
     assert view.table.item(0, 0).text() == "Jinhsi"
     assert view._request_id == "req-Jinhsi"
     assert view.status_label.text() == strings.STATUS_BAR_DONE
-    assert list(view._cache) == ["Jinhsi"]
     assert view.banner.is_showing() is False
     assert view.field_error.is_showing() is False
-    assert view._auto_paused is False
 
 
 def test_storing_a_first_run_credential_refreshes_the_status_view(
@@ -671,3 +668,90 @@ def test_every_area_can_offer_the_token_action(qapp, tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(main_window_module, "TokenDialog", _CancelledDialog)
     window.enter_token()  # 不得抛出
+
+
+# -- 第三轮评审的三条就地修(其余降范围退出本 PR)---------------------------
+
+
+def test_translate_submit_is_disabled_without_an_endpoint(qapp, tmp_path, monkeypatch) -> None:
+    """未配置时三个区的提交动作都必须是灰的,翻译区曾经漏了。
+
+    传输层本来就会拒绝 not_configured,所以这不是安全边界;它是「这个界面说得清
+    自己会做什么」与「得按一下才知道」的区别 —— 而未配置态整屏的意思就是不会发出
+    任何请求。
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    window = MainWindow(config=ClientConfig())
+
+    assert window.translate_view.translate_button.isEnabled() is False
+    assert window.terms_view.search_button.isEnabled() is False
+    assert window.status_view.refresh_button.isEnabled() is False
+
+    # 配置好之后必须解禁,否则这条门会把一个可用的界面锁死。
+    window.api_client.update_base_url("https://example.invalid/api")
+    window.translate_view._apply_endpoint_state()
+    assert window.translate_view.translate_button.isEnabled() is True
+
+
+def test_ctrl_k_puts_the_caret_in_each_area_input(qapp, tmp_path, monkeypatch) -> None:
+    """Ctrl+K 必须真的把焦点交给该区的输入部件。
+
+    这是 Issue #66 那条规则的第一次实战应用:不断「快捷键接上了」,断**按下之后
+    焦点落在哪**。此前 focus_current_input 找一个名为 focus_input 的方法,而三个
+    视图一个都没定义 —— 快捷键接得好好的,按下去焦点落在页面容器上,光标不出现。
+
+    断的是 page.focusWidget(),不是 widget.hasFocus():offscreen 平台从不激活窗口,
+    hasFocus 因此恒为假,那样断出来的只是平台限制,不是这个功能的对错。
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    # 已配置:未配置时刷新按钮是禁用的,而禁用的控件本来就不接焦点 —— 那是正确
+    # 行为,不该被这条门算作失败。
+    window = MainWindow(config=ClientConfig(base_url="https://example.invalid/api"))
+    window.show()
+
+    expected = {
+        0: window.terms_view.query_edit,
+        1: window.translate_view.input_edit,
+        2: window.status_view.refresh_button,
+    }
+    for index, widget in expected.items():
+        page = window.stack.widget(index)
+        assert callable(getattr(page, "focus_input", None)), (
+            f"第 {index} 页没有定义 focus_input,快捷键会落到页面容器上"
+        )
+        window.show_page(index)
+        window.focus_current_input()
+        assert page.focusWidget() is widget, (
+            f"第 {index} 页按下 Ctrl+K 后焦点在 "
+            f"{type(page.focusWidget()).__name__},不是 {type(widget).__name__}"
+        )
+    window.hide()
+
+
+def test_the_window_minimum_fits_a_small_workspace(qapp, tmp_path, monkeypatch) -> None:
+    """最小尺寸不得大于屏幕能给的工作区。
+
+    它是设备无关像素:1366x768 面板在 150% 缩放下只有约 911x512,在 200% 下约
+    683x384。一个大于工作区的下限没法被满足 —— 窗口开得过高,而这里没有滚动,
+    底部按钮会被挤出屏幕且够不着。
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    window = MainWindow(config=ClientConfig())
+
+    screen = window.screen() or QApplication.primaryScreen()
+    if screen is None:  # pragma: no cover - offscreen 平台无屏可量
+        import pytest as _pytest
+
+        _pytest.skip("no screen to measure")
+    workspace = screen.availableGeometry()
+    minimum = window.minimumSize()
+
+    assert minimum.width() <= workspace.width(), (
+        f"最小宽 {minimum.width()} 超过工作区 {workspace.width()}"
+    )
+    assert minimum.height() <= workspace.height(), (
+        f"最小高 {minimum.height()} 超过工作区 {workspace.height()}"
+    )
+    # 默认尺寸同样不得开出屏外。
+    assert window.width() <= workspace.width()
+    assert window.height() <= workspace.height()

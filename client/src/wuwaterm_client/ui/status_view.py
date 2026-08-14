@@ -168,6 +168,15 @@ class StatusView(QWidget):
 
     # -- public API --------------------------------------------------------
 
+    def focus_input(self) -> None:
+        """This area has no text input, so the caret goes to its one action.
+
+        Returning nothing focusable would leave Ctrl+K silently doing nothing
+        in one of the three areas, which is worse than focusing the button:
+        the shortcut has to mean the same thing everywhere.
+        """
+        self.refresh_button.setFocus()
+
     def refresh_credential_state(self) -> None:
         """Public: the credential can change outside this view (first run,
         Settings), and the labels are only read when something asks."""

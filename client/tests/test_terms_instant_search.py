@@ -16,12 +16,6 @@ change. Everything in this file is a gate on that:
   this view with a renderable outcome, and would draw the older query's
   ending over the newer query's loading state. The generation counter is the
   only thing stopping it, and the tests below drive exactly that sequence;
-* the held answers, which must be discarded when the address changes - a
-  cached hit after a new address would put the previous service's answers
-  back on screen without a request, which is the same failure as leaving the
-  table populated, one layer down;
-* the brake, so a service that says "too fast" is not immediately asked again
-  by the next keystroke.
 
 The debounce timer is fired directly rather than waited on. Qt timers need a
 Qt event loop, which no test here runs; driving the timeout by hand tests the
@@ -42,7 +36,6 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from wuwaterm_client import strings  # noqa: E402
 from wuwaterm_client.api import ApiClient, TermMatch, TermsResult  # noqa: E402
-from wuwaterm_client.errors import ERROR_OFFLINE, ERROR_RATE_LIMITED  # noqa: E402
 from wuwaterm_client.ui import terms_view as terms_view_module  # noqa: E402
 from wuwaterm_client.ui.terms_view import TermsView  # noqa: E402
 
@@ -350,7 +343,6 @@ def test_every_ending_of_an_older_search_is_dropped(qapp) -> None:
     assert view.field_error.is_showing() is False
     assert view._request_id is None
     assert view._task is None
-    assert len(view._cache) == 0, "an outcome nobody may draw is not worth holding"
     assert view.status_label.text() == strings.STATUS_BAR_READY
     assert view._generation == 5
 
@@ -395,134 +387,6 @@ def test_a_new_query_replaces_the_one_in_flight(qapp) -> None:
     assert view.banner.is_showing() is False
     assert view.status_label.text() != strings.STATUS_CANCELLED
 
-
-# -- held answers ----------------------------------------------------------
-
-
-def test_a_held_answer_is_reused_and_a_new_address_throws_it_away(qapp) -> None:
-    service = _Service()
-    view = TermsView(_client(service))
-
-    async def scenario() -> None:
-        view.query_edit.setText("Jinhsi")
-        view._on_debounce_elapsed()
-        await _settle(view)
-
-        assert service.queries == ["Jinhsi"]
-        assert view.table.rowCount() == 1
-
-        # Backspacing into a word already asked about must cost nothing.
-        view._on_debounce_elapsed()
-        await _settle(view)
-
-        assert service.queries == ["Jinhsi"], "a held answer must not be re-asked"
-        assert view.table.rowCount() == 1
-        assert view._request_id == "req-Jinhsi"
-
-        # The held answers belong to the service that gave them.
-        view.reset_for_endpoint_change()
-
-        assert len(view._cache) == 0
-        assert view.table.rowCount() == 0
-        assert view._request_id is None
-        assert view.empty_card.title_text == strings.ENDPOINT_CHANGED_TITLE
-
-        view._on_debounce_elapsed()
-        await _settle(view)
-
-        assert service.queries == ["Jinhsi", "Jinhsi"], (
-            "after an address change the same query must be asked again"
-        )
-        assert view.table.rowCount() == 1
-
-    asyncio.run(scenario())
-
-
-def test_the_held_answers_have_a_ceiling(qapp) -> None:
-    """Held answers are a convenience, not a store: one long session must not
-    accumulate every query it ever made."""
-    service = _Service()
-    view = TermsView(_client(service))
-
-    for index in range(terms_view_module.CACHE_CAPACITY + 1):
-        view._cache_put(f"q{index}", _held_answer(f"q{index}"))
-
-    assert len(view._cache) == terms_view_module.CACHE_CAPACITY
-    assert "q0" not in view._cache, "the oldest is the one that goes"
-    assert f"q{terms_view_module.CACHE_CAPACITY}" in view._cache
-
-
-# -- the brake -------------------------------------------------------------
-
-
-def test_being_told_to_slow_down_stops_the_search_from_typing(qapp) -> None:
-    """A service that refuses for going too fast must not be asked again by
-    the next keystroke. The deliberate attempt survives, because the owner is
-    the one who knows whether whatever caused it has been dealt with."""
-    asked: list[str] = []
-
-    def handler(request):
-        asked.append(request.url.params.get("q", ""))
-        return httpx.Response(
-            429,
-            json={"error": {"code": "rate_limited"}, "request_id": "req-9"},
-        )
-
-    view = TermsView(_client(handler))
-
-    async def first_search() -> None:
-        view.query_edit.setText("Jinhsi")
-        view._on_debounce_elapsed()
-        await _settle(view)
-
-    asyncio.run(first_search())
-
-    assert asked == ["Jinhsi"]
-    assert view._auto_paused is True
-    assert view._backoff_step == 1
-    assert view._resume_timer.isActive() is True
-    assert view.status_label.text() == strings.BANNER_AUTO_SEARCH_PAUSED
-    assert view.banner.is_showing() is True
-    assert view.banner.message_text == strings.ERROR_MSG_RATE_LIMITED
-    # The id is on the area's own row - the same widget in the same place a
-    # successful lookup uses - and deliberately NOT on the banner as well:
-    # one failure must not put two ids with two copy buttons on screen.
-    assert view._request_id == "req-9"
-    assert "req-9" in view._request_id_label.text()
-    assert view.banner.request_id is None
-    labels = _action_labels(view.banner._actions_host)
-    assert strings.ACTION_RESUME_AUTO_SEARCH in labels
-    assert strings.ACTION_RETRY in labels
-
-    # Typing no longer arms anything, and firing the timeout by hand still
-    # sends nothing.
-    view.query_edit.setText("Jinhsi2")
-    assert view._debounce_timer.isActive() is False
-    view._on_debounce_elapsed()
-    assert asked == ["Jinhsi"]
-
-    async def deliberate_retry() -> None:
-        view._on_search_clicked()
-        await _settle(view)
-
-    asyncio.run(deliberate_retry())
-
-    assert asked == ["Jinhsi", "Jinhsi2"], "the button must still be able to ask"
-    assert view._backoff_step == 2, "a second refusal waits longer than the first"
-
-    view._resume_auto_search()
-
-    assert view._auto_paused is False
-    assert view._resume_timer.isActive() is False
-    assert view.banner.is_showing() is False
-
-    view.query_edit.setText("Jinhsi3")
-    assert view._debounce_timer.isActive() is True
-
-
-# -- Codex P2 回归门(PR #63 评审发现) --------------------------------------
-
-
 def test_typing_invalidates_the_in_flight_request_before_the_debounce(qapp) -> None:
     """输入一变,在飞的那次查询就不再能回答它 —— 不等防抖到期。
 
@@ -553,26 +417,6 @@ def test_typing_invalidates_the_in_flight_request_before_the_debounce(qapp) -> N
     asyncio.run(scenario())
     assert service.interrupted == ["Jin"]
 
-
-def test_a_rate_limit_breaks_the_offline_streak(qapp) -> None:
-    """429 是服务端答的,证明它可达,离线连击必须归零。
-
-    否则一次离线 + 一次 429 + 再一次离线会被算成「连续两次离线」,把自动查询
-    无限期暂停 —— 中间那次成功的往返被无视了。
-    """
-    view = TermsView(_client(_Service()))
-
-    view._engage_brake(ERROR_OFFLINE)
-    assert view._offline_streak == 1
-
-    view._engage_brake(ERROR_RATE_LIMITED)
-    assert view._offline_streak == 0, "限流响应证明服务器可达,连击应被打断"
-
-    paused = view._engage_brake(ERROR_OFFLINE)
-    assert view._offline_streak == 1
-    assert paused is False, "这只是本轮第一次离线,不应暂停自动查询"
-
-
 def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:
     """每一次完成的请求都要留下可以拿去问运营方的句柄。
 
@@ -592,39 +436,25 @@ def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:
     assert "req-empty" in view._request_id_label.text()
 
 
-def test_a_successful_retry_releases_the_offline_pause(qapp) -> None:
-    """离线暂停没有恢复定时器,成功的手动重试是唯一能解开它的东西。
 
-    不解开的话:暂停会活得比断网更久,而承载「恢复自动查询」的提示条在渲染
-    结果时已被清掉 —— 于是继续打字什么也不发,屏幕上也没有任何东西说明为什么。
+def test_no_request_id_row_before_any_lookup(qapp) -> None:
+    """没发生过请求的屏幕上不该有请求 ID 行。
+
+    与 Banner 的三态语义一致:失败或空结果**要**显示该行(带占位符),因为那是
+    最可能被追问的结局;而首次绘制、清空输入、未配置这些从未发出请求的状态,
+    没有「缺失的 ID」可言 —— 印一行「请求 ID:—」等于请人去问一次本客户端从未
+    发出过的调用。
     """
-    service = _Service()
-    view = TermsView(_client(service))
-
-    view._engage_brake(ERROR_OFFLINE)
-    view._engage_brake(ERROR_OFFLINE)
-    assert view._auto_paused is True
-
-    view._render_result(_held_answer("Jinhsi"))
-
-    assert view._auto_paused is False, "成功的重试之后自动查询仍是暂停的"
-    assert view._offline_streak == 0
-
-
-def test_a_field_level_response_breaks_the_offline_streak(qapp) -> None:
-    """invalid_request 一类同样来自 HTTP 响应,证明服务可达。
-
-    它们在 _engage_brake 之前就 return,于是一次离线 + 一次字段级错误 + 再一次
-    离线会被当成连续两次离线。
-    """
-    from wuwaterm_client.errors import ERROR_INPUT_TOO_LONG, ClientError
-
     view = TermsView(_client(_Service()))
 
-    view._engage_brake(ERROR_OFFLINE)
-    assert view._offline_streak == 1
+    # 首次绘制:没有请求发生过。
+    assert view._request_id_row.isVisibleTo(view) is False
 
-    view._render_error(ClientError(ERROR_INPUT_TOO_LONG))
+    # 有请求、但没拿到 ID:该行出现,带占位符。
+    view._apply_request_id(None)
+    assert view._request_id_row.isVisibleTo(view) is True
+    assert strings.REQUEST_ID_PLACEHOLDER in view._request_id_label.text()
 
-    assert view._offline_streak == 0, "字段级响应也证明服务器可达,连击应打断"
-    assert view._auto_paused is False
+    # 回到空闲态(输入被清空)——又变成「没有请求」。
+    view._show_idle_state()
+    assert view._request_id_row.isVisibleTo(view) is False

@@ -33,7 +33,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -70,10 +70,17 @@ from .translate_view import TranslateView
 # resizes with the window stops being one. The content area takes the rest.
 NAV_BAR_WIDTH = 168
 
-# Enough for the widest area (the term table's five columns) without a
-# horizontal scrollbar, and no larger than a 1366x768 laptop can show.
-WINDOW_MINIMUM_SIZE = (960, 640)
+# What the widest area (the term table's five columns) wants before a
+# horizontal scrollbar appears. A PREFERENCE, not a floor: see
+# `_fit_to_workspace`.
+WINDOW_PREFERRED_MINIMUM = (960, 640)
 WINDOW_DEFAULT_SIZE = (1100, 720)
+
+# Below this the window stops being usable at all, so it is the one hard
+# floor. Small enough to fit the smallest workspace this application can
+# reasonably meet: a 1366x768 panel at 200% scaling reports roughly 683x384
+# logical pixels.
+WINDOW_ABSOLUTE_MINIMUM = (640, 380)
 
 # The order the owner meets the areas in, and the index each keeps for the
 # lifetime of the window: term lookup first because it is the reflex action,
@@ -154,8 +161,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(strings.APP_TITLE)
-        self.setMinimumSize(*WINDOW_MINIMUM_SIZE)
-        self.resize(*WINDOW_DEFAULT_SIZE)
+        self._fit_to_workspace()
         self.config = config if config is not None else ClientConfig.load()
         self.api_client = ApiClient.from_config(self.config)
 
@@ -326,6 +332,44 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         for position, button in enumerate(self.nav_buttons):
             button.setChecked(position == index)
+
+    def _fit_to_workspace(self) -> None:
+        """Size the window against the desktop it will actually appear on.
+
+        The minimum used to be a fixed 960x640, described in a comment as
+        "no larger than a 1366x768 laptop can show". That is true at 100%
+        scaling and false at every other setting: the number is in
+        DEVICE-INDEPENDENT pixels, so a 1366x768 panel at 150% offers about
+        911x512 of them and at 200% about 683x384. A minimum larger than the
+        workspace cannot be honoured - the window opens too tall, and because
+        nothing here scrolls, the buttons along the bottom go off-screen with
+        no way to reach them.
+
+        So the preferred minimum is clamped to what the screen reports, and
+        the absolute floor is what remains. The default size is clamped the
+        same way, or the window would open larger than the desktop and land
+        in the same place by a different route.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            # No screen to measure - the offscreen platform used by the test
+            # suite and by --self-check. Take the preference as given.
+            self.setMinimumSize(*WINDOW_PREFERRED_MINIMUM)
+            self.resize(*WINDOW_DEFAULT_SIZE)
+            return
+        # availableGeometry, not geometry: the taskbar is not workspace.
+        workspace = screen.availableGeometry()
+        minimum = (
+            max(min(WINDOW_PREFERRED_MINIMUM[0], workspace.width()),
+                WINDOW_ABSOLUTE_MINIMUM[0]),
+            max(min(WINDOW_PREFERRED_MINIMUM[1], workspace.height()),
+                WINDOW_ABSOLUTE_MINIMUM[1]),
+        )
+        self.setMinimumSize(*minimum)
+        self.resize(
+            max(min(WINDOW_DEFAULT_SIZE[0], workspace.width()), minimum[0]),
+            max(min(WINDOW_DEFAULT_SIZE[1], workspace.height()), minimum[1]),
+        )
 
     def focus_current_input(self) -> None:
         """Put the caret in whatever the current area's main input is.
