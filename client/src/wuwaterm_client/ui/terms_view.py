@@ -1,32 +1,26 @@
-"""Dictionary term lookup, searched as the query is typed.
+"""Exact dictionary term lookup: a query field and a results table.
 
-Three things in here are not free choices.
+A search starts when the owner asks for one - the button or Enter - and at no
+other moment. There is no timer in this module and nothing here reacts to
+``textChanged``; a lookup that searched while the query was being typed lived
+here for part of this branch's history and was withdrawn whole, because the
+machinery it needed (a debounce, a monotonic generation to drop replies from
+superseded searches, an invalidation path on every keystroke) kept removing
+behaviours this file had before it. See the ``instant search`` issue for what
+would have to be settled before it comes back.
 
-The input is a ``QLineEdit`` and not a multi-line editor. A Chinese input
-method holds its candidates in the preedit string, which never reaches
-``QLineEdit.text()``, so ``textChanged`` fires once per COMMITTED character
-rather than once per keystroke of a syllable. That turns "does typing Chinese
-send a request per candidate keypress" from a question only a human at a real
-machine could answer into one the architecture answers by construction.
+One request at a time, guarded the way it was before: the button is disabled
+while a search runs, but Enter in the field reaches the handler directly, so
+the handler itself refuses to start a second task. Without that guard each
+press starts another request and overwrites ``_task``, and replies can land
+out of order with the table showing an older query's results.
 
-Typing replaces requests rather than queueing behind them. The old guard
-ignored a new query while one was running, which is the wrong trade for a
-field that searches on every character: the answer the owner is waiting for
-is always the LAST one. So a new search cancels the previous task - and that
-is where the trap is. ``ApiClient._request`` CONSUMES ``CancelledError`` and
-raises ``ClientError(ERROR_CANCELLED)`` instead, so a cancelled task does not
-end as cancelled; it returns normally, reaches this view, and would overwrite
-the newer search's loading state with the older one's outcome. Cancelling is
-therefore only half of the mechanism. The other half is ``_generation``: every
-search takes the next number, and every exit of the coroutine - success,
-``ClientError``, ``CancelledError``, ``finally`` - compares it against the
-current one BEFORE touching a widget. Anything from an older generation is
-dropped in silence.
-
-And a request this view cancelled by itself is not an event the owner caused,
-so the cancellation is never rendered. The Cancel button in the translation
-area reports "stopped waiting" because a person asked for it; here it would
-only be noise from the machine talking to itself.
+A request cancelled by this view - which happens only when the address
+changes - is not an event the owner caused, so its outcome is not rendered.
+``ApiClient._request`` CONSUMES ``CancelledError`` and raises
+``ClientError(ERROR_CANCELLED)`` instead, so the cancelled task returns
+normally and arrives here looking like an outcome; drawing it would put a
+failure on top of the empty state the address change just produced.
 """
 
 from __future__ import annotations
@@ -34,11 +28,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -79,20 +72,11 @@ _COLUMNS = (
     strings.TERMS_COLUMN_REASON,
 )
 
-# 220ms. Below about 150ms a normal typing rhythm still produces a request per
-# character; above about 300ms a pure dictionary hit - which the service
-# answers in milliseconds - starts to feel like it lagged behind the keyboard.
-DEBOUNCE_MILLISECONDS = 220
-
 # Past this many characters, or with a line break anywhere in it, the text is
 # a sentence rather than a term. `GET /v1/terms` would answer it with an empty
-# table, which reads as "no such term" instead of "wrong tool".
+# table, which reads as "no such term" instead of "wrong tool". Checked when
+# the search is submitted, so it costs nothing until then.
 MAX_TERM_LENGTH = 40
-
-# Results from the previous query stay on screen while the next one runs, at
-# this opacity. Clearing the table on each keystroke makes it blink empty
-# between every character, which is harder to read than slightly stale rows.
-DIMMED_OPACITY = 0.55
 
 # How much room the bridge button gives the query before shortening it. The
 # button restates what the owner typed, and a pasted sentence would otherwise
@@ -163,7 +147,7 @@ def _category_label(category: str) -> str:
 
 
 class TermsView(QWidget):
-    """The term lookup area: one field, one table, no submit step."""
+    """The term lookup area: one field, one button, one table."""
 
     # Carries the current query to the translation area. A view that reached
     # for the main window instead would import the window that imports it, and
@@ -185,11 +169,6 @@ class TermsView(QWidget):
         self._on_enter_token = on_enter_token
         self._api_client = api_client
         self._task: asyncio.Task | None = None
-        # Monotonic. Read the module docstring before changing anything that
-        # touches it: it is the only thing standing between a cancelled task
-        # and the newer search it would otherwise overwrite.
-        self._generation = 0
-        self._last_query_sent: str | None = None
         self._request_id: str | None = None
 
         self.banner = Banner(self)
@@ -197,14 +176,13 @@ class TermsView(QWidget):
         self.query_edit = QLineEdit(self)
         self.query_edit.setObjectName("searchField")
         self.query_edit.setPlaceholderText(strings.TERMS_QUERY_PLACEHOLDER)
-        self.query_edit.textChanged.connect(self._on_query_changed)
         self.query_edit.returnPressed.connect(self._on_search_clicked)
 
-        # Secondary, and never disabled while a request runs. It is the retry
-        # entry: it skips the debounce, ignores the duplicate check and
-        # ignores the cache, so it is the one control that can always ask the
-        # service again. Disabling it during a request would take that away
-        # at exactly the moment it is wanted.
+        # Disabled while a search runs and while the client has no address.
+        # Both are the same statement - a press right now cannot produce an
+        # answer - so both go through `_apply_endpoint_state`, which is what
+        # the request path calls when it finishes rather than re-enabling the
+        # button unconditionally and undoing the unconfigured state.
         self.search_button = QPushButton(strings.TERMS_SEARCH_BUTTON, self)
         self.search_button.setObjectName("secondaryButton")
         self.search_button.clicked.connect(self._on_search_clicked)
@@ -262,14 +240,6 @@ class TermsView(QWidget):
         results_layout.setSpacing(8)
         results_layout.addWidget(self.table)
 
-        # One effect object for the whole results block, kept disabled while
-        # nothing is loading: a disabled QGraphicsEffect paints nothing extra,
-        # so this costs only what a search costs.
-        self._dim_effect = QGraphicsOpacityEffect(self._results_host)
-        self._dim_effect.setOpacity(DIMMED_OPACITY)
-        self._dim_effect.setEnabled(False)
-        self._results_host.setGraphicsEffect(self._dim_effect)
-
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         search_row.addWidget(self.query_edit, 1)
@@ -286,92 +256,34 @@ class TermsView(QWidget):
         layout.addWidget(self._request_id_row)
         layout.addWidget(self.status_label)
 
-        self._debounce_timer = QTimer(self)
-        self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(DEBOUNCE_MILLISECONDS)
-        self._debounce_timer.timeout.connect(self._on_debounce_elapsed)
-
         self._apply_request_id()
         self._apply_endpoint_state()
         self._show_idle_state()
 
-    # -- typing ------------------------------------------------------------
-
-    def _on_query_changed(self, _text: str = "") -> None:
-        """Re-arm the debounce, or refuse to arm it at all.
-
-        Every gate that can be decided from the text alone is decided here,
-        so a query that will never be sent stops costing a timer as well as a
-        request.
-        """
-        self.field_error.clear()
-        mark_field_invalid(self.query_edit, False)
-
-        # The text no longer matches what is in flight, so what is in flight
-        # can no longer answer it. Re-arming the debounce alone left the old
-        # request current for up to another 220 ms: if its reply landed in
-        # that window it passed the generation check and drew the PREVIOUS
-        # query's rows and request id under the new text. Invalidate here,
-        # start the replacement when the debounce expires - the two were
-        # conflated, and only the starting half belongs on a timer.
-        self._invalidate_in_flight()
-
-        raw = self.query_edit.text()
-        if not raw.strip():
-            self._debounce_timer.stop()
-            self._abandon_in_flight()
-            self._show_idle_state()
-            return
-        if self._is_a_sentence(raw):
-            self._debounce_timer.stop()
-            self._abandon_in_flight()
-            self._show_sentence_state(raw.strip())
-            return
-        if not self._api_client.is_configured:
-            # Gate three. Not an error to report on a keystroke: the empty
-            # card already says why, and the button is still there for a
-            # deliberate attempt.
-            self._debounce_timer.stop()
-            # Nothing will replace the request just invalidated, so the
-            # loading state has to come down here rather than wait for a
-            # search that is not coming.
-            self._end_loading()
-            return
-        self._debounce_timer.start()
-
-    def _on_debounce_elapsed(self) -> None:
-        self._search(manual=False)
+    # -- submitting --------------------------------------------------------
 
     def _on_search_clicked(self) -> None:
-        self._search(manual=True)
+        """The only path that starts a lookup: the button, or Enter.
 
-    def _search(self, manual: bool) -> None:
-        """Decide whether this query is sent, and send it.
-
-        `manual` is the retry path: the search button and Enter. It skips the
-        debounce, the duplicate check and the cache, because the reason to
-        press it is that the last answer was not one - an error, or one this
-        client is holding from before whatever the owner just fixed.
+        The in-flight guard is first and is not an optimisation. The button
+        is disabled for the duration of a search, but Enter in the query
+        field calls this directly, so without the guard each press starts
+        another request and overwrites `_task` - and two replies can then
+        land out of order, leaving the table showing the older query.
         """
-        self._debounce_timer.stop()
+        if self._task is not None and not self._task.done():
+            return
         raw = self.query_edit.text()
         query = raw.strip()
         if not query:
-            self._abandon_in_flight()
-            self._show_idle_state()
             return
         if self._is_a_sentence(raw):
-            self._abandon_in_flight()
             self._show_sentence_state(query)
             return
         if not self._api_client.is_configured:
             # The UI is short-circuited here purely to keep the screen quiet;
             # `_request` refuses an unconfigured client on its own, and that
             # refusal - not this line - is what makes the guarantee.
-            return
-        if not manual and query == self._last_query_sent:
-            # Gate two. The manual path skips it on purpose: pressing the
-            # button on unchanged text is how a failed lookup is retried.
             return
         self._start_search(query)
 
@@ -389,87 +301,45 @@ class TermsView(QWidget):
     # -- the request -------------------------------------------------------
 
     def _start_search(self, query: str) -> None:
-        self._generation += 1
-        generation = self._generation
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-        self._last_query_sent = query
         self._begin_loading()
-        self._task = asyncio.ensure_future(self._run_search(query, generation))
+        self._task = asyncio.ensure_future(self._run_search(query))
 
-    async def _run_search(self, query: str, generation: int) -> None:
+    async def _run_search(self, query: str) -> None:
         try:
             result = await self._api_client.lookup_terms(query)
         except ClientError as exc:
-            if generation != self._generation:
-                return
             if exc.code == ERROR_CANCELLED:
-                # This client cancelled it, not the owner. `_request` turns
-                # the cancellation into this error rather than letting the
-                # task end as cancelled, so it arrives here looking like an
-                # outcome; rendering it would put "stopped waiting" on screen
-                # for a request nobody asked to stop.
+                # Only `reset_for_endpoint_change` cancels, and it has already
+                # put the screen where it wants it. `_request` turns the
+                # cancellation into this error rather than letting the task
+                # end as cancelled, so it arrives here looking like an
+                # outcome; rendering it would draw a failure over that state.
                 return
-            self._end_loading()
             self._render_error(exc)
         except asyncio.CancelledError:
             # Cancelled between awaits, outside the API client's own handler.
             # Same silence, for the same reason.
             return
         else:
-            if generation != self._generation:
-                return
-            self._end_loading()
             self._render_result(result)
         finally:
-            if generation == self._generation:
-                self._end_loading()
-                self._task = None
-
-    def _invalidate_in_flight(self) -> None:
-        """Make whatever is running unable to answer, and leave the screen be.
-
-        The generation moves first: a task cancelled before its first step
-        never runs its own body, and one cancelled mid-await comes back as an
-        ordinary error, so neither can be relied on to clean up after itself.
-
-        `_last_query_sent` is cleared with it. That field means "this query
-        has been asked and an answer is coming"; once the request is
-        abandoned no answer is coming, so leaving it set would let the
-        duplicate gate refuse to re-ask a query nothing is going to answer.
-
-        Split from `_abandon_in_flight` for the typing path: a keystroke
-        invalidates the request but does NOT end the loading state, because
-        the replacement request is 220 ms away. Ending it here made the
-        progress line and the dimmed rows flicker off and on under every
-        keystroke.
-        """
-        self._generation += 1
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-        self._task = None
-        self._last_query_sent = None
-
-    def _abandon_in_flight(self) -> None:
-        """Invalidate the request AND take down what it was showing.
-
-        For the paths where nothing replaces it: an emptied field, a sentence,
-        an address change.
-        """
-        self._invalidate_in_flight()
-        self._end_loading()
+            self._end_loading()
+            self._task = None
 
     def _begin_loading(self) -> None:
         self.banner.clear()
         self.field_error.clear()
         mark_field_invalid(self.query_edit, False)
+        self.search_button.setEnabled(False)
         self.progress.start()
         self.status_label.set_text(strings.TERMS_SEARCHING)
-        self._dim_effect.setEnabled(self.table.rowCount() > 0)
 
     def _end_loading(self) -> None:
         self.progress.stop()
-        self._dim_effect.setEnabled(False)
+        # Not `setEnabled(True)`: the button is also the unconfigured state's
+        # to disable, and a search that finished must not hand it back when
+        # there is still no address to send the next one to.
+        self._apply_endpoint_state()
 
     # -- rendering ---------------------------------------------------------
 
@@ -543,16 +413,15 @@ class TermsView(QWidget):
     def _render_error(self, exc: ClientError) -> None:
         """Put a failed search where its own error code says it belongs."""
         presentation = presentation_for(exc.code)
-        # Nothing on screen belongs to this query any more, and the next
-        # attempt has to be allowed to repeat it.
-        self._last_query_sent = None
+        # The rows on screen answered the PREVIOUS query and this one has no
+        # answer at all, so they are taken down before anything else is drawn.
+        # Leaving them up under a failure banner lets them be read as this
+        # query's results - the behaviour this file had before the redesign,
+        # and the one it keeps.
+        self._clear_matches()
         self.status_label.set_text(strings.STATUS_BAR_LAST_REQUEST_FAILED)
 
         if presentation.surface == SURFACE_FIELD:
-            # These three codes come back in an HTTP RESPONSE, so the service
-            # was reached - the same proof a 429 carries. Returning before the
-            # brake left the offline streak standing across a completed round
-            # trip, so one earlier offline failure plus one of these plus one
             mark_field_invalid(self.query_edit, True)
             self.field_error.show_error(presentation.message)
             self._apply_request_id(exc.request_id)
@@ -581,6 +450,22 @@ class TermsView(QWidget):
         self._apply_request_id(exc.request_id)
 
     # -- states ------------------------------------------------------------
+
+    def _clear_matches(self) -> None:
+        """Empty the table and put the card back in front of it.
+
+        The rows and the results host are one statement: an empty table left
+        visible reads as "the dictionary answered, with nothing", which is a
+        different claim from "there is no answer on this screen".
+        """
+        self.table.setRowCount(0)
+        # Not the first-launch wording: the owner HAS typed a term and asked
+        # for it. "Type any term to start" under a failure banner reads as
+        # though the attempt never happened.
+        self.empty_card.set_content(
+            strings.EMPTY_TERMS_FAILED_TITLE, strings.EMPTY_TERMS_FAILED_SUBTITLE
+        )
+        self._show_empty_card()
 
     def _show_idle_state(self, after_endpoint_change: bool = False) -> None:
         """Nothing to show, and why that is not a loss.
@@ -689,8 +574,6 @@ class TermsView(QWidget):
         clipboard.setText(self._request_id)
         self.status_label.set_text(strings.STATUS_COPIED)
 
-    # -- the cache ---------------------------------------------------------
-
     # -- endpoint change ---------------------------------------------------
 
     def focus_input(self) -> None:
@@ -711,11 +594,14 @@ class TermsView(QWidget):
         was serving; leaving the table populated after the address changes
         shows one server's answers under another's name.
 
-        The in-flight task is cancelled, and the generation moves with it, so
-        the `cancelled` that `_request` produces from that cancellation is
-        discarded rather than rendered over the empty state left here.
+        The in-flight task is cancelled. The `cancelled` that `_request`
+        produces from that cancellation is dropped by `_run_search` rather
+        than rendered over the empty state left here.
         """
-        self._abandon_in_flight()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        self._task = None
+        self.progress.stop()
         self.banner.clear()
         self.field_error.clear()
         mark_field_invalid(self.query_edit, False)
