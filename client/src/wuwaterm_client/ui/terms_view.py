@@ -598,9 +598,15 @@ class TermsView(QWidget):
         produces from that cancellation is dropped by `_run_search` rather
         than rendered over the empty state left here.
         """
+        # `_task` is deliberately NOT cleared here. A cancelled task is not
+        # done until it has unwound, and its own `finally` is what releases
+        # the slot. Clearing it now would let a submit in that sliver start a
+        # second request, and the older task's `finally` would then take down
+        # the newer one's loading state - the ordering bug this module no
+        # longer has any machinery to defend against. Leaving it set means the
+        # in-flight guard refuses that submit, which is what main did too.
         if self._task is not None and not self._task.done():
             self._task.cancel()
-        self._task = None
         self.progress.stop()
         self.banner.clear()
         self.field_error.clear()

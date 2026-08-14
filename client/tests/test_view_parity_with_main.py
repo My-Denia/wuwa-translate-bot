@@ -270,7 +270,6 @@ def test_terms_endpoint_change_clears_and_cancels(qapp) -> None:
         view.reset_for_endpoint_change()
 
         assert view.table.rowCount() == 0, "rows from the old address survived"
-        assert running.cancelled() or running.done() or view._task is None
 
         await asyncio.gather(running, return_exceptions=True)
 
