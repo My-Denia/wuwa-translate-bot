@@ -129,6 +129,10 @@ class SettingsDialog(QDialog):
         self.base_url_edit = QLineEdit(config.base_url or "", connection_card)
         self.base_url_edit.setPlaceholderText(strings.SETTINGS_BASE_URL_PLACEHOLDER)
         self.base_url_edit.textChanged.connect(self._on_base_url_changed)
+        # main 用的是 QFormLayout.addRow(文字, 控件),Qt 在那里**自动**把标签设为
+        # 控件的 buddy。改成卡片 + 手排布局之后这层关联没了,标签只是碰巧摆在
+        # 旁边——辅助技术读到的是一个无名输入框,而占位符在输入内容之后就消失了。
+        base_url_label.setBuddy(self.base_url_edit)
 
         self.base_url_error = FieldError(connection_card)
 
@@ -139,7 +143,9 @@ class SettingsDialog(QDialog):
         timeout_row = QHBoxLayout()
         timeout_row.setContentsMargins(0, 0, 0, 0)
         timeout_row.setSpacing(8)
-        timeout_row.addWidget(QLabel(strings.SETTINGS_TIMEOUT_LABEL, connection_card))
+        timeout_label = QLabel(strings.SETTINGS_TIMEOUT_LABEL, connection_card)
+        timeout_label.setBuddy(self.timeout_spin)
+        timeout_row.addWidget(timeout_label)
         timeout_row.addStretch(1)
         timeout_row.addWidget(self.timeout_spin)
 
@@ -160,9 +166,11 @@ class SettingsDialog(QDialog):
         backend_row = QHBoxLayout()
         backend_row.setContentsMargins(0, 0, 0, 0)
         backend_row.setSpacing(8)
-        backend_row.addWidget(
-            QLabel(strings.STATUS_KEYRING_BACKEND_LABEL, credential_card)
+        backend_name_label = QLabel(
+            strings.STATUS_KEYRING_BACKEND_LABEL, credential_card
         )
+        backend_name_label.setBuddy(self.backend_label)
+        backend_row.addWidget(backend_name_label)
         backend_row.addStretch(1)
         backend_row.addWidget(self.backend_label)
 

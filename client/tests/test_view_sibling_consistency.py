@@ -36,6 +36,10 @@ from wuwaterm_client.ui.main_window import MainWindow  # noqa: E402
 
 # (rule, area) -> why this area is allowed to differ.
 EXEMPTIONS = {
+    ("focuses-the-rejected-field", "status"): (
+        "服务状态区没有可编辑字段:它的失败一律走 banner,没有「被拒绝的那个框」"
+        "可以把光标送回去。"
+    ),
     ("clears-field-error-on-edit", "status"): (
         "服务状态区没有输入框,也没有字段级错误面:它的唯一动作是刷新,"
         "失败走 banner。没有可编辑的文本,就没有「编辑后该清掉的拒绝」。"
@@ -178,7 +182,43 @@ def test_every_exemption_names_an_area_that_exists(window) -> None:
         "names-primary-input",
         "clears-field-error-on-edit",
         "applies-endpoint-state",
+        "focuses-the-rejected-field",
     }
     for rule, area in EXEMPTIONS:
         assert area in areas, f"豁免指向不存在的区:{area}"
         assert rule in rules, f"豁免指向不存在的规则:{rule}"
+
+
+def test_every_area_returns_focus_to_the_rejected_field(window) -> None:
+    """字段级拒绝之后,光标要回到要改的那个框。
+
+    这三个错误码说的是「你输入的那段文字不行」。用鼠标点了提交按钮之后,
+    焦点还停在按钮上,而要修的东西在别处——键盘和读屏用户得先自己导航回去。
+    翻译区一直是 setFocus 的,查词区不是,而两者的错误分派走的是同一张表。
+    """
+    from wuwaterm_client.errors import ClientError
+
+    stranded = []
+    for name, page in _areas(window).items():
+        if _exempt("focuses-the-rejected-field", name):
+            continue
+        window.stack.setCurrentWidget(page)
+        editor = _primary_input(window, name, page)
+        # 把焦点先挪走,模拟「用鼠标点了提交按钮」。
+        submit = next(
+            (b for b in (getattr(page, "search_button", None),
+                         getattr(page, "translate_button", None)) if b is not None),
+            None,
+        )
+        assert submit is not None, f"{name} 区找不到提交按钮"
+        submit.setFocus()
+        assert page.focusWidget() is not editor, f"{name} 区的前置条件没建立"
+
+        render = getattr(page, "_show_error", None) or page._render_error
+        render(ClientError("input_too_long", request_id="req-x"))
+
+        if page.focusWidget() is not editor:
+            stranded.append(name)
+    assert not stranded, (
+        f"这些区在字段级拒绝之后把光标留在了别处,要改的框够不着:{stranded}"
+    )

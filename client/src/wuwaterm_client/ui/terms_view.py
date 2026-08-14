@@ -467,8 +467,14 @@ class TermsView(QWidget):
         self.status_label.set_text(strings.STATUS_BAR_LAST_REQUEST_FAILED)
 
         if presentation.surface == SURFACE_FIELD:
+            # The fault is in the text the owner is looking at, so the message
+            # goes against that text and the keyboard goes with it. Without the
+            # focus move, a submit from the Search button leaves the caret on
+            # the button while the thing to correct is the field - the
+            # translation area has moved it all along.
             mark_field_invalid(self.query_edit, True)
             self.field_error.show_error(presentation.message)
+            self.query_edit.setFocus()
             self._apply_request_id(exc.request_id)
             return
 
