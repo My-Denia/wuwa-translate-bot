@@ -31,6 +31,7 @@ from .settings import (
     validate_loopback_bind,
     validate_port,
     validate_web_enabled,
+    validate_web_limits,
 )
 
 LOGGER = logging.getLogger("wuwaterm_api")
@@ -120,6 +121,7 @@ def _serve(args: argparse.Namespace) -> int:
     # WUWATERM_API_WEB_ENABLED was misspelled, which gated revoking a
     # compromised credential on the spelling of a presentation-layer flag.
     validate_web_enabled(settings.web_enabled_raw)
+    validate_web_limits(settings.web_session_ttl_raw, settings.web_max_sessions_raw)
     # The loopback guard lives HERE, on the only path that binds a socket — not
     # in from_env, which every operator subcommand calls: `device revoke` must
     # never be blocked by serve-time network configuration. Both the configured

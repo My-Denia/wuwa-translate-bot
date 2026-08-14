@@ -99,6 +99,114 @@ def mounted_web_app(app):
     return None
 
 
+# Environment variables that ALREADY block `device revoke` on origin/main when
+# they carry a bad value, because from_env range-checks them strictly. They are
+# not introduced by this change and are tracked separately; listing them here
+# is what lets the full-set assertion below cover everything else and fail on
+# any NEW addition to the set.
+PRE_EXISTING_STRICT_ENV_VARS = frozenset({
+    "WUWATERM_API_PORT",
+    "WUWATERM_API_LLM_TIMEOUT_SECONDS",
+    "WUWATERM_API_LLM_MAX_CONCURRENCY",
+    "WUWATERM_API_LLM_CALLS_PER_MINUTE",
+    "WUWATERM_API_RATE_LIMIT_PER_MINUTE",
+    "WUWATERM_API_MAX_BODY_BYTES",
+    "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
+    "WUWATERM_API_AUTH_MAX_CONCURRENCY",
+})
+
+
+def _env_names_read_by_settings() -> set[str]:
+    """Every environment variable from_env actually reads, DERIVED not listed.
+
+    Parsed out of the settings module's own source, so a variable added there
+    tomorrow is covered by the assertion below without anyone remembering to
+    add it here. A hand-written list would need the same edit as the code and
+    would be forgotten in the same breath - which is precisely how the first
+    version of this fix covered the boolean switch and missed the two integer
+    settings introduced in the same commit.
+    """
+    import ast
+    import inspect
+
+    from wuwaterm_api import settings as settings_module
+
+    tree = ast.parse(inspect.getsource(settings_module))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        label = getattr(target, "id", None) or getattr(target, "attr", None)
+        if label not in {"getenv", "_env_int", "_env_float", "_env_path"}:
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant):
+            value = node.args[0].value
+            if isinstance(value, str) and value.startswith("WUWATERM"):
+                names.add(value)
+    return names
+
+
+def test_no_setting_this_change_added_can_block_device_revocation(
+    tmp_path, sample_db, monkeypatch, capsys
+):
+    """FULL-SET ASSERTION over the environment dimension, derived not listed.
+
+    `from_env()` runs for EVERY subcommand, `device revoke` included, so a
+    reader that raises there gates credential revocation on the spelling of an
+    unrelated setting. Fixing the boolean switch alone left the two integer
+    settings added in the same commit still raising - the fix was complete for
+    the reported case and incomplete for the property.
+
+    So this enumerates the variables the settings module actually reads, drives
+    the REAL CLI with a bad value for each, and requires revocation to succeed.
+    Variables already strict on origin/main are exempted by name, and the
+    exemption set is itself asserted, so a NEW strict variable fails here
+    rather than joining the exemption quietly.
+    """
+    from wuwaterm_api.cli import main as cli_main
+
+    discovered = _env_names_read_by_settings()
+    assert discovered, "the derivation found nothing - it has broken"
+    assert PRE_EXISTING_STRICT_ENV_VARS <= discovered, (
+        "the exemption list names variables the module no longer reads: "
+        f"{PRE_EXISTING_STRICT_ENV_VARS - discovered}"
+    )
+    must_be_safe = sorted(discovered - PRE_EXISTING_STRICT_ENV_VARS)
+
+    # The property is that reading the environment does not RAISE - that is the
+    # mechanism by which an unrelated setting blocks revocation. Asserted on
+    # from_env directly rather than through the CLI, because two of these
+    # variables point AT the credential store, so feeding them garbage makes
+    # revocation fail for an honest reason and would report the wrong thing.
+    raised = []
+    for name in must_be_safe:
+        monkeypatch.setenv(name, "!!not-a-valid-value!!")
+        try:
+            ApiSettings.from_env()
+        except Exception as exc:  # noqa: BLE001 - any raise is the defect
+            raised.append((name, f"{type(exc).__name__}: {exc}"))
+        finally:
+            monkeypatch.delenv(name, raising=False)
+    assert not raised, (
+        "a bad value in these settings raises from from_env(), which runs on "
+        "every subcommand and so blocks `device revoke`: " + repr(raised)
+    )
+
+    # ...and one end-to-end run through the real CLI, on a variable that does
+    # not point at the store, to show the property is the one that matters.
+    store_path = tmp_path / "api-state" / "devices.db"
+    store = DeviceStore(store_path)
+    store.initialize()
+    device = store.issue("compromised", secret=DEVICE_SECRET)
+    monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(store_path))
+    monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
+    monkeypatch.setenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS", "not-a-number")
+    monkeypatch.setenv("WUWATERM_API_WEB_MAX_SESSIONS", "-999")
+    assert cli_main(["device", "revoke", "--device-id", device.device_id]) == 0
+    capsys.readouterr()
+
+
 def test_a_mistyped_web_switch_does_not_block_device_revocation(
     tmp_path, sample_db, monkeypatch, capsys
 ):
@@ -587,7 +695,15 @@ def test_the_mount_point_and_its_children_answer_identically_off_edge(
     both and compares the full response shape rather than the status alone.
     """
     app, _store, _device, _token = build_web_app(tmp_path, sample_db)
-    methods = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+    # DERIVED, not listed: the standard library's own enumeration of HTTP
+    # methods. A hand-written tuple is what let the first version of the
+    # mount-point fix cover GET and HEAD and leave POST, PUT and DELETE
+    # answering 405 from the parent - the list and the fix would have needed
+    # the same edit, and got neither.
+    import http
+
+    methods = tuple(sorted(m.value for m in http.HTTPMethod))
+    assert "GET" in methods and "POST" in methods and len(methods) >= 9, methods
     paths = (
         WEB_MOUNT_PATH,
         f"{WEB_MOUNT_PATH}/",
@@ -615,6 +731,58 @@ def test_the_mount_point_and_its_children_answer_identically_off_edge(
     assert location is None
     assert cache == "no-store"
     assert csp and "default-src 'none'" in csp
+
+
+def test_every_response_this_surface_emits_is_hardened_and_is_a_page(
+    tmp_path, sample_db
+):
+    """FULL-SET ASSERTION over the response-producer dimension.
+
+    Three producers can answer a request under this mount, and each was fixed
+    only after being reported separately: the views, the child ROUTER, and the
+    PARENT middleware. The last is the one that keeps being forgotten because
+    it never enters the sub-application at all - an oversized form is answered
+    by the body limit, a slow translation by the timeout, both above the child.
+
+    So the probes below are chosen to reach one producer each, and the
+    assertion is the same for all of them: hardening headers present, and the
+    body is a page rather than the JSON envelope meant for the desktop client.
+    """
+    app, _store, _device, _token = build_web_app(
+        tmp_path, sample_db, max_body_bytes=200
+    )
+    jar = session_cookie(app)
+    oversized = "text=" + "a" * 400
+
+    probes = (
+        ("a view", "GET", f"{WEB_MOUNT_PATH}/", {}, None),
+        ("the child router, unknown path", "GET", f"{WEB_MOUNT_PATH}/nope", {}, None),
+        ("the child router, wrong method", "DELETE", f"{WEB_MOUNT_PATH}/lookup", {}, None),
+        ("the child router, slash variant", "GET", f"{WEB_MOUNT_PATH}/translate/", {}, None),
+        (
+            "the PARENT body-limit middleware",
+            "POST",
+            f"{WEB_MOUNT_PATH}/translate",
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            oversized,
+        ),
+    )
+    problems = []
+    for label, method, url, extra, content in probes:
+        kwargs = {"headers": {**edge(), **extra}, "cookies": jar}
+        if content is not None:
+            kwargs["content"] = content.encode("utf-8")
+        response = run(call(app, method, url, **kwargs))
+        policy = response.headers.get("content-security-policy") or ""
+        if response.headers.get("cache-control") != "no-store":
+            problems.append((label, response.status_code, "no cache-control"))
+        if "default-src 'none'" not in policy:
+            problems.append((label, response.status_code, "no CSP"))
+        if response.headers.get("x-content-type-options") != "nosniff":
+            problems.append((label, response.status_code, "no nosniff"))
+        if response.text.lstrip().startswith("{"):
+            problems.append((label, response.status_code, "JSON envelope, not a page"))
+    assert not problems, problems
 
 
 def test_router_generated_responses_are_hardened_too(tmp_path, sample_db):
@@ -810,6 +978,75 @@ def test_the_lookup_redirect_carries_the_minted_cookie(tmp_path, sample_db):
     )
     assert landing.status_code == 200, landing.status_code
     assert len(app.state.web_sessions) == 1, "the redirect must not cause a second mint"
+
+
+def test_every_pipeline_result_kind_has_a_rendering():
+    """FULL-SET ASSERTION over the kind dimension, derived not copied.
+
+    The renderer maps outcome kinds to Chinese labels. It mapped three of the
+    pipeline's four renderable kinds, so a submission that normalised to
+    nothing rendered the raw internal token `noop` and an English message on an
+    interface promised to be Chinese.
+
+    The set comes from introspecting the application module for its KIND_*
+    constants, so a kind added on the server side that the renderer does not
+    follow fails HERE rather than reaching the owner as a raw token. A
+    hand-written list would need the same edit as the renderer and would be
+    forgotten in the same breath.
+
+    The desktop client's category mapping had this exact defect and was fixed
+    with this exact assertion; the web layer repeated it because that solution
+    was not findable from here. See the ledger entry on indexing solved shapes.
+    """
+    import wuwaterm.application as pipeline
+    from wuwaterm_api.web import render
+
+    defined = {
+        value
+        for name, value in vars(pipeline).items()
+        if name.startswith("KIND_") and isinstance(value, str)
+    }
+    assert defined, "introspection found no KIND_* constants - the derivation broke"
+    renderable = defined - render._KINDS_NOT_RENDERED_AS_RESULTS
+    mapped = set(render._SOURCE_LABELS)
+    assert mapped == renderable, {
+        "kinds the pipeline can return but the page cannot label": renderable - mapped,
+        "labels for kinds that no longer exist": mapped - renderable,
+    }
+
+
+def test_every_pipeline_direction_has_a_rendering():
+    """The same full-set assertion for the other enumerated dimension."""
+    import wuwaterm.application as pipeline
+    from wuwaterm_api.web import render
+
+    defined = {
+        value
+        for name, value in vars(pipeline).items()
+        if name.startswith("DIRECTION_") and isinstance(value, str)
+    }
+    assert defined
+    assert set(render._DIRECTION_LABELS) == defined, {
+        "directions with no label": defined - set(render._DIRECTION_LABELS),
+        "labels for unknown directions": set(render._DIRECTION_LABELS) - defined,
+    }
+
+
+def test_a_noop_outcome_renders_in_chinese(tmp_path, sample_db):
+    """The instance the full-set assertion above would have prevented."""
+    from wuwaterm_api.web import render
+
+    outcome = type("O", (), {"kind": "noop", "direction": "en",
+                             "text": "Nothing to translate after removing metadata."})()
+    body = render.translate_view(
+        mount=WEB_MOUNT_PATH, text="[WW 2.1]", result=outcome, translated=True
+    )
+    heading = re.search(r'<div class="card"><h2>(.*?)</h2>', body)
+    assert heading is not None, body
+    assert "noop" not in heading.group(1), heading.group(1)
+    assert "无可翻译内容" in heading.group(1)
+    assert "Nothing to translate" not in body
+    assert "输入中没有可翻译的内容" in body
 
 
 def test_multi_line_translations_keep_their_line_breaks(tmp_path, sample_db):

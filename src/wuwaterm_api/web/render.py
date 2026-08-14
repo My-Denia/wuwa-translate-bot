@@ -22,9 +22,11 @@ from html import escape as _escape
 from wuwaterm.application import (
     DIRECTION_TO_CHINESE,
     DIRECTION_TO_ENGLISH,
+    KIND_ERROR,
     KIND_EXACT,
     KIND_FUZZY,
     KIND_LLM,
+    KIND_NOOP,
 )
 
 # The pipeline's OWN vocabulary, imported. An earlier revision of this file
@@ -39,7 +41,16 @@ _SOURCE_LABELS = {
     KIND_EXACT: "词典 · 官方译名",
     KIND_FUZZY: "词典 · 近似匹配",
     KIND_LLM: "模型",
+    KIND_NOOP: "无可翻译内容",
 }
+# KIND_ERROR never reaches a view: the handler turns it into an ApiError and the
+# error page renders it. Named here rather than merely absent, so the coverage
+# assertion can require this map to account for EVERY kind the pipeline defines
+# and this one is an explicit exemption instead of an oversight.
+_KINDS_NOT_RENDERED_AS_RESULTS = frozenset({KIND_ERROR})
+# The pipeline's own message for a submission that normalised to nothing is
+# English, and this interface is Chinese. Replaced rather than passed through.
+_NOOP_MESSAGE = "输入中没有可翻译的内容。"
 _DIRECTION_LABELS = {
     DIRECTION_TO_CHINESE: "译为中文",
     DIRECTION_TO_ENGLISH: "译为英文",
@@ -287,6 +298,17 @@ def translate_view(
         return form
     kind = str(getattr(result, "kind", ""))
     raw_direction = str(getattr(result, "direction", ""))
+    if kind == KIND_NOOP:
+        # Not a translation, so it does not get a translation's heading: no
+        # direction, and the pipeline's English notice replaced by a Chinese
+        # one. Rendered before the direction lookup below because "translated
+        # into English" is a false statement about an empty result.
+        return form + (
+            '<div class="card">'
+            f'<h2>{esc(_SOURCE_LABELS[KIND_NOOP])}</h2>'
+            f'<p class="result">{esc(_NOOP_MESSAGE)}</p>'
+            "</div>"
+        )
     # An unrecognised kind claims NOTHING about provenance rather than
     # defaulting to one of the two answers. Guessing here is how the previous
     # revision came to label every dictionary hit as a model translation.

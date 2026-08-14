@@ -189,6 +189,42 @@ def parse_bool(raw: str, default: bool) -> bool:
     return default
 
 
+def parse_int(raw: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Lenient integer parsing for WEB-ONLY settings read on every subcommand.
+
+    Same contract and same reason as ``parse_bool``: unreadable or out of range
+    becomes the default rather than an exception, because ``from_env()`` runs
+    for ``device revoke`` too. Fixing only the boolean switch left these two
+    still raising, so a typo in a session TTL kept blocking revocation - the
+    fix was complete for the case that was reported and incomplete for the
+    property, which is the failure this file has now seen twice.
+    """
+    try:
+        value = int((raw or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def validate_web_limits(ttl_raw: str, max_sessions_raw: str) -> None:
+    """Serve-path validation for the web-only numeric settings."""
+    for name, raw, minimum, maximum in (
+        ("WUWATERM_API_WEB_SESSION_TTL_SECONDS", ttl_raw, 60, 30 * 24 * 60 * 60),
+        ("WUWATERM_API_WEB_MAX_SESSIONS", max_sessions_raw, 1, 1024),
+    ):
+        candidate = (raw or "").strip()
+        if not candidate:
+            continue
+        try:
+            value = int(candidate)
+        except ValueError:
+            raise ApiConfigError(f"{name} must be an integer") from None
+        if not minimum <= value <= maximum:
+            raise ApiConfigError(
+                f"{name} must be between {minimum} and {maximum}"
+            )
+
+
 def validate_web_enabled(raw: str) -> bool:
     """Serve-path validation for the web switch. Raises on a typo.
 
@@ -277,6 +313,10 @@ class ApiSettings:
     web_edge_secret: str = ""
     web_session_ttl_seconds: int = DEFAULT_WEB_SESSION_TTL_SECONDS
     web_max_sessions: int = DEFAULT_WEB_MAX_SESSIONS
+    # Raw forms, for the same reason as web_enabled_raw: the serve path is
+    # where a typo in a web-only setting must be refused, not from_env().
+    web_session_ttl_raw: str = ""
+    web_max_sessions_raw: str = ""
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -367,16 +407,25 @@ class ApiSettings:
             # credential.
             web_device_token=(os.getenv("WUWATERM_API_WEB_DEVICE_TOKEN") or "").strip(),
             web_edge_secret=(os.getenv("WUWATERM_API_WEB_EDGE_SECRET") or "").strip(),
-            web_session_ttl_seconds=_env_int(
-                "WUWATERM_API_WEB_SESSION_TTL_SECONDS",
+            # Lenient here, strict on the serve path (validate_web_limits).
+            # Reading these strictly made a mistyped session TTL block
+            # `device revoke`, exactly as the boolean switch had.
+            web_session_ttl_seconds=parse_int(
+                os.getenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS") or "",
                 DEFAULT_WEB_SESSION_TTL_SECONDS,
                 minimum=60,
                 maximum=30 * 24 * 60 * 60,
             ),
-            web_max_sessions=_env_int(
-                "WUWATERM_API_WEB_MAX_SESSIONS",
+            web_session_ttl_raw=(
+                os.getenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS") or ""
+            ).strip(),
+            web_max_sessions=parse_int(
+                os.getenv("WUWATERM_API_WEB_MAX_SESSIONS") or "",
                 DEFAULT_WEB_MAX_SESSIONS,
                 minimum=1,
                 maximum=1024,
             ),
+            web_max_sessions_raw=(
+                os.getenv("WUWATERM_API_WEB_MAX_SESSIONS") or ""
+            ).strip(),
         )

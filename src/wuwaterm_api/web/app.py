@@ -324,29 +324,6 @@ def _harden(response: Response) -> Response:
     return response
 
 
-def _hardening_send(send):
-    """Wrap an ASGI send so every response start carries the hardening set.
-
-    Additive and idempotent: a header a view already set is left alone, so a
-    response that went through `_harden` is unchanged and one the framework
-    produced on its own gains the same protections.
-    """
-
-    async def wrapped(message):
-        if message.get("type") == "http.response.start":
-            headers = list(message.get("headers") or [])
-            present = {name.lower() for name, _ in headers}
-            headers.extend(
-                (name, value)
-                for name, value in _HARDENING_HEADERS
-                if name not in present
-            )
-            message = {**message, "headers": headers}
-        await send(message)
-
-    return wrapped
-
-
 def _bare(response: Response) -> Response:
     """A response that carries no page and mints no cookie."""
     return _harden(response)
@@ -648,6 +625,95 @@ async def _lookup_redirect_view(request: Request, device) -> Response:
     return _finish(request, RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=303))
 
 
+_STATUS_MESSAGES = {
+    413: "提交的内容过大。",
+    504: "处理超时，请稍后再试。",
+}
+
+
+class WebSurfaceEnvelope:
+    """Parent-level middleware: everything under the mount answers as this
+    surface, including responses the child never produced.
+
+    `_hardening_send` wraps the CHILD's send, so it covers what the child and
+    its router emit. It cannot cover what the PARENT synthesises before or
+    instead of entering the child: an oversized form is answered by the body
+    limit middleware, and a slow translation is replaced by the timeout
+    middleware after the child has been cancelled. Both bypassed the child
+    entirely, so both arrived at a browser with no hardening headers AND with
+    the JSON API's error envelope rendered as the page - a person reading a
+    Chinese interface got a machine-readable object meant for the desktop
+    client.
+
+    Installed OUTERMOST on the parent, so it sees those responses; a strict
+    no-op for every path outside the mount, which is what keeps it from being
+    a change to the existing API.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not str(
+            scope.get("path", "")
+        ).startswith(WEB_MOUNT_PATH):
+            await self.app(scope, receive, send)
+            return
+
+        state: dict = {"replace": False, "status": 500, "started": False}
+
+        async def sending(message):
+            if message["type"] == "http.response.start":
+                headers = [
+                    (name, value)
+                    for name, value in (message.get("headers") or [])
+                    if name.lower() != b"content-length"
+                ]
+                content_type = next(
+                    (v for n, v in headers if n.lower() == b"content-type"), b""
+                )
+                status = message["status"]
+                # A JSON body under this mount can only have come from the
+                # parent: the child renders HTML for everything, including its
+                # errors. So that is the signal to re-render it as a page.
+                if b"application/json" in content_type.lower():
+                    state["replace"] = True
+                    state["status"] = status
+                    return  # the replacement below emits start and body
+                present = {n.lower() for n, _ in headers}
+                headers.extend(
+                    (n, v) for n, v in _HARDENING_HEADERS if n not in present
+                )
+                message = {**message, "headers": headers}
+                state["started"] = True
+            elif state["replace"] and message["type"] == "http.response.body":
+                if message.get("more_body"):
+                    return
+                await self._send_page(send, state["status"])
+                return
+            await send(message)
+
+        await self.app(scope, receive, sending)
+
+    @staticmethod
+    async def _send_page(send, status: int) -> None:
+        message = _STATUS_MESSAGES.get(status, _MESSAGE_BY_CODE[ERROR_INTERNAL])
+        document = render.page(
+            mount=WEB_MOUNT_PATH,
+            active="lookup",
+            body=render.error_block(message),
+        ).encode("utf-8")
+        headers = [
+            (b"content-type", b"text/html; charset=utf-8"),
+            (b"content-length", str(len(document)).encode("latin-1")),
+            *_HARDENING_HEADERS,
+        ]
+        await send(
+            {"type": "http.response.start", "status": status, "headers": headers}
+        )
+        await send({"type": "http.response.body", "body": document})
+
+
 class BareMountGuard:
     """The mount path WITHOUT its trailing slash, for EVERY method.
 
@@ -712,16 +778,14 @@ class _EdgeGate:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        # Header injection happens on the SEND path, not on the Response
-        # objects the views build. `_harden` documented itself as applying to
-        # every response from this surface and did not: a 404 for an unknown
-        # child path, a 405 for a known path with the wrong method, and the
-        # slash-variant 404 are all produced by the child ROUTER, which never
-        # touches a view and so never reached `_finish`. The claim was true of
-        # everything the code wrote and false of everything the framework
-        # wrote. Wrapping send makes the surface's own statement structurally
-        # true instead of true-by-inspection.
-        send = _hardening_send(send)
+        # No header wrapping here. An earlier fix wrapped this send to cover
+        # the child ROUTER's own 404s and 405s, which never reach a view. That
+        # was correct as far as it went and stopped one level short: the PARENT
+        # middleware synthesises responses without entering the child at all.
+        # WebSurfaceEnvelope, installed outermost on the parent, now covers
+        # every response under this mount including those - so wrapping here as
+        # well would be a second mechanism for one property, and a property
+        # guaranteed twice is one that no single test can hold to account.
         secret = self.parent.state.settings.web_edge_secret
         if not _edge_marker_ok(Request(scope), secret):
             LOGGER.info("web request refused at the edge gate")

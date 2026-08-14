@@ -995,8 +995,15 @@ def create_app(
     if resolved.web_enabled:
         from starlette.routing import Route as _PlainRoute
 
-        from .web.app import bare_mount_guard, create_web_app
+        from .web.app import WebSurfaceEnvelope, bare_mount_guard, create_web_app
         from .settings import WEB_MOUNT_PATH
+
+        # OUTERMOST, so it wraps the body-limit and timeout middleware and can
+        # see the responses THEY synthesise without entering the sub-app. A
+        # strict no-op for every path outside the mount, so the existing API's
+        # behaviour is unchanged; only added when the layer is switched on, so
+        # the default deployment does not gain a middleware at all.
+        app.add_middleware(WebSurfaceEnvelope)
 
         app.mount(WEB_MOUNT_PATH, create_web_app(app))
         # The mount path WITHOUT its trailing slash, registered FIRST so it
