@@ -99,6 +99,51 @@ def mounted_web_app(app):
     return None
 
 
+def test_a_mistyped_web_switch_does_not_block_device_revocation(
+    tmp_path, sample_db, monkeypatch, capsys
+):
+    """Credential revocation must never depend on a presentation-layer typo.
+
+    `from_env()` runs for EVERY subcommand, `device revoke` included. A reader
+    that raised on an unrecognised value therefore made a misspelled
+    serve-only web flag - `treu` - prevent revoking a compromised device until
+    the environment was repaired. The precedent against this was already stated
+    in prose in the same file, twenty lines from where the reader was added,
+    and prose did not prevent it; this test does.
+    """
+    from wuwaterm_api.cli import main as cli_main
+    from wuwaterm_api.settings import ApiConfigError, validate_web_enabled
+
+    store_path = tmp_path / "api-state" / "devices.db"
+    store = DeviceStore(store_path)
+    store.initialize()
+    device = store.issue("compromised", secret=DEVICE_SECRET)
+
+    monkeypatch.setenv("WUWATERM_API_WEB_ENABLED", "treu")
+    monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(store_path))
+    monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
+
+    # from_env itself must not raise...
+    settings = ApiSettings.from_env()
+    assert settings.web_enabled is False, "an unreadable value must not turn it on"
+    assert settings.web_enabled_raw == "treu"
+
+    # ...and the operator command that matters must succeed.
+    assert cli_main(["device", "revoke", "--device-id", device.device_id]) == 0
+    capsys.readouterr()
+    assert store.authenticate(
+        f"{TOKEN_SCHEME}.{device.device_id}.{DEVICE_SECRET}"
+    ) is None, "the device really was revoked"
+
+    # The strictness is not lost, it moved to the path where refusing is right.
+    try:
+        validate_web_enabled("treu")
+    except ApiConfigError:
+        pass
+    else:  # pragma: no cover - the assertion below reports it
+        raise AssertionError("the serve path must still refuse a typo")
+
+
 # --------------------------------------------------------------- the switch
 
 
@@ -220,34 +265,129 @@ def test_an_established_session_re_runs_no_credential_derivation(
     assert len(calls) == 4
 
 
-def test_browser_traffic_shares_one_rate_limit_bucket_with_the_api(
+def test_the_model_call_budget_is_one_account_for_every_principal(
+    tmp_path, sample_db, monkeypatch
+):
+    """What actually protects the money, measured across TWO principals.
+
+    The rate limiter buckets by device id, so two devices get two allowances -
+    which is expected for an owner-private deployment where the devices are all
+    one person's, and is not what "no new amplification surface" was ever about.
+    Spending is different: a second spending ceiling would be a second bill.
+
+    So this uses the two devices the deployment guide actually creates - one for
+    the desktop client, one for the web surface - rather than reusing a single
+    principal, which is what made the earlier bucket test vacuous.
+    """
+    calls = []
+
+    async def respond(locked_text, locks):
+        return locked_text
+
+    async def fake_call(locked_text, locks, **kwargs):
+        calls.append(locked_text)
+        return await respond(locked_text, locks)
+
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+
+    store = DeviceStore(tmp_path / "api-state" / "devices.db")
+    store.initialize()
+    desktop_secret = "desktop-client-material-0123456789abcdef-x"
+    web_secret = "web-surface-material-0123456789abcdef-x"
+    desktop = store.issue("desktop", secret=desktop_secret)
+    web = store.issue("web", secret=web_secret)
+    assert desktop.device_id != web.device_id
+    settings = ApiSettings(
+        db_path=sample_db,
+        device_db_path=tmp_path / "api-state" / "devices.db",
+        rate_limit_per_minute=1000,
+        llm_calls_per_minute=2,
+        web_enabled=True,
+        web_device_token=f"{TOKEN_SCHEME}.{web.device_id}.{web_secret}",
+        web_edge_secret=EDGE_SECRET,
+    )
+    app = create_app(settings, device_store=store)
+    bearer = {"Authorization": f"Bearer {TOKEN_SCHEME}.{desktop.device_id}.{desktop_secret}"}
+    sentence = "今汐在云陵谷与守岸人交谈了很久然后离开了。"
+
+    # The desktop principal spends the whole allowance.
+    for _ in range(2):
+        spent = run(call(app, "POST", "/v1/translations", headers=bearer,
+                         json={"text": sentence}))
+        assert spent.status_code == 200, spent.text
+    exhausted = run(call(app, "POST", "/v1/translations", headers=bearer,
+                         json={"text": sentence}))
+    assert exhausted.status_code == 503
+    assert exhausted.json()["error"]["code"] == "llm_budget_exhausted"
+
+    # The web principal is a DIFFERENT device, and must find the same account
+    # already empty. A second account here would be a second bill.
+    page = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
+    jar = {SESSION_COOKIE_NAME: page.cookies[SESSION_COOKIE_NAME]}
+    web_attempt = run(
+        call(app, "POST", f"{WEB_MOUNT_PATH}/translate", headers=edge(),
+             cookies=jar, data=form(text=sentence))
+    )
+    assert web_attempt.status_code == 503
+    assert "翻译额度已用尽" in web_attempt.text, web_attempt.text[:400]
+    # Two principals, one account: the model was called exactly the budget.
+    assert len(calls) == 2, calls
+
+
+def test_admission_is_bucketed_per_device_across_both_surfaces(
     tmp_path, sample_db
 ):
-    """One device, one bucket, whichever presentation layer spends it.
+    """Admission is per DEVICE, and this test says so rather than hiding it.
 
-    If the web layer had its own limiter the two surfaces would each get the
-    configured allowance, and the deployment's real ceiling would be double the
-    configured number without any setting saying so.
+    It replaces one that claimed browser requests spend the desktop client's
+    bucket. That test drove both surfaces with a SINGLE device, which makes
+    "the same device shares a bucket" true by definition — a limiter keyed by
+    device id cannot do anything else — so it proved nothing about the two
+    devices the deployment guide actually creates, and the claim it appeared to
+    support was false for that deployment.
+
+    Both halves are asserted here: one device really does share, and two
+    devices really do not. The second half is the deployed shape, and it is
+    expected behaviour rather than a defect — every principal in this
+    deployment is one of the owner's own devices, so a second allowance for his
+    browser is him using two of his things at once. What must NOT double is
+    spending, and that is pinned separately by the budget test above.
     """
+    # Same device on both surfaces: one bucket, necessarily.
     app, _store, _device, token = build_web_app(
         tmp_path, sample_db, rate_limit_per_minute=3
     )
-    # Spend the whole allowance through the JSON API...
     for _ in range(3):
-        assert (
-            run(
-                call(
-                    app,
-                    "GET",
-                    "/v1/meta",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-            ).status_code
-            == 200
-        )
-    # ...and the browser surface, for the SAME device, is already out.
-    response = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
-    assert response.status_code == 429
+        spent = run(call(app, "GET", "/v1/meta",
+                         headers={"Authorization": f"Bearer {token}"}))
+        assert spent.status_code == 200
+    assert run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge())).status_code == 429
+
+    # Two devices, as the deployment guide creates them: two allowances.
+    store = DeviceStore(tmp_path / "two" / "devices.db")
+    store.initialize()
+    desktop_secret = "desktop-material-0123456789abcdef-two"
+    web_secret = "web-material-0123456789abcdef-two"
+    desktop = store.issue("desktop", secret=desktop_secret)
+    web = store.issue("web", secret=web_secret)
+    settings = ApiSettings(
+        db_path=sample_db,
+        device_db_path=tmp_path / "two" / "devices.db",
+        rate_limit_per_minute=2,
+        web_enabled=True,
+        web_device_token=f"{TOKEN_SCHEME}.{web.device_id}.{web_secret}",
+        web_edge_secret=EDGE_SECRET,
+    )
+    two = create_app(settings, device_store=store)
+    desktop_auth = {"Authorization": f"Bearer {TOKEN_SCHEME}.{desktop.device_id}.{desktop_secret}"}
+    for _ in range(2):
+        assert run(call(two, "GET", "/v1/meta", headers=desktop_auth)).status_code == 200
+    assert run(call(two, "GET", "/v1/meta", headers=desktop_auth)).status_code == 429
+    # The web principal has its own allowance, and that is the documented shape.
+    assert run(call(two, "GET", f"{WEB_MOUNT_PATH}/", headers=edge())).status_code == 200
 
 
 # --------------------------------------- criterion 2: refused before logic
@@ -643,6 +783,50 @@ def test_an_admission_failure_keeps_the_submitted_text(tmp_path, sample_db):
     assert response.status_code == 429
     assert "<textarea" in response.text
     assert sentence in response.text
+
+
+def test_the_lookup_redirect_carries_the_minted_cookie(tmp_path, sample_db):
+    """A redirect that mints must hand over what it minted.
+
+    Visiting /lookup directly authenticates and creates a session, but the
+    redirect omitted the cookie - so following it authenticated again, made a
+    second session and spent a second rate-limit token. With a one-request
+    bucket the redirect landed on 429 instead of the page.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    redirect = run(call(app, "GET", f"{WEB_MOUNT_PATH}/lookup", headers=edge()))
+    assert redirect.status_code == 303
+    assert redirect.headers["location"] == f"{WEB_MOUNT_PATH}/"
+    assert redirect.cookies.get(SESSION_COOKIE_NAME), "the minted cookie must be sent"
+    assert len(app.state.web_sessions) == 1
+
+    # Following it reuses that session instead of minting a second one. The
+    # session COUNT is the discriminator, not the status code: every request
+    # spends a rate-limit token whether or not it mints, so a status-based
+    # assertion would report the wrong thing.
+    landing = run(
+        call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge(),
+             cookies={SESSION_COOKIE_NAME: redirect.cookies[SESSION_COOKIE_NAME]})
+    )
+    assert landing.status_code == 200, landing.status_code
+    assert len(app.state.web_sessions) == 1, "the redirect must not cause a second mint"
+
+
+def test_multi_line_translations_keep_their_line_breaks(tmp_path, sample_db):
+    """The pipeline joins chunks with newlines; the page must not collapse them."""
+    from wuwaterm_api.web import render
+
+    body = render.translate_view(
+        mount=WEB_MOUNT_PATH,
+        text="x",
+        result=type("O", (), {"kind": "llm", "direction": "en",
+                              "text": "first line\nsecond line"})(),
+        translated=True,
+    )
+    assert "first line\nsecond line" in body
+    assert "white-space: pre-wrap" in render.page(
+        mount=WEB_MOUNT_PATH, active="translate", body=body
+    )
 
 
 def test_a_non_ascii_edge_marker_is_refused_not_a_server_error(tmp_path, sample_db):

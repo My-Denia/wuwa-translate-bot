@@ -113,6 +113,20 @@ ships no scripts at all.
 
 No public registration, and no change to how the service is distributed. It
 adds no second translation path: the same dictionary-first pipeline answers
-here, spending the **same** rate limit and the **same** model-call budget as
-the API, because it holds the same objects rather than building its own. That
-is what keeps a third presentation layer from raising the deployment's ceiling.
+here, through the same objects rather than a second set of its own.
+
+Be precise about what that shares, because the two halves differ and an
+earlier version of this page ran them together:
+
+- **Model spending is one account.** There is a single per-minute budget for
+  the whole process, so the browser cannot open a second tab on the bill. If
+  the desktop client has exhausted it, the browser is refused too.
+- **Admission rate is per device.** The limiter buckets by device id, so the
+  web credential issued above carries its own per-minute allowance alongside
+  the desktop client's. Two of the owner's devices genuinely get two
+  allowances; that is what a per-device limit means, and it is the intended
+  behaviour for a deployment whose every principal is the same person.
+
+If this ever stops being a single-owner deployment, the limit to revisit is
+that second one — and the answer then is accounts and quotas, not a shared
+bucket.

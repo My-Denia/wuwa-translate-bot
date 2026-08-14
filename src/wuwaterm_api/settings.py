@@ -160,26 +160,51 @@ DEFAULT_WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
 DEFAULT_WEB_MAX_SESSIONS = 32
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Strict boolean parsing: an unrecognised value is an error, not a False.
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
-    The same reasoning as every other reader in this file - a typo must fail
-    the process rather than silently disable something. That matters more here
-    than anywhere else in this module, because the value being read decides
-    whether an internet-facing surface exists at all, and the failure direction
-    of a lenient parser is to read `WUWATERM_API_WEB_ENABLED=treu` as OFF and
-    leave the operator convinced they turned it on.
+
+def parse_bool(raw: str, default: bool) -> bool:
+    """Parse a boolean setting, treating anything unrecognised as the default.
+
+    Deliberately DOES NOT RAISE, and the reason is the same one stated for
+    ``bind`` and ``log_level`` below: ``from_env()`` runs for EVERY subcommand,
+    including ``device revoke``. An earlier version of this reader raised on an
+    unrecognised value, so a typo in a serve-only web setting -
+    ``WUWATERM_API_WEB_ENABLED=treu`` - made it impossible to revoke a
+    compromised device until the environment was repaired. Gating credential
+    revocation on the spelling of a presentation-layer flag is the worst
+    available trade, and the precedent against it was already written in this
+    file, twenty lines away, when the reader was added.
+
+    The default direction is OFF, so an unreadable value never turns a surface
+    on. Being wrong about it is caught loudly on the serve path by
+    ``validate_web_enabled``, which is where a serve-time setting belongs.
     """
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    value = raw.strip().lower()
-    if value in {"1", "true", "yes", "on"}:
+    value = (raw or "").strip().lower()
+    if value in _TRUE_WORDS:
         return True
-    if value in {"0", "false", "no", "off"}:
+    if value in _FALSE_WORDS:
+        return False
+    return default
+
+
+def validate_web_enabled(raw: str) -> bool:
+    """Serve-path validation for the web switch. Raises on a typo.
+
+    The strictness the parser gives up lives here instead, on the one path
+    where refusing to start is the right answer and where refusing cannot
+    strand an operator who is trying to revoke a credential.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return False
+    if value.lower() in _TRUE_WORDS:
+        return True
+    if value.lower() in _FALSE_WORDS:
         return False
     raise ApiConfigError(
-        f"{name} must be one of 1/0, true/false, yes/no, on/off"
+        "WUWATERM_API_WEB_ENABLED must be one of 1/0, true/false, yes/no, on/off"
     )
 
 
@@ -235,6 +260,9 @@ class ApiSettings:
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
     log_level: str = DEFAULT_LOG_LEVEL
     web_enabled: bool = DEFAULT_WEB_ENABLED
+    # The raw string as the operator wrote it, kept so the serve path can
+    # refuse a typo that the lenient parser above deliberately swallowed.
+    web_enabled_raw: str = ""
     # The device token the browser session is mapped onto. Held HERE, in the
     # server process, and never sent to the browser: that is what makes the
     # "no credential lands in the browser" property structural rather than a
@@ -323,7 +351,14 @@ class ApiSettings:
                 os.getenv("WUWATERM_API_LOG_LEVEL") or DEFAULT_LOG_LEVEL
             ).strip()
             or DEFAULT_LOG_LEVEL,
-            web_enabled=_env_bool("WUWATERM_API_WEB_ENABLED", DEFAULT_WEB_ENABLED),
+            # Carried raw AND parsed leniently, for the same reason as `bind`
+            # and `log_level`: from_env() runs for every subcommand, so a
+            # serve-only typo must not block `device revoke`. The strict
+            # check is validate_web_enabled, applied on the serve path.
+            web_enabled=parse_bool(
+                os.getenv("WUWATERM_API_WEB_ENABLED") or "", DEFAULT_WEB_ENABLED
+            ),
+            web_enabled_raw=(os.getenv("WUWATERM_API_WEB_ENABLED") or "").strip(),
             # NOT stripped of internal whitespace and NOT validated for shape:
             # the token's format is the credential store's business, and a
             # settings-layer opinion about what a token looks like would be a

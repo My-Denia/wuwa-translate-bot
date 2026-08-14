@@ -640,7 +640,12 @@ async def _lookup_redirect_view(request: Request, device) -> Response:
     Redirecting rather than 405-ing keeps the back button from producing an
     error page on a surface that has no way to explain one.
     """
-    return _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=303))
+    # _finish, not _bare: this request may have MINTED the session, and _bare
+    # deliberately omits the cookie. Redirecting without it meant the browser
+    # arrived at the lookup page with nothing, authenticated a second time,
+    # created a second session and spent a second rate-limit token - and with a
+    # small bucket the redirect landed on 429 instead of the page.
+    return _finish(request, RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=303))
 
 
 class BareMountGuard:

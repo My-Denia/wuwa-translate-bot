@@ -119,12 +119,59 @@ human presented a credential; the header is what proves the path.
 
 ### Why this is NOT a separate process
 
+> **A REASON WAS RETIRED HERE. It is recorded rather than reworded.**
+>
+> This section originally rested on a single argument: a third process would
+> be a third budget, the aggregate ceiling would rise, and a rising ceiling is
+> a "new amplification surface" that the work was required not to add.
+>
+> The requirement it appealed to was mis-specified. "Add no new amplification
+> surface" was carried over from the threat model of a service open to
+> strangers. Every principal in this deployment is the owner — his phone, his
+> desktop, his browser — so the owner opening a second window is not an
+> attacker gaining leverage. A product with public registration would need
+> user accounts, authentication and tiered quotas, and would not solve that
+> problem with a shared bucket either.
+>
+> Two measurements sharpen what was actually true. The per-device rate limiter
+> buckets by device id, so **within a single process** two devices already
+> receive two full admission allowances — the "one shared ceiling" phrasing was
+> never accurate about admission. The model-call budget, by contrast, is one
+> global account per process: two devices spending against it were measured
+> sharing a budget of two, with the model invoked exactly twice.
+>
+> So the retired claim is the SECURITY framing, not the arithmetic. What
+> survives of it is narrower and is about money, and it is demoted below the
+> two reasons that were always the stronger ones. Anyone re-opening this
+> decision should argue against those, not against the ceiling.
+
 **Read this section before proposing a third container.** The pattern is
 inviting: ADR 0009 gave the API its own service from the same image, and its
 own section is literally titled "Separate process, separate budgets, separate
 state". A reader who meets "a third adapter" will reach for a third
-`command:` entry in Compose by reflex. That reflex is wrong here, and the
-reason is the budget.
+`command:` entry in Compose by reflex. That reflex is still wrong, for the
+reasons below, in order of weight.
+
+**First: the credential surface stays where it is.** A separate web process
+could not reach the credential store's in-memory principal, so it would have
+to hold a device token of its own and forward it — a backend-for-frontend, and
+a second place in the deployment where a live credential sits at rest. In
+process, the browser session resolves to an already-authenticated principal
+inside the objects that hold it, and the token never leaves the one process
+that already had it. ADR 0010's device-principal semantics are untouched
+because nothing new presents a credential.
+
+**Second: the failure and credential domains do not spread.** A third process
+is a third thing to configure, restart, monitor, patch and get wrong, and a
+third place for a secret to be misplaced — the Compose file already showed how
+easily that happens, since both existing services read one env file and the
+web credentials had to be blanked explicitly for the bot. Fewer processes
+holding secrets is a smaller surface in the sense that actually applies here.
+
+**Third, and now secondary: spending.** A second serving process would carry
+its own model-call budget, so the money ceiling — not the attack surface —
+would double. That is a real consideration and the accounting below is
+retained for it. It is no longer the reason this decision was made.
 
 The accounting, in full, because paraphrasing it is how it gets lost:
 
@@ -149,10 +196,10 @@ Therefore a third serving process is a **third independent budget**. Its
 limiter objects would be new objects in new memory, coordinating with nothing,
 and the host's worst case would become six plus whatever the third process was
 given. Nothing would bring it back down, because there is nothing that could:
-the counters are per process by construction. That is precisely the "new
-amplification surface" this layer was required not to add — and it would be
-added not by the feature but by the packaging decision, which is what makes it
-easy to do by accident.
+the counters are per process by construction. Read this as a statement about
+the BILL rather than about exposure — see the retirement note at the head of
+this section — and note that it would be incurred not by the feature but by
+the packaging decision, which is what makes it easy to do by accident.
 
 Mounted in-process, the web layer spends from the API's existing budget
 because it runs inside the objects that hold it. The aggregate ceiling stated
@@ -328,18 +375,32 @@ one user.
      Honest bound: this covers outside probing. It does nothing about a defect
      the owner's own legitimate use triggers, which is the likelier way this
      surface takes the process down.
-- **Negative, and the second price of one budget instead of two: the sharing
-  runs BOTH WAYS.** The rate limiter and the model-call budget are single
-  objects keyed by device, so every page view from the browser spends from the
-  same allowance the desktop client draws on. Browsing the dictionary on a
-  phone while the desktop client is working makes the desktop client's own
-  requests likelier to be refused, and the owner has no way to tell the two
-  apart from the outside — the 429 does not say which surface spent the token.
-  This is not a defect and not a deferred improvement: it is the arithmetic of
-  "no new amplification surface". A layer that did not share these objects
-  would not raise anyone's ceiling only because it would have a ceiling of its
-  own, and two ceilings is exactly the outcome this record exists to avoid.
-  It is accepted, not scheduled.
+- **Negative, and stated in the two halves that actually differ, because an
+  earlier version of this record ran them together and was wrong about one.**
+
+  *Spending is shared, and that is the point.* The model-call budget is ONE
+  global account for the whole process, not a per-device bucket — measured
+  with the two devices the deployment guide creates: the desktop principal
+  exhausted a budget of two, and the web principal, a different device, was
+  refused immediately afterwards with the model invoked exactly twice in
+  total. So the browser cannot open a second tab on the bill. That is the
+  property worth having and it holds.
+
+  *Admission is NOT shared, and that is expected here.* The rate limiter
+  buckets by device id, so the desktop credential and the separate web
+  credential the guide issues each receive a full per-minute allowance —
+  measured: the desktop client was refused at its limit while the web surface
+  continued to serve. An earlier draft of this record claimed browser requests
+  spend the desktop client's bucket. That claim was false for the deployment as
+  documented, and the test that appeared to support it used ONE device for both
+  surfaces, which makes "same device shares a bucket" true by definition and
+  proves nothing about two.
+
+  This is accepted rather than fixed. Every principal here is the owner's own
+  device; a second allowance for his browser is him being able to use two of
+  his own things at once, not leverage an attacker gained. A deployment open to
+  strangers would need accounts, authentication and tiered quotas, and would
+  not solve that with a shared bucket either.
 
   How heavy the cost is depends on one thing, and it was MEASURED rather than
   reasoned about — counted at `hashlib.scrypt`, the real derivation, not by
@@ -354,10 +415,24 @@ one user.
 
   So an established browser session re-runs **no** credential derivation and
   takes **no** admission slot. Verification happens once, when the session is
-  created; afterwards a request costs one bucket token and a cheap liveness
-  read. The consequence for the accepted cost is that it is bounded to the
-  rate-limit bucket alone: browser traffic does not contend for the ~16 MiB
-  scrypt derivations or the bounded verifier the desktop client sheds 429 from.
+  created.
+
+  **Correction, because a later change made the sentence that stood here
+  false.** This paragraph previously said the cost was "bounded to the
+  rate-limit bucket alone" and that browser traffic "does not contend for the
+  bounded verifier". Closing a separate finding — usage was being recorded only
+  when a session was created, so an established session never stamped a last-use
+  time — moved `record_use` onto every admitted request, and that call goes
+  through the same bounded credential pool the desktop client's verification
+  uses. So browser traffic DOES touch that pool: once per admitted request, as
+  a single indexed UPDATE rather than a ~16 MiB derivation. The asymmetry that
+  matters survives — a page view costs a write, a desktop call costs a
+  derivation, and those differ by orders of magnitude — but "does not contend"
+  was too strong and is withdrawn. Deferring the write to session creation and
+  TTL boundaries was considered and not taken: it would keep the pool quieter at
+  the cost of a second liveness mechanism and a staler last-use record, and
+  adding a caching path to close a contention gap this small is a poor trade
+  on a surface where each added mechanism has been producing defects.
 
   Worth stating because it is the opposite of the intuition: per request, the
   browser surface is the CHEAPER of the two clients. The desktop client

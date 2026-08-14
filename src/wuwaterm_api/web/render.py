@@ -162,7 +162,11 @@ button {
 /* Chinese has no inter-word spaces, so the default break-on-space rule leaves a
    long run of Han characters overflowing its container on a narrow screen.
    anywhere lets the line break between glyphs, which is how Chinese wraps. */
-.result { margin: 0; overflow-wrap: anywhere; }
+/* pre-wrap, because the shared pipeline joins translated chunks with newlines
+   and the browser's default collapsing turned dialogue, paragraphs and chunked
+   results into one continuous block - discarding structure the translation had
+   actually preserved. */
+.result { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .term { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; padding: 0.5rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .term:first-of-type { border-top: 0; }
 .term .zh { font-weight: 600; }
