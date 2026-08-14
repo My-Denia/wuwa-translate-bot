@@ -434,6 +434,217 @@ def test_the_authenticated_principal_reaches_the_completion_log(
     assert not [line for line in completions if "device=-" in line], completions
 
 
+def test_the_mount_point_and_its_children_answer_identically_off_edge(
+    tmp_path, sample_db
+):
+    """The standing assertion, across BOTH dimensions: path AND method.
+
+    The first version of the mount-point fix covered the path dimension only -
+    it was registered for GET and HEAD, so an off-edge POST was answered 405 by
+    the parent router, unhardened, while GET was correctly refused. The same
+    oracle, reached by changing the verb. A test that varied only the path
+    would have stayed green through that, which is exactly why this one varies
+    both and compares the full response shape rather than the status alone.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    methods = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+    paths = (
+        WEB_MOUNT_PATH,
+        f"{WEB_MOUNT_PATH}/",
+        f"{WEB_MOUNT_PATH}/lookup",
+        f"{WEB_MOUNT_PATH}/translate",
+        f"{WEB_MOUNT_PATH}/translate/",
+        f"{WEB_MOUNT_PATH}/does-not-exist",
+    )
+    shapes = {}
+    for method in methods:
+        for path in paths:
+            r = run(call(app, method, path))
+            shapes[(method, path)] = (
+                r.status_code,
+                r.text,
+                r.headers.get("content-security-policy"),
+                r.headers.get("cache-control"),
+                r.headers.get("location"),
+            )
+    distinct = set(shapes.values())
+    assert len(distinct) == 1, {k: v for k, v in shapes.items()}
+    status, body, csp, cache, location = distinct.pop()
+    assert status == 404
+    assert body == ""
+    assert location is None
+    assert cache == "no-store"
+    assert csp and "default-src 'none'" in csp
+
+
+def test_router_generated_responses_are_hardened_too(tmp_path, sample_db):
+    """`_harden` claimed to cover every response and did not.
+
+    A 404 for an unknown child path, a 405 for a known path with the wrong
+    method, and the slash-variant 404 are produced by the child ROUTER. They
+    never touch a view, so they never reached the code that attaches the
+    headers - the claim was true of everything this module writes and false of
+    everything the framework writes.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    probes = (
+        ("GET", f"{WEB_MOUNT_PATH}/does-not-exist"),
+        ("DELETE", f"{WEB_MOUNT_PATH}/lookup"),
+        ("GET", f"{WEB_MOUNT_PATH}/translate/"),
+    )
+    for method, path in probes:
+        r = run(call(app, method, path, headers=edge()))
+        assert r.status_code in (404, 405), (method, path, r.status_code)
+        assert r.headers.get("cache-control") == "no-store", (method, path)
+        policy = r.headers.get("content-security-policy") or ""
+        assert "default-src 'none'" in policy, (method, path)
+        assert r.headers.get("x-content-type-options") == "nosniff", (method, path)
+
+
+def test_a_cross_site_sub_resource_request_cannot_mint(tmp_path, sample_db):
+    """A hostile page full of image tags must not drive the verifier.
+
+    SameSite=Strict withholds the cookie, and that does not help: the browser
+    still sends the basic-auth credentials it cached for the site and the edge
+    still injects its marker, so each such GET would mint - one ~16 MiB
+    derivation and one session per tag, saturating the shared verifier the
+    desktop client also admits through.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    hostile = {
+        **edge(),
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+    }
+    response = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=hostile))
+    assert response.status_code == 404
+    assert response.text == ""
+    assert "set-cookie" not in response.headers
+    assert len(app.state.web_sessions) == 0
+
+    # The owner's own navigation - typed address or bookmark - still works.
+    own = {**edge(), "Sec-Fetch-Site": "none", "Sec-Fetch-Dest": "document"}
+    ok = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=own))
+    assert ok.status_code == 200
+    assert ok.cookies[SESSION_COOKIE_NAME]
+
+
+def test_usage_is_recorded_after_admission_and_for_every_request(
+    tmp_path, sample_db
+):
+    """Accounting order, matching the JSON path rather than inverting it.
+
+    It ran only when a session was created, so an established session never
+    stamped anything and `device list` could lag a whole TTL behind real
+    browser use. And it ran BEFORE the limiter, so a request that was refused
+    still wrote to the credential store - the opposite of the JSON admission
+    path, which records only what it admits.
+    """
+    app, _store, device, _token = build_web_app(
+        tmp_path, sample_db, rate_limit_per_minute=2
+    )
+    writes = []
+    real_record = app.state.device_store.record_use
+
+    def counting_record(device_id, **kw):
+        writes.append(device_id)
+        return real_record(device_id, **kw)
+
+    app.state.device_store.record_use = counting_record
+
+    first = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
+    assert first.status_code == 200
+    jar = {SESSION_COOKIE_NAME: first.cookies[SESSION_COOKIE_NAME]}
+    assert len(writes) == 1, "the minting request records its use"
+
+    second = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge(), cookies=jar))
+    assert second.status_code == 200
+    assert len(writes) == 2, "an established session records its use too"
+
+    # The third request exceeds the limit of two: refused, and NOT recorded.
+    third = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge(), cookies=jar))
+    assert third.status_code == 429
+    assert len(writes) == 2, "a refused request must not write to the store"
+
+
+def test_a_revocation_before_the_model_call_is_caught(tmp_path, sample_db):
+    """The seam before the paid work, not only the one after it.
+
+    A revocation committing between admission and the model stage still spent
+    a budget slot and a round trip, and was noticed only by the post-model
+    check - after the cost was incurred. The JSON route closes this seam
+    immediately before its own pipeline call.
+
+    The post-model check alone also answers 401, so a test that only asserted
+    the status code could not tell the two seams apart - and did not, until it
+    was made to assert the thing that actually differs: whether the PIPELINE
+    WAS ENTERED AT ALL. With the seam closed the request is refused before any
+    paid work; without it the model call happens and is thrown away.
+    """
+    import wuwaterm_api.web.app as web_module
+
+    app, store, device, _token = build_web_app(tmp_path, sample_db)
+    jar = session_cookie(app)
+
+    entered = []
+    real_pipeline = web_module.translate_request_async
+
+    async def spy_pipeline(*args, **kwargs):
+        entered.append(1)
+        return await real_pipeline(*args, **kwargs)
+
+    monkeypatch_target = web_module
+    monkeypatch_target.translate_request_async = spy_pipeline
+
+    real_is_active = store.is_active
+
+    def revoke_then_answer(device_id):
+        store.revoke(device_id)
+        return real_is_active(device_id)
+
+    store.is_active = revoke_then_answer
+    try:
+        response = run(
+            call(
+                app,
+                "POST",
+                f"{WEB_MOUNT_PATH}/translate",
+                headers=edge(),
+                cookies=jar,
+                data=form(text="今汐在云陵谷使用了风羽为刃。"),
+            )
+        )
+    finally:
+        monkeypatch_target.translate_request_async = real_pipeline
+    assert response.status_code == 401
+    assert entered == [], "the pipeline must not be entered for a dead principal"
+
+
+def test_an_admission_failure_keeps_the_submitted_text(tmp_path, sample_db):
+    """Admission runs before the body is read, so its failures had nothing to
+    re-render and returned an empty form - the exact loss the error page was
+    built to prevent, through the one path that skipped it."""
+    app, _store, _device, _token = build_web_app(
+        tmp_path, sample_db, rate_limit_per_minute=1
+    )
+    jar = session_cookie(app)  # spends the single allowed request
+    sentence = "今汐在云陵谷使用了风羽为刃。"
+    response = run(
+        call(
+            app,
+            "POST",
+            f"{WEB_MOUNT_PATH}/translate",
+            headers=edge(),
+            cookies=jar,
+            data=form(text=sentence),
+        )
+    )
+    assert response.status_code == 429
+    assert "<textarea" in response.text
+    assert sentence in response.text
+
+
 def test_a_non_ascii_edge_marker_is_refused_not_a_server_error(tmp_path, sample_db):
     """A caller-controlled byte must not become a 500.
 
@@ -485,10 +696,13 @@ def test_a_post_without_a_session_cannot_mint_one(tmp_path, sample_db):
             data=form(text="今汐"),
         )
     )
-    assert response.status_code == 303
-    assert response.headers["location"] == f"{WEB_MOUNT_PATH}/translate"
+    assert response.status_code == 401
     # Nothing was minted, so nothing was spent.
     assert "set-cookie" not in response.headers
+    # ...and the submitted text came back with the form, rather than being
+    # thrown away by a redirect the owner would have to retype after.
+    assert "<textarea" in response.text
+    assert "今汐" in response.text
     # ...and a GET first still works, which is the ordinary flow.
     page = run(call(app, "GET", f"{WEB_MOUNT_PATH}/translate", headers=edge()))
     assert page.status_code == 200

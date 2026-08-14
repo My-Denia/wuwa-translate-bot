@@ -211,32 +211,10 @@ async def _establish_principal(request: Request, *, may_mint: bool):
         if device is None:
             LOGGER.error("configured web device token was rejected by the store")
             raise ApiError(ERROR_UNAUTHORIZED)
-        # Close the window between verification and session creation. A
-        # revocation committing in that gap would otherwise mint a live session
-        # for a principal that is already dead, and the session would then be
-        # honoured until its own liveness re-check on the NEXT request - so the
-        # first request after revocation would be served.
-        #
-        # record_use, not is_active, because that is what the JSON API's
-        # admission path uses at the same seam: it only stamps a row that is
-        # still active, so a zero affected-row count IS the revocation signal,
-        # and it also records the use. Checking liveness with a separate read
-        # would leave web traffic missing from the device's last-use record.
-        try:
-            updated = await _in_credential_pool(
-                request.app, state.device_store.record_use, device.device_id
-            )
-        except Exception:  # noqa: BLE001 - re-raised as a served error
-            LOGGER.warning("web credential store error on admission")
-            raise ApiError(
-                ERROR_INTERNAL, "credential store is temporarily unavailable",
-                status_code=503,
-            ) from None
-        if updated != 1:
-            LOGGER.info("web auth rejected: device revoked in flight")
-            raise ApiError(ERROR_UNAUTHORIZED)
-        session = sessions.create(device)
-        request.state.new_session = session
+        # The session is NOT created here. Creation waits until after the rate
+        # limit has admitted the request, so that the accounting write below
+        # happens in the same order the JSON API uses; see the admission block
+        # at the end of this function.
     else:
         # An existing session still has to prove the device is live, or the
         # session map would be a way to outlive revocation. The principal
@@ -247,16 +225,11 @@ async def _establish_principal(request: Request, *, may_mint: bool):
         # the request. Liveness is the part that can change, and liveness is
         # exactly what is re-read here, through the API's own helper so the two
         # presentation layers cannot drift on what "revoked in flight" means.
+        # Liveness is not re-read here either: the accounting write below is
+        # the same check, because record_use only stamps a row that is still
+        # active. One store round trip instead of two, and one definition of
+        # "revoked in flight" shared with the JSON API instead of two.
         device = session.device
-        try:
-            await _require_active_device(request, device)
-        except ApiError:
-            # Drop the dead entry rather than leaving it to hold one of the
-            # bounded slots for the rest of its TTL. The eviction loop removes
-            # the OLDEST entry, not the deadest, so a revoked session left in
-            # place can outlive a live one when the map is under pressure.
-            sessions.discard(session.session_id)
-            raise
 
     # (3) The per-device rate limit, on the PARENT'S limiter instance and keyed
     # by the same device id the API uses - so browser traffic and desktop
@@ -272,12 +245,67 @@ async def _establish_principal(request: Request, *, may_mint: bool):
     limiter = state.rate_limiter
     if not limiter.allow(device.device_id):
         raise ApiError(ERROR_RATE_LIMITED)
+
+    # Accounting AFTER admission, and for EVERY admitted request - both halves
+    # matter and both were wrong.
+    #
+    # It ran only on the minting branch, so a session that already existed
+    # never stamped anything: `device list` could report a last use a whole
+    # session TTL behind the browser's actual activity. And it ran BEFORE the
+    # limiter, so a refused request still drove a credential-store write -
+    # the exact thing the JSON API's ordering avoids by putting record_use
+    # after a successful limiter check. Two presentation layers disagreeing
+    # about when a device is recorded as used is the same drift this layer
+    # exists not to have.
+    #
+    # The affected-row count doubles as the revocation check for both branches:
+    # record_use only stamps a row that is still active, so zero means the
+    # device died between verification (or session creation) and now.
+    try:
+        updated = await _in_credential_pool(
+            request.app, state.device_store.record_use, device.device_id
+        )
+    except Exception:  # noqa: BLE001 - re-raised as a served error
+        LOGGER.warning("web credential store error on admission")
+        raise ApiError(
+            ERROR_INTERNAL, "credential store is temporarily unavailable",
+            status_code=503,
+        ) from None
+    if updated != 1:
+        LOGGER.info("web auth rejected: device revoked in flight")
+        if session is not None:
+            # Drop the dead entry rather than leaving it to hold one of the
+            # bounded slots for the rest of its TTL. The eviction loop removes
+            # the OLDEST entry, not the deadest, so a revoked session left in
+            # place can outlive a live one when the map is under pressure.
+            sessions.discard(session.session_id)
+        raise ApiError(ERROR_UNAUTHORIZED)
+
+    if session is None:
+        session = sessions.create(device)
+        request.state.new_session = session
     return device
 
 
 # Methods permitted to CREATE a session. GET and HEAD only: see the comment at
 # the minting branch in _establish_principal for why a POST must not.
 _MINTING_METHODS = frozenset({"GET", "HEAD"})
+
+
+# The same set _harden writes, as raw ASGI header bytes.
+_HARDENING_HEADERS = tuple(
+    (name.encode("latin-1"), value.encode("latin-1"))
+    for name, value in (
+        ("cache-control", "no-store"),
+        ("referrer-policy", "no-referrer"),
+        ("x-content-type-options", "nosniff"),
+        (
+            "content-security-policy",
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        ),
+    )
+)
 
 
 def _harden(response: Response) -> Response:
@@ -288,17 +316,35 @@ def _harden(response: Response) -> Response:
     previously attached only on the rendered-page path, so the exact responses
     an unauthenticated caller could reach were the ones with nothing on them.
     """
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    # No script, no frame, no external anything. Stated rather than assumed, so
-    # that an injected string that somehow survived escaping still has nowhere
-    # to execute.
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
-        "base-uri 'none'; frame-ancestors 'none'"
-    )
+    # ONE source for the set, shared with the send-path wrapper below. Two
+    # copies of a security header list is how they drift, and a drifted copy
+    # looks exactly like a covered one.
+    for name, value in _HARDENING_HEADERS:
+        response.headers[name.decode("latin-1")] = value.decode("latin-1")
     return response
+
+
+def _hardening_send(send):
+    """Wrap an ASGI send so every response start carries the hardening set.
+
+    Additive and idempotent: a header a view already set is left alone, so a
+    response that went through `_harden` is unchanged and one the framework
+    produced on its own gains the same protections.
+    """
+
+    async def wrapped(message):
+        if message.get("type") == "http.response.start":
+            headers = list(message.get("headers") or [])
+            present = {name.lower() for name, _ in headers}
+            headers.extend(
+                (name, value)
+                for name, value in _HARDENING_HEADERS
+                if name not in present
+            )
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return wrapped
 
 
 def _bare(response: Response) -> Response:
@@ -362,6 +408,57 @@ def _error_page(request: Request, active: str, code: str, status: int) -> Respon
     return _html(request, body, active, status=status)
 
 
+def _is_own_navigation(request: Request) -> bool:
+    """Is this the site's own top-level navigation, rather than a sub-resource?
+
+    Read from the Fetch metadata the browser attaches and the page cannot
+    forge. Absent headers are treated as permission, because a browser too old
+    to send them is also too old for the attack to be worth reasoning about,
+    and refusing would break the surface for it entirely.
+
+    `sec-fetch-dest: document` is a page load. Anything else - image, script,
+    iframe, font - is a sub-resource reference, which is how a hostile page
+    would issue many requests cheaply. `sec-fetch-site: cross-site` is another
+    origin causing the request; a bookmark or typed address reports `none`, and
+    moving within the surface reports `same-origin`.
+    """
+    dest = request.headers.get("sec-fetch-dest", "").strip().lower()
+    site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if dest and dest != "document":
+        return False
+    return site != "cross-site"
+
+
+async def _recover_submitted(request: Request) -> None:
+    """Best-effort: put the submitted text back where the error page reads it.
+
+    Admission runs BEFORE the body is parsed, so a failure raised there - a
+    shared-bucket 429, a scope 403, an expired session - reached the error page
+    with nothing to re-render, and the owner's form came back empty. That is
+    the exact failure the error page was built to prevent, arriving through the
+    one path that skipped it.
+
+    Silent on every failure: this runs while already handling an error, and an
+    unparseable body must not replace the real error with a second one.
+    """
+    if getattr(request.state, "submitted", None):
+        return
+    if request.method not in {"POST", "PUT", "PATCH"}:
+        return
+    declared = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if declared != "application/x-www-form-urlencoded":
+        return
+    try:
+        parsed = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    except Exception:  # noqa: BLE001 - never mask the error being handled
+        return
+    for field in ("text", "q"):
+        values = parsed.get(field)
+        if values:
+            request.state.submitted = values[-1].strip()[:TEXT_MAX_LENGTH]
+            return
+
+
 def _guarded(handler, active: str, scope: str):
     """Wrap a view with the admission sequence, the scope check and rendering.
 
@@ -373,6 +470,17 @@ def _guarded(handler, active: str, scope: str):
 
     async def endpoint(request: Request) -> Response:
         try:
+            if request.method in _MINTING_METHODS and not _is_own_navigation(request):
+                # A GET that is not this site's own navigation - a cross-site
+                # image, iframe or script reference - must not be able to mint.
+                # SameSite=Strict withholds the cookie, but the browser still
+                # sends the cached basic-auth credentials and the edge still
+                # injects its marker, so a hostile page full of img tags would
+                # otherwise drive one ~16 MiB derivation and one session per
+                # tag, saturating the shared verifier and denying the desktop
+                # client. Refused as though nothing were here.
+                LOGGER.info("web mint refused: not this site's own navigation")
+                raise _Refused()
             device = await _establish_principal(
                 request, may_mint=request.method in _MINTING_METHODS
             )
@@ -381,9 +489,14 @@ def _guarded(handler, active: str, scope: str):
         except _Refused:
             return _refuse()
         except _NeedsSession:
-            landing = f"{WEB_MOUNT_PATH}/" if active == "lookup" else f"{WEB_MOUNT_PATH}/translate"
-            return _bare(RedirectResponse(landing, status_code=303))
+            # Render rather than redirect, so the typed text survives. A
+            # redirect here threw away whatever was in the box, which is the
+            # one thing an expired-session POST must not do - the owner would
+            # have to retype the sentence they just submitted.
+            await _recover_submitted(request)
+            return _error_page(request, active, ERROR_UNAUTHORIZED, 401)
         except ApiError as exc:
+            await _recover_submitted(request)
             return _error_page(request, active, exc.code, exc.status_code)
         except Exception:  # noqa: BLE001 - containment, see below
             # The failure domain stops HERE. ADR 0014 accepts that a defect in
@@ -472,6 +585,15 @@ async def _translate_post(request: Request, device) -> Response:
     if not text:
         return _html(request, render.translate_view(mount=WEB_MOUNT_PATH), "translate")
     state = request.app.state
+    # The seam BEFORE the model call, which the JSON route also closes
+    # (app.py, immediately before its own translate_request_async). Without it
+    # a revocation committing between admission and the model stage still
+    # spent a budget slot and paid for a round trip, and was only noticed by
+    # the post-model check afterwards - by which time the cost was incurred.
+    # Fail closed here: nothing has been spent yet, so a store error refuses.
+    from ..app import _require_active_device
+
+    await _require_active_device(request, device)
     outcome = await translate_request_async(
         state.term_service,
         state.translator,
@@ -521,32 +643,43 @@ async def _lookup_redirect_view(request: Request, device) -> Response:
     return _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=303))
 
 
-def bare_mount_guard(parent_app):
-    """An endpoint for the mount path WITHOUT its trailing slash.
+class BareMountGuard:
+    """The mount path WITHOUT its trailing slash, for EVERY method.
 
     Starlette's Mount matches only the slash-prefixed remainder, so the exact
-    path `/wuwaterm-web` never enters the sub-application at all - and the
-    PARENT router's own slash redirect answers it with a 307 to the slashed
-    form. That redirect is produced before `_EdgeGate` can look at anything, so
-    a caller who never presented the edge marker learned both that something is
-    mounted here and that the switch is on, and the response carried none of
-    the hardening headers. Turning off `redirect_slashes` on the child router
-    did not and could not fix this; the redirect belongs to the parent, and
-    disabling it there would change behaviour for every existing API route.
+    path `/wuwaterm-web` never enters the sub-application - the PARENT router
+    answers it, before `_EdgeGate` can look at anything. So a caller who never
+    presented the edge marker learned both that something is mounted here and
+    that the switch is on. Turning off `redirect_slashes` on the child could
+    not fix that; the redirect belongs to the parent, and disabling it there
+    would change behaviour for every existing API route.
 
-    So the exact path gets an endpoint of its own, registered ahead of the
-    mount: without the marker it answers exactly what every other path under
-    the mount answers, and with it, it redirects to the slashed form.
+    THIS IS AN ASGI CALLABLE, NOT A REQUEST FUNCTION, and that is the whole
+    point. A `Route` built from a function applies a method filter and answers
+    405 for anything outside it - so a first attempt that registered this for
+    GET and HEAD closed the oracle for GET and left it wide open for POST, PUT
+    and DELETE, which the parent router answered with 405 and no hardening
+    headers. Same oracle, different verb. Starlette skips method filtering
+    entirely for an ASGI-callable endpoint, so this matches every method there
+    is, including ones nobody has thought of.
     """
 
-    async def endpoint(request: Request) -> Response:
-        secret = parent_app.state.settings.web_edge_secret
+    def __init__(self, parent_app) -> None:
+        self.parent = parent_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        request = Request(scope)
+        secret = self.parent.state.settings.web_edge_secret
         if not _edge_marker_ok(request, secret):
             LOGGER.info("web request refused at the bare mount path")
-            return _refuse()
-        return _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=307))
+            await _refuse()(scope, receive, send)
+            return
+        response = _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=307))
+        await response(scope, receive, send)
 
-    return endpoint
+
+def bare_mount_guard(parent_app) -> BareMountGuard:
+    return BareMountGuard(parent_app)
 
 
 class _EdgeGate:
@@ -574,6 +707,16 @@ class _EdgeGate:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        # Header injection happens on the SEND path, not on the Response
+        # objects the views build. `_harden` documented itself as applying to
+        # every response from this surface and did not: a 404 for an unknown
+        # child path, a 405 for a known path with the wrong method, and the
+        # slash-variant 404 are all produced by the child ROUTER, which never
+        # touches a view and so never reached `_finish`. The claim was true of
+        # everything the code wrote and false of everything the framework
+        # wrote. Wrapping send makes the surface's own statement structurally
+        # true instead of true-by-inspection.
+        send = _hardening_send(send)
         secret = self.parent.state.settings.web_edge_secret
         if not _edge_marker_ok(Request(scope), secret):
             LOGGER.info("web request refused at the edge gate")

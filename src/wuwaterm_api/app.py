@@ -1007,13 +1007,13 @@ def create_app(
         # re-opening, one level up, exactly the existence oracle the
         # sub-application closes. A plain Route, not an APIRoute, so the
         # published OpenAPI document is still untouched.
+        # No `methods=`: the endpoint is an ASGI callable, so Starlette applies
+        # NO method filter and this matches every verb. Passing a method list
+        # here is what left the first version of this fix answering 405 (from
+        # the parent, unhardened) to an off-edge POST while GET was correctly
+        # refused — the same oracle reached by a different verb.
         app.router.routes.insert(
-            0,
-            _PlainRoute(
-                WEB_MOUNT_PATH,
-                bare_mount_guard(app),
-                methods=["GET", "HEAD"],
-            ),
+            0, _PlainRoute(WEB_MOUNT_PATH, bare_mount_guard(app))
         )
     return app
 
