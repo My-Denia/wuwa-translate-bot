@@ -982,6 +982,21 @@ def create_app(
 
     _register_error_handlers(app)
     _register_routes(app)
+    # The owner-private web presentation layer, mounted LAST and only when it
+    # is switched on. Default off (see settings.DEFAULT_WEB_ENABLED): with the
+    # switch off nothing is mounted at all, so the route table, the OpenAPI
+    # document and the behaviour of every existing endpoint are byte-for-byte
+    # what they were before this layer existed. That is the property that makes
+    # "no regression to the API" checkable rather than merely asserted.
+    #
+    # Imported here rather than at module scope because the sub-application
+    # imports helpers from THIS module; deferring it to call time keeps the
+    # dependency one-directional.
+    if resolved.web_enabled:
+        from .web.app import create_web_app
+        from .settings import WEB_MOUNT_PATH
+
+        app.mount(WEB_MOUNT_PATH, create_web_app(app))
     return app
 
 

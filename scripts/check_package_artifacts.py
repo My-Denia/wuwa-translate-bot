@@ -79,6 +79,18 @@ REQUIRED_WHEEL_MEMBERS = (
     "wuwaterm_api/cli.py",
     "wuwaterm_api/errors.py",
     "wuwaterm_api/settings.py",
+    # The web presentation layer is a SUBPACKAGE, and subpackages are the thing
+    # a packaging change drops most quietly: `packages.find` discovers it only
+    # because it carries an __init__.py, and a switch to an explicit package
+    # list - or an __init__.py lost in a refactor - would leave the parent
+    # package shipping intact while this directory vanished. The failure that
+    # produces is not an import error at build time but a 404 for the whole
+    # surface on a deployed host, which is exactly the kind of thing this gate
+    # says it exists to prevent.
+    "wuwaterm_api/web/__init__.py",
+    "wuwaterm_api/web/app.py",
+    "wuwaterm_api/web/render.py",
+    "wuwaterm_api/web/session.py",
 )
 REQUIRED_SDIST_MEMBERS = (
     "pyproject.toml",
@@ -93,6 +105,10 @@ REQUIRED_SDIST_MEMBERS = (
     "src/wuwaterm_api/cli.py",
     "src/wuwaterm_api/errors.py",
     "src/wuwaterm_api/settings.py",
+    "src/wuwaterm_api/web/__init__.py",
+    "src/wuwaterm_api/web/app.py",
+    "src/wuwaterm_api/web/render.py",
+    "src/wuwaterm_api/web/session.py",
 )
 ENTRY_POINT_LINES = (
     "wuwaterm = wuwaterm.cli:main",

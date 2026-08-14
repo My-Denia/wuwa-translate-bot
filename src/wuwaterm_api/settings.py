@@ -140,6 +140,48 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 90.0
 # credential check itself into the load.
 DEFAULT_AUTH_MAX_CONCURRENCY = 2
 
+# The owner-private web presentation layer. Mounted INSIDE this process (see
+# docs/adr/0014): a third process would mean a third independent LLM budget,
+# because ADR 0009 accounts that budget per process, and the aggregate ceiling
+# would rise. The cost of sharing the process is that a defect in the web layer
+# can take the API down with it, and the first mitigation is this switch:
+# DEFAULT OFF, so the surface does not exist unless an operator asks for it.
+DEFAULT_WEB_ENABLED = False
+# Mount path. Identical inside the process and on the public site, so the Caddy
+# route is a `handle` that strips nothing: with a stripping route the app would
+# have to reconstruct the public prefix to emit correct form actions, and the
+# one thing a same-origin design must not do is disagree with itself about
+# where it lives.
+WEB_MOUNT_PATH = "/wuwaterm-web"
+DEFAULT_WEB_SESSION_TTL_SECONDS = 12 * 60 * 60
+# A ceiling on live browser sessions. This is a single-owner surface, so the
+# real number is 1-2; the bound exists so that a loop which somehow reaches
+# session creation cannot grow the map without limit.
+DEFAULT_WEB_MAX_SESSIONS = 32
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Strict boolean parsing: an unrecognised value is an error, not a False.
+
+    The same reasoning as every other reader in this file - a typo must fail
+    the process rather than silently disable something. That matters more here
+    than anywhere else in this module, because the value being read decides
+    whether an internet-facing surface exists at all, and the failure direction
+    of a lenient parser is to read `WUWATERM_API_WEB_ENABLED=treu` as OFF and
+    leave the operator convinced they turned it on.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ApiConfigError(
+        f"{name} must be one of 1/0, true/false, yes/no, on/off"
+    )
+
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     raw = os.getenv(name)
@@ -192,6 +234,21 @@ class ApiSettings:
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
     log_level: str = DEFAULT_LOG_LEVEL
+    web_enabled: bool = DEFAULT_WEB_ENABLED
+    # The device token the browser session is mapped onto. Held HERE, in the
+    # server process, and never sent to the browser: that is what makes the
+    # "no credential lands in the browser" property structural rather than a
+    # rule the operator has to keep. Carried as a plain str because it is a
+    # presented credential, not a stored one - the store keeps only a derived
+    # verifier, and this is the thing presented TO it.
+    web_device_token: str = ""
+    # Shared secret that the edge proxy injects on every proxied request. The
+    # app refuses anything arriving without it, which is what makes "rejected
+    # before it reaches application logic" true of a request that bypassed the
+    # edge entirely by talking straight to the loopback port.
+    web_edge_secret: str = ""
+    web_session_ttl_seconds: int = DEFAULT_WEB_SESSION_TTL_SECONDS
+    web_max_sessions: int = DEFAULT_WEB_MAX_SESSIONS
 
     @classmethod
     def from_env(cls) -> "ApiSettings":
@@ -266,4 +323,25 @@ class ApiSettings:
                 os.getenv("WUWATERM_API_LOG_LEVEL") or DEFAULT_LOG_LEVEL
             ).strip()
             or DEFAULT_LOG_LEVEL,
+            web_enabled=_env_bool("WUWATERM_API_WEB_ENABLED", DEFAULT_WEB_ENABLED),
+            # NOT stripped of internal whitespace and NOT validated for shape:
+            # the token's format is the credential store's business, and a
+            # settings-layer opinion about what a token looks like would be a
+            # second, divergent parser. Surrounding whitespace goes because that
+            # is an artefact of how environment files are written, not of the
+            # credential.
+            web_device_token=(os.getenv("WUWATERM_API_WEB_DEVICE_TOKEN") or "").strip(),
+            web_edge_secret=(os.getenv("WUWATERM_API_WEB_EDGE_SECRET") or "").strip(),
+            web_session_ttl_seconds=_env_int(
+                "WUWATERM_API_WEB_SESSION_TTL_SECONDS",
+                DEFAULT_WEB_SESSION_TTL_SECONDS,
+                minimum=60,
+                maximum=30 * 24 * 60 * 60,
+            ),
+            web_max_sessions=_env_int(
+                "WUWATERM_API_WEB_MAX_SESSIONS",
+                DEFAULT_WEB_MAX_SESSIONS,
+                minimum=1,
+                maximum=1024,
+            ),
         )
