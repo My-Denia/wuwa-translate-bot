@@ -182,3 +182,60 @@ def test_repo_hygiene_does_not_follow_symlinks_out_of_the_repository(
     connection.commit()
     connection.close()
     assert guard.main() == 1
+
+
+def test_repo_hygiene_inspects_the_index_in_one_git_process(tmp_path, monkeypatch):
+    """A gate that runs on every commit must not spawn a process per file.
+
+    Asking git per path cost 5.35 seconds and about 170 processes on this
+    repository, against roughly 0.03 seconds before the content check existed,
+    growing linearly with the index. The batched reader answers the whole list
+    down one pipe while still never holding a blob whole.
+    """
+    import subprocess
+    import sqlite3
+    import tracemalloc
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    for index in range(25):
+        (tmp_path / f"file{index}.txt").write_text("ordinary", encoding="utf-8")
+    disguised = tmp_path / "disguised"
+    connection = sqlite3.connect(disguised)
+    connection.execute("create table t(x)")
+    connection.executemany(
+        "insert into t values (?)", [("x" * 2000,) for _ in range(2000)]
+    )
+    connection.commit()
+    connection.close()
+    git("add", "-A")
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    spawns = []
+    real_popen = subprocess.Popen
+
+    def counting_popen(args, *rest, **kwargs):
+        if isinstance(args, (list, tuple)) and "cat-file" in list(args):
+            spawns.append(list(args))
+        return real_popen(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", counting_popen)
+
+    tracked = [p for p in guard.tracked_paths()]
+    assert len(tracked) > 20, tracked
+    tracemalloc.start()
+    found = guard.staged_database_paths(tracked)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert found == {"disguised"}, found
+    assert len(spawns) == 1, f"one git process for the whole index, got {len(spawns)}"
+    assert peak < 1_000_000, peak
