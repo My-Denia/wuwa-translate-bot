@@ -30,6 +30,7 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from wuwaterm_client import strings  # noqa: E402
 from wuwaterm_client.api import ApiClient, TermsResult  # noqa: E402
+from wuwaterm_client.errors import ClientError  # noqa: E402
 from wuwaterm_client.ui import terms_view as terms_view_module  # noqa: E402
 from wuwaterm_client.ui.terms_view import TermsView  # noqa: E402
 
@@ -116,6 +117,45 @@ def test_a_sentence_is_not_a_term_lookup(qapp) -> None:
     view._on_search_clicked()
 
     assert service.queries == []
+    assert view.empty_card.title_text == strings.TERMS_SENTENCE_HINT_TITLE
+
+
+def test_the_sentence_card_does_not_inherit_the_last_failure(qapp) -> None:
+    """A refusal decided locally must not wear a previous request's error.
+
+    The sentence branch never starts a request, so it never reaches the place
+    every other path clears the banner. Without an explicit clear, the failure
+    reported for the PREVIOUS text stays on screen beside the sentence card -
+    an error attributed to text that was never sent anywhere.
+    """
+    service = _Service()
+    view = TermsView(_client(service))
+
+    view._render_error(ClientError("llm_unavailable", request_id="req-fail"))
+    assert view.banner.is_showing() is True, "fixture failed to put a failure on screen"
+
+    view.query_edit.setText("今" * (terms_view_module.MAX_TERM_LENGTH + 1))
+    view._on_search_clicked()
+
+    assert view.empty_card.title_text == strings.TERMS_SENTENCE_HINT_TITLE
+    assert view.banner.is_showing() is False, "the sentence card kept the old failure"
+    assert view.field_error.is_showing() is False
+    assert service.queries == []
+
+
+def test_a_field_error_does_not_survive_into_the_sentence_card(qapp) -> None:
+    """The same rule for the field-level surface, which marks the input box
+    itself invalid - a red outline outliving the text that earned it."""
+    service = _Service()
+    view = TermsView(_client(service))
+
+    view._render_error(ClientError("input_too_long", request_id="req-field"))
+    assert view.field_error.is_showing() is True
+
+    view.query_edit.setText("今汐\n")
+    view._on_search_clicked()
+
+    assert view.field_error.is_showing() is False
     assert view.empty_card.title_text == strings.TERMS_SENTENCE_HINT_TITLE
 
 

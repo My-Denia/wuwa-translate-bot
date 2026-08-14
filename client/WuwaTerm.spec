@@ -93,13 +93,29 @@ RESOURCE_DATAS = [
 # 的 translations 目录取,不复制进仓库——复制一份就会和装着的 PySide6 版本各
 # 走各的。目标目录必须是 PySide6/translations,因为运行时是靠 Qt 自己报告的
 # 翻译路径找它的。
-def _qt_translation_datas():
+# 两个候选目录:这台机器上装的 PySide6 6.11 把 .qm 放在 PySide6/translations,
+# 而别的构型(以及某些平台的轮子)放在 PySide6/Qt/translations。只写一个的话,
+# 在另一种构型上这里会静默返回空列表——源码运行时照样是中文(运行时另有三处
+# 搜索路径),打出来的包却是英文菜单,而所有测试都绿。所以两个都找。
+_QT_TRANSLATION_DIRS = ("translations", "Qt/translations")
+
+
+def _qt_translation_source():
     try:
         import PySide6
     except ImportError:
-        return []
-    source = Path(PySide6.__file__).parent / "translations" / "qtbase_zh_CN.qm"
-    if not source.is_file():
+        return None
+    root = Path(PySide6.__file__).parent
+    for relative in _QT_TRANSLATION_DIRS:
+        candidate = root / relative / "qtbase_zh_CN.qm"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _qt_translation_datas():
+    source = _qt_translation_source()
+    if source is None:
         return []
     return [(str(source), "PySide6/translations")]
 

@@ -99,6 +99,39 @@ def test_the_spec_packages_the_translation() -> None:
     assert "datas=RESOURCE_DATAS + QT_TRANSLATION_DATAS" in spec
 
 
+def test_the_spec_can_actually_find_the_translation_on_this_install() -> None:
+    """断结果:spec 找的那些目录里,**真的有**一个存在的 .qm。
+
+    上一条断的是 spec 的文本长什么样——那是机制。一个把源路径写错的 spec 完全
+    可以通过它:字符串都在,而 `is_file()` 返回 False,`QT_TRANSLATION_DATAS`
+    静默变成空列表。源码运行时仍然是中文(i18n 另有三处搜索路径都能兜住),
+    只有打出来的包是英文菜单——本 PR 的四个「字未经 strings.py 就上屏」出口,
+    每一个都是这种形状。
+
+    这里因此复算 spec 的候选目录,断言其中至少一个在这台机器上真实存在。
+    PySide6 的轮子在不同版本/平台上把 .qm 放在 PySide6/translations 或
+    PySide6/Qt/translations,所以两个都要在 spec 里列出。
+    """
+    import re
+
+    import PySide6
+
+    spec = SPEC_PATH.read_text(encoding="utf-8")
+    match = re.search(r"_QT_TRANSLATION_DIRS\s*=\s*\(([^)]*)\)", spec)
+    assert match, "spec 不再声明候选目录,这条断言失去了对象"
+    candidates = re.findall(r"[\"']([^\"']+)[\"']", match.group(1))
+    assert "translations" in candidates and "Qt/translations" in candidates, (
+        f"spec 只找了 {candidates};另一种轮子构型会静默打不进翻译"
+    )
+
+    root = Path(PySide6.__file__).parent
+    found = [rel for rel in candidates if (root / rel / "qtbase_zh_CN.qm").is_file()]
+    assert found, (
+        f"spec 会打包的候选目录在这台机器上一个都不存在:{candidates};"
+        f"实际的 PySide6 根目录是 {root}"
+    )
+
+
 def test_a_missing_translation_is_reported_rather_than_raised(monkeypatch, qapp) -> None:
     """菜单是英文的窗口仍然可用;打不开的窗口不可用。
 

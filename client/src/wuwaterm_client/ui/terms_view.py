@@ -326,10 +326,19 @@ class TermsView(QWidget):
             self._end_loading()
             self._task = None
 
-    def _begin_loading(self) -> None:
+    def _clear_outcome_surfaces(self) -> None:
+        """Take down everything the PREVIOUS outcome put on screen.
+
+        Shared by the request path and by the local-routing branches that
+        never start a request, so a refusal decided here cannot inherit a
+        failure reported for different text.
+        """
         self.banner.clear()
         self.field_error.clear()
         mark_field_invalid(self.query_edit, False)
+
+    def _begin_loading(self) -> None:
+        self._clear_outcome_surfaces()
         self.search_button.setEnabled(False)
         self.progress.start()
         self.status_label.set_text(strings.TERMS_SEARCHING)
@@ -499,12 +508,19 @@ class TermsView(QWidget):
         self._show_empty_card()
 
     def _show_sentence_state(self, query: str) -> None:
-        """The fourth gate, on screen.
+        """The sentence gate, on screen.
 
         An empty table would have said the dictionary has no such term. What
         is true is that this text was never a term lookup, so the card says
         that and hands the text to the area that can do something with it.
+
+        The previous outcome comes down first. This branch never reaches
+        `_begin_loading`, which is where every other path clears the banner
+        and the field error - so without this, a failure from the LAST lookup
+        stays on screen next to the sentence card, reporting an error for
+        text that was never sent anywhere.
         """
+        self._clear_outcome_surfaces()
         self.table.setRowCount(0)
         self._apply_request_id()
         self.empty_card.set_content(
