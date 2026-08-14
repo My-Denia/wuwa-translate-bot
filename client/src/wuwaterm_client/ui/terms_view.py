@@ -248,8 +248,18 @@ class TermsView(QWidget):
         results_layout.setSpacing(8)
         results_layout.addWidget(self.table)
 
+        # The translation area labels its three controls; this one had a label
+        # before the redesign and lost it, leaving assistive technology with
+        # the placeholder alone - and once anything is typed, not even that.
+        # Same shape as the other area: a visible label, set as the field's
+        # buddy so the name is carried to the accessibility tree rather than
+        # merely sitting next to it.
+        query_label = QLabel(strings.TERMS_QUERY_LABEL, self)
+        query_label.setBuddy(self.query_edit)
+
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
+        search_row.addWidget(query_label)
         search_row.addWidget(self.query_edit, 1)
         search_row.addWidget(self.search_button)
 

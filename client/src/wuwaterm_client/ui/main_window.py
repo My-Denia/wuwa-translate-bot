@@ -33,7 +33,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -58,7 +58,7 @@ from ..errors import (
     message_for,
 )
 from . import error_presentation
-from .components import Banner, EmptyStateCard, EndpointChip
+from .components import Banner, EmptyStateCard, EndpointChip, fit_to_workspace
 from .first_run_dialog import FirstRunDialog
 from .settings_dialog import SettingsDialog
 from .status_view import StatusView
@@ -338,37 +338,16 @@ class MainWindow(QMainWindow):
 
         The minimum used to be a fixed 960x640, described in a comment as
         "no larger than a 1366x768 laptop can show". That is true at 100%
-        scaling and false at every other setting: the number is in
-        DEVICE-INDEPENDENT pixels, so a 1366x768 panel at 150% offers about
-        911x512 of them and at 200% about 683x384. A minimum larger than the
-        workspace cannot be honoured - the window opens too tall, and because
-        nothing here scrolls, the buttons along the bottom go off-screen with
-        no way to reach them.
-
-        So the preferred minimum is clamped to what the screen reports, and
-        the absolute floor is what remains. The default size is clamped the
-        same way, or the window would open larger than the desktop and land
-        in the same place by a different route.
+        scaling and false at every other setting - see `fit_to_workspace`,
+        which holds the clamp itself. It lives in components.py because the
+        settings dialog needs the same treatment, and a second copy would
+        have been a second thing to forget.
         """
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen is None:
-            # No screen to measure - the offscreen platform used by the test
-            # suite and by --self-check. Take the preference as given.
-            self.setMinimumSize(*WINDOW_PREFERRED_MINIMUM)
-            self.resize(*WINDOW_DEFAULT_SIZE)
-            return
-        # availableGeometry, not geometry: the taskbar is not workspace.
-        workspace = screen.availableGeometry()
-        minimum = (
-            max(min(WINDOW_PREFERRED_MINIMUM[0], workspace.width()),
-                WINDOW_ABSOLUTE_MINIMUM[0]),
-            max(min(WINDOW_PREFERRED_MINIMUM[1], workspace.height()),
-                WINDOW_ABSOLUTE_MINIMUM[1]),
-        )
-        self.setMinimumSize(*minimum)
-        self.resize(
-            max(min(WINDOW_DEFAULT_SIZE[0], workspace.width()), minimum[0]),
-            max(min(WINDOW_DEFAULT_SIZE[1], workspace.height()), minimum[1]),
+        fit_to_workspace(
+            self,
+            WINDOW_PREFERRED_MINIMUM,
+            WINDOW_DEFAULT_SIZE,
+            WINDOW_ABSOLUTE_MINIMUM,
         )
 
     def focus_current_input(self) -> None:

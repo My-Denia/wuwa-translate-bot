@@ -716,3 +716,76 @@ class ScoreBar(QWidget):
     def percent(self) -> int:
         """The same value as a whole percentage of the bar's width."""
         return int(round(self._score))
+
+
+def fit_to_workspace(
+    widget: QWidget,
+    preferred_minimum: tuple[int, int],
+    default_size: tuple[int, int],
+    absolute_minimum: tuple[int, int],
+) -> None:
+    """Size a top-level widget against the desktop it will actually appear on.
+
+    Sizes here are DEVICE-INDEPENDENT pixels, so a fixed minimum that "fits a
+    1366x768 laptop" is true at 100% scaling and false at every other setting:
+    the same panel offers about 911x512 of them at 150% and about 683x384 at
+    200%. A minimum larger than the workspace cannot be honoured - the widget
+    opens taller than the desktop, and anything along its bottom edge goes
+    off-screen with no way to reach it.
+
+    So the preferred minimum is clamped to what the screen reports and the
+    absolute floor is what remains, and the default size is clamped the same
+    way, or the widget would open larger than the desktop and land in the same
+    place by a different route.
+
+    One function rather than one per top-level widget: the main window had
+    this logic and the settings dialog did not, which is exactly how the
+    dialog came to need 584 logical pixels of height on a desktop that offers
+    384. A second copy would have been a second thing to forget.
+    """
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        # No screen to measure - the offscreen platform used by the test
+        # suite and by --self-check. Take the preference as given.
+        widget.setMinimumSize(*preferred_minimum)
+        widget.resize(*default_size)
+        return
+    # availableGeometry, not geometry: the taskbar is not workspace.
+    available = screen.availableGeometry()
+    minimum, size = clamp_to_workspace(
+        (available.width(), available.height()),
+        preferred_minimum,
+        default_size,
+        absolute_minimum,
+    )
+    widget.setMinimumSize(*minimum)
+    widget.resize(*size)
+
+
+def clamp_to_workspace(
+    workspace: tuple[int, int],
+    preferred_minimum: tuple[int, int],
+    default_size: tuple[int, int],
+    absolute_minimum: tuple[int, int],
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The arithmetic of `fit_to_workspace`, with no Qt and no screen.
+
+    Split out because the test that was supposed to cover this could not
+    actually fail. It measured the REAL screen and asserted the minimum fit
+    inside it - which on any ordinary monitor is true whether or not the
+    clamp exists, since the unclamped minimum is 960x640. The case that
+    matters is a workspace SMALLER than the preference, and that case cannot
+    be reached by asking the machine the suite happens to run on.
+
+    Taking the workspace as an argument makes 683x384 - a 1366x768 panel at
+    200% scaling - an ordinary test input.
+    """
+    minimum = (
+        max(min(preferred_minimum[0], workspace[0]), absolute_minimum[0]),
+        max(min(preferred_minimum[1], workspace[1]), absolute_minimum[1]),
+    )
+    size = (
+        max(min(default_size[0], workspace[0]), minimum[0]),
+        max(min(default_size[1], workspace[1]), minimum[1]),
+    )
+    return minimum, size

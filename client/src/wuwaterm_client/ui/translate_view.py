@@ -223,6 +223,14 @@ class TranslateView(QWidget):
         input_label = QLabel(strings.INPUT_LABEL, self)
         direction_label = QLabel(strings.DIRECTION_LABEL, self)
         result_label = QLabel(strings.RESULT_LABEL, self)
+        # A label placed NEXT TO a control is not attached to it: assistive
+        # technology reads the two as unrelated, so the editor still announces
+        # itself as an unnamed text area. `setBuddy` is the association, and it
+        # costs a line. The sibling-consistency gate found these three - the
+        # reviewer had only reported the lookup area, which had no label at all.
+        input_label.setBuddy(self.input_edit)
+        direction_label.setBuddy(self.direction_combo)
+        result_label.setBuddy(self.result_edit)
         request_id_row_label = QLabel(strings.REQUEST_ID_ROW_LABEL, self)
 
         source_row = QHBoxLayout()

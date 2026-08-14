@@ -68,8 +68,17 @@ def find_translation_file() -> Path | None:
     """第一个真实存在的 qtbase_zh_CN.qm,找不到返回 None。"""
     for directory in translation_search_paths():
         candidate = directory / TRANSLATION_FILE_NAME
-        if candidate.is_file():
-            return candidate
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            # A denying ACL or a transient filesystem error on ONE candidate
+            # must not end the search, and must not end the program. This runs
+            # from app.run() before the window is built, so an exception here
+            # is a client that will not start - over an optional localization
+            # resource whose absence costs an English context menu.
+            # theme.py:141-143 already guards its own lookup this way.
+            continue
     return None
 
 

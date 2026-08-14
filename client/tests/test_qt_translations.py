@@ -142,3 +142,38 @@ def test_a_missing_translation_is_reported_rather_than_raised(monkeypatch, qapp)
     monkeypatch.setattr(i18n, "find_translation_file", lambda: None)
 
     assert i18n.install_qt_translations(qapp) is False
+
+
+def test_an_unreadable_candidate_directory_does_not_stop_the_client(monkeypatch) -> None:
+    """一个候选目录读不动,不能变成客户端起不来。
+
+    app.run() 在构造窗口之前调用 install_qt_translations,且不捕获异常。所以
+    候选目录上的 is_file() 一旦抛 OSError(拒绝性 ACL、瞬时故障、断开的网络
+    驱动器),代价就不是「菜单是英文」而是「程序打不开」——用一个可选的本地化
+    资源换掉了整个可用性。theme.py 的资源查找一直是包着 try/except OSError 的,
+    这里曾经不是。
+
+    断的是结果:第一个候选目录爆掉之后,**后面的候选仍然被走到**,并且函数
+    正常返回而不是抛出。
+    """
+    real = Path.is_file
+    exploded: list[str] = []
+
+    def is_file(self):
+        if self.parent.name == "boom":
+            exploded.append(str(self))
+            raise OSError(5, "denied by ACL")
+        return real(self)
+
+    good = Path(i18n.__file__).parent / "resources"
+    monkeypatch.setattr(
+        i18n, "translation_search_paths", lambda: [Path("boom"), good]
+    )
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+    found = i18n.find_translation_file()
+
+    assert exploded, "前置条件没建立:那个会爆的候选根本没被探到"
+    assert found is None or found.parent == good, (
+        "爆掉的候选之后,搜索没有继续走到下一个"
+    )

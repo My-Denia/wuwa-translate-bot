@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -54,12 +56,22 @@ from .components import (
     Banner,
     FieldError,
     apply_credential_backend,
+    fit_to_workspace,
     mark_field_invalid,
 )
 from .error_presentation import SEVERITY_DANGER
 from .token_dialog import TokenDialog
 
 BaseUrlValidator = Callable[[str], "str | None"]
+
+# What the three cards want when nothing constrains them; a PREFERENCE, not a
+# floor. `fit_to_workspace` clamps it to the desktop that is actually there.
+SETTINGS_PREFERRED_MINIMUM = (360, 560)
+SETTINGS_DEFAULT_SIZE = (420, 620)
+# The floor. Small enough for a 1366x768 panel at 200% scaling, which reports
+# roughly 683x384 logical pixels - the case that made the button box
+# unreachable before the scroll area existed.
+SETTINGS_ABSOLUTE_MINIMUM = (320, 240)
 
 
 def _card(title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
@@ -265,14 +277,49 @@ class SettingsDialog(QDialog):
         # colour than it found it.
         self.rejected.connect(self._restore_initial_appearance)
 
+        # The three cards go inside a scroll area and the button box stays
+        # OUTSIDE it. Measured: this stack wants 584 logical pixels of height,
+        # and a 1366x768 panel at 200% scaling offers about 384 - so on that
+        # desktop the dialog opened taller than the screen and Ok/Cancel sat
+        # below its bottom edge, unreachable. Scrolling the cards is what makes
+        # the content reachable; keeping the buttons out of the scroll area is
+        # what makes the DECISION always reachable, which matters more.
+        scroll_body = QWidget(self)
+        body_layout = QVBoxLayout(scroll_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(title)
+        body_layout.addWidget(connection_card)
+        body_layout.addWidget(credential_card)
+        body_layout.addWidget(appearance_card)
+        body_layout.addStretch(1)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("settingsScroll")
+        self.scroll_area.setWidget(scroll_body)
+        # Without this the inner widget keeps its sizeHint and the scroll area
+        # shows a horizontal bar instead of letting the cards use the width.
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
-        layout.addWidget(title)
-        layout.addWidget(connection_card)
-        layout.addWidget(credential_card)
-        layout.addWidget(appearance_card)
-        layout.addStretch(1)
+        layout.addWidget(self.scroll_area, 1)
         layout.addWidget(buttons)
+
+        # Same clamp the main window uses, from the same function. The dialog
+        # is the reason that function is shared rather than a method: it had no
+        # sizing logic of its own, so it inherited whatever its content asked
+        # for, however tall that was.
+        fit_to_workspace(
+            self,
+            SETTINGS_PREFERRED_MINIMUM,
+            SETTINGS_DEFAULT_SIZE,
+            SETTINGS_ABSOLUTE_MINIMUM,
+        )
 
         self._refresh_credential_status()
 
