@@ -91,15 +91,28 @@ def staged_blob_is_a_database(rel: str) -> bool:
     which a worktree-only check reported the repository clean and the database
     blob was free to be committed. What a commit carries is the index, so that
     is what has to be inspected.
+
+    Only the HEADER is read. ``git cat-file blob`` writes the whole object, and
+    buffering it to look at sixteen bytes would mean loading an arbitrarily
+    large file into memory - including exactly the bulk game data this guard
+    exists to reject, so the check could be killed by the very thing it is
+    meant to report. The pipe is closed after the header, which ends the
+    writer.
     """
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         ["git", "cat-file", "blob", f":{rel}"],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        check=False,
     )
-    return proc.returncode == 0 and proc.stdout[: len(SQLITE_MAGIC)] == SQLITE_MAGIC
+    try:
+        header = proc.stdout.read(len(SQLITE_MAGIC)) if proc.stdout else b""
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        proc.terminate()
+        proc.wait()
+    return header == SQLITE_MAGIC
 
 
 def main() -> int:
@@ -120,7 +133,15 @@ def main() -> int:
                     f"staged database blob (detected by content): {rel}"
                 )
                 continue
-        elif path.is_file() and looks_like_a_database(path):
+        elif (
+            path.is_file()
+            # is_file() FOLLOWS the link, so a symlink pointing at a database
+            # outside the repository was reported as one - but git stores only
+            # the target path string, so there is no database to commit and the
+            # gate was blocked by a false positive.
+            and not path.is_symlink()
+            and looks_like_a_database(path)
+        ):
             failures.append(f"untracked database file (detected by content): {rel}")
             continue
         if is_runtime_state_path(rel):

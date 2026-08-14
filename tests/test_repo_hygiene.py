@@ -91,3 +91,94 @@ def test_repo_hygiene_reads_the_index_not_the_working_tree(tmp_path, monkeypatch
 
     git("rm", "--cached", "disguised")
     assert guard.main() == 0
+
+
+def test_repo_hygiene_reads_only_the_header_of_a_staged_blob(tmp_path, monkeypatch):
+    """A guard that rejects bulk data must not load bulk data to do it.
+
+    git cat-file writes the whole object, so buffering it to look at sixteen
+    bytes means holding an arbitrarily large file in memory - including exactly
+    the oversized blobs this guard exists to report, which could kill the check
+    before it reports them. Measured rather than asserted structurally: the
+    peak allocation while inspecting a multi-megabyte staged blob must stay
+    small.
+    """
+    import subprocess
+    import sqlite3
+    import tracemalloc
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    big = tmp_path / "big"
+    connection = sqlite3.connect(big)
+    connection.execute("create table t(x)")
+    connection.executemany(
+        "insert into t values (?)", [("x" * 2000,) for _ in range(4000)]
+    )
+    connection.commit()
+    connection.close()
+    assert big.stat().st_size > 4_000_000, big.stat().st_size
+    git("add", "big")
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+    tracemalloc.start()
+    detected = guard.staged_blob_is_a_database("big")
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert detected
+    assert peak < 1_000_000, (
+        f"inspecting the blob peaked at {peak} bytes; the header is 16 and "
+        "buffering the whole object is what this avoids"
+    )
+
+
+def test_repo_hygiene_does_not_follow_symlinks_out_of_the_repository(
+    tmp_path, monkeypatch
+):
+    """git stores a symlink's target STRING, not the file it points at.
+
+    Path.is_file() and the content read both follow the link, so an untracked
+    symlink aimed at a database outside the repository was reported as a
+    database - a false positive that blocks the gate over a file that would
+    never be committed.
+    """
+    import subprocess
+    import sqlite3
+
+    outside = tmp_path / "outside.db"
+    connection = sqlite3.connect(outside)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    try:
+        (repo / "linkonly").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        import pytest
+
+        pytest.skip("this platform does not permit creating symlinks")
+
+    subprocess.run(["git", "init"], cwd=repo, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", repo)
+    assert guard.main() == 0, "a symlink is not a database to commit"
+
+    # ...and a real untracked database in the same tree is still reported.
+    real = repo / "realdb"
+    connection = sqlite3.connect(real)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    assert guard.main() == 1
