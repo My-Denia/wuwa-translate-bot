@@ -144,19 +144,56 @@ def test_the_sentence_card_does_not_inherit_the_last_failure(qapp) -> None:
 
 
 def test_a_field_error_does_not_survive_into_the_sentence_card(qapp) -> None:
-    """The same rule for the field-level surface, which marks the input box
-    itself invalid - a red outline outliving the text that earned it."""
+    """The same rule for the field-level surface, and it has to be the SENTENCE
+    branch that clears it.
+
+    The text is put in place BEFORE the failure is rendered, and never edited
+    afterwards. An earlier version of this test typed the sentence after the
+    error, which meant the typing handler cleared the field error on the way -
+    so the assertion passed with the sentence branch's own clear deleted. It
+    was proving the wrong mechanism, and the mutation harness said so.
+
+    The sequence here is a real one: a query is rejected as too long, and the
+    owner presses Search again without changing it.
+    """
+    service = _Service()
+    view = TermsView(_client(service))
+
+    view.query_edit.setText("今汐\n")
+    view._render_error(ClientError("input_too_long", request_id="req-field"))
+    assert view.field_error.is_showing() is True
+
+    view._on_search_clicked()
+
+    assert view.field_error.is_showing() is False
+    assert view.empty_card.title_text == strings.TERMS_SENTENCE_HINT_TITLE
+
+
+def test_editing_the_query_drops_a_stale_field_rejection(qapp) -> None:
+    """A red outline must not outlive the text that earned it.
+
+    `input_too_long` and its two siblings mark the query box itself invalid.
+    That verdict is about one particular value; once the owner types a
+    different one, leaving it up claims the service rejected something it has
+    never seen. The translation area's editor has had this handler all along.
+
+    The second half of this test is the one that matters over time: the
+    handler must clear and start NOTHING. Searching from here is what was
+    withdrawn, and it needed a debounce, an ordering guard and an
+    invalidation path that no longer exist.
+    """
     service = _Service()
     view = TermsView(_client(service))
 
     view._render_error(ClientError("input_too_long", request_id="req-field"))
     assert view.field_error.is_showing() is True
+    assert view.query_edit.property("invalid") is True
 
-    view.query_edit.setText("今汐\n")
-    view._on_search_clicked()
+    view.query_edit.setText("今汐")
 
-    assert view.field_error.is_showing() is False
-    assert view.empty_card.title_text == strings.TERMS_SENTENCE_HINT_TITLE
+    assert view.field_error.is_showing() is False, "拒绝仍挂在一段没被拒绝过的文字上"
+    assert view.query_edit.property("invalid") is not True
+    assert service.queries == [], "输入触发了请求——输入即搜已经撤掉"
 
 
 def test_the_request_id_survives_an_empty_or_failed_lookup(qapp) -> None:

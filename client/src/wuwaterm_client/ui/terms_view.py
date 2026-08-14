@@ -177,6 +177,14 @@ class TermsView(QWidget):
         self.query_edit.setObjectName("searchField")
         self.query_edit.setPlaceholderText(strings.TERMS_QUERY_PLACEHOLDER)
         self.query_edit.returnPressed.connect(self._on_search_clicked)
+        # Clears a stale field-level rejection, and does NOTHING else. Read
+        # `_on_query_changed` before adding anything to it: this is the one
+        # `textChanged` connection in this module, and the reason searching
+        # while typing was withdrawn is that starting requests from here needs
+        # a debounce, an ordering guard and an invalidation path, none of
+        # which exist any more. The same handler, doing the same one thing,
+        # is on the translation area's editor.
+        self.query_edit.textChanged.connect(self._on_query_changed)
 
         # Disabled while a search runs and while the client has no address.
         # Both are the same statement - a press right now cannot produce an
@@ -259,6 +267,24 @@ class TermsView(QWidget):
         self._apply_request_id()
         self._apply_endpoint_state()
         self._show_idle_state()
+
+    # -- typing ------------------------------------------------------------
+
+    def _on_query_changed(self) -> None:
+        """Drop a field-level rejection that no longer has a subject.
+
+        `invalid_request`, `input_too_long` and `payload_too_large` mark the
+        query box itself invalid - a red outline plus a message under it.
+        Those belong to the text that was rejected. Once the owner types
+        something else, the outline is making a claim about a value the
+        service has never seen, and the next submit is a long way off.
+
+        It starts nothing. The area is submit-driven, and this handler exists
+        only so a refusal stops describing text it was not about.
+        """
+        if self.field_error.is_showing():
+            self.field_error.clear()
+            mark_field_invalid(self.query_edit, False)
 
     # -- submitting --------------------------------------------------------
 
