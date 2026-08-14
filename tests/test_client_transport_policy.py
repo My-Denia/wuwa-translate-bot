@@ -29,7 +29,23 @@ ROOT = Path(__file__).resolve().parents[1]
 # list has to be maintained, and a file added to the client root tomorrow
 # would be silently out of scope. Build artefacts and virtual environments
 # are excluded because they are third-party bytes, not shipped surface.
-SCANNED_TREES = (ROOT / "client",)
+#
+# The owner-private web presentation layer is scanned by the same recursion,
+# and for the same reason the client tree is. It is a THIRD surface reached
+# over the network by a person, and the revoked design - "get to it by opening
+# a tunnel to the host" - is exactly as available a wrong answer there as it
+# was for the desktop client. Before this tree was listed here the whole
+# package sat outside the scan, so the guard would have stayed green over
+# anything written in it: that green would have been the absence of a check,
+# not the absence of an offence.
+#
+# It lands under the STRICT rule automatically, because `_offending_lines`
+# derives strictness as "not in RECIPE_ONLY_PATHS" - the default is strict and
+# leniency is the thing that has to be asked for by name.
+SCANNED_TREES = (
+    ROOT / "client",
+    ROOT / "src" / "wuwaterm_api" / "web",
+)
 EXCLUDED_DIR_NAMES = {
     ".venv",
     "venv",
@@ -49,6 +65,13 @@ SCANNED_FILES = (
     # it; this adds the pattern scan, so a spelling those literals miss
     # (`ssh -fNL`, `autossh`, prose) is caught as well.
     ROOT / "docs" / "deployment.md",
+    # The web layer's operator guide. It is here for the same reason
+    # deployment.md is: it tells a reader how the surface is reached, so it is
+    # a place where "reach it by opening a tunnel" could be written down. It is
+    # NOT in RECIPE_ONLY_PATHS, so it gets the strict rule - unlike the
+    # deployment runbook it has no legitimate need to name the administration
+    # channel at all.
+    ROOT / "docs" / "web-presentation-layer.md",
     *sorted((ROOT / "deploy").glob("*.yml")),
     *sorted((ROOT / "deploy").glob("*.yaml")),
     # The deployment scripts. A helper that grew a forwarded port would
@@ -332,6 +355,15 @@ def test_the_scan_actually_covers_the_files_it_claims_to() -> None:
         "client/pyproject.toml",
         "docs/deployment.md",
         "deploy/docker-compose.yml",
+        # The web presentation layer. Every module of it, named individually
+        # rather than as a directory: the failure this test exists to catch is
+        # a scan whose scope quietly shrinks, and "the directory is listed"
+        # would still be true if the recursion stopped returning files from it.
+        "src/wuwaterm_api/web/__init__.py",
+        "src/wuwaterm_api/web/app.py",
+        "src/wuwaterm_api/web/render.py",
+        "src/wuwaterm_api/web/session.py",
+        "docs/web-presentation-layer.md",
     ):
         assert required in scanned, required
     # ...and nothing from a virtual environment or a build output, which are

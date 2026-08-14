@@ -44,6 +44,10 @@ def build_wheel(
         "wuwaterm_api/cli.py": "",
         "wuwaterm_api/errors.py": "",
         "wuwaterm_api/settings.py": "",
+        "wuwaterm_api/web/__init__.py": "",
+        "wuwaterm_api/web/app.py": "",
+        "wuwaterm_api/web/render.py": "",
+        "wuwaterm_api/web/session.py": "",
         f"{dist_info}/METADATA": WHEEL_METADATA,
         f"{dist_info}/entry_points.txt": ENTRY_POINTS,
         f"{dist_info}/RECORD": "",
@@ -78,6 +82,10 @@ def build_sdist(
         f"{root}/src/wuwaterm_api/cli.py": "",
         f"{root}/src/wuwaterm_api/errors.py": "",
         f"{root}/src/wuwaterm_api/settings.py": "",
+        f"{root}/src/wuwaterm_api/web/__init__.py": "",
+        f"{root}/src/wuwaterm_api/web/app.py": "",
+        f"{root}/src/wuwaterm_api/web/render.py": "",
+        f"{root}/src/wuwaterm_api/web/session.py": "",
     }
     members.update(extra or {})
     for name in omit or set():
@@ -166,6 +174,27 @@ def test_wheel_missing_required_member_fails(tmp_path: Path):
     wheel = build_wheel(tmp_path / "bad.whl", omit={"wuwaterm/bot.py"})
     failures = audit_wheel(wheel, VERSION)
     assert any("missing required member: wuwaterm/bot.py" in f for f in failures)
+
+
+def test_wheel_missing_the_web_subpackage_fails(tmp_path: Path):
+    """The subpackage is the member a packaging change drops most quietly.
+
+    `packages.find` discovers `wuwaterm_api.web` only because it carries an
+    __init__.py. A switch to an explicit package list, or an __init__.py lost in
+    a refactor, would leave the parent package shipping intact while this
+    directory vanished - and the symptom would not be a build error but a 404
+    for the whole browser surface on a deployed host. Named individually rather
+    than trusting the parent's presence to imply it.
+    """
+    for member in (
+        "wuwaterm_api/web/__init__.py",
+        "wuwaterm_api/web/app.py",
+        "wuwaterm_api/web/render.py",
+        "wuwaterm_api/web/session.py",
+    ):
+        wheel = build_wheel(tmp_path / "bad.whl", omit={member})
+        failures = audit_wheel(wheel, VERSION)
+        assert any(f"missing required member: {member}" in f for f in failures), member
 
 
 def test_wheel_version_mismatch_fails(tmp_path: Path):
