@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 
 from wuwaterm_client.config import (
+    APPEARANCE_DARK,
+    APPEARANCE_VALUES,
+    DEFAULT_APPEARANCE,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_TRANSLATE_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
@@ -36,6 +39,7 @@ def test_config_file_never_contains_the_credential(tmp_path: Path) -> None:
         "base_url",
         "request_timeout_seconds",
         "translate_timeout_seconds",
+        "appearance",
     }
 
 
@@ -132,6 +136,28 @@ def test_a_base_url_of_the_wrong_type_leaves_the_client_unconfigured(tmp_path) -
     )
 
     assert ClientConfig.load(tmp_path).base_url is None
+
+
+def test_the_appearance_preference_survives_a_round_trip(tmp_path: Path) -> None:
+    """The reason the key set above grew: "follow the system" is the default,
+    and an owner who pins dark has to still have it pinned next launch."""
+    ClientConfig(base_url="https://api.example.invalid", appearance=APPEARANCE_DARK).save(
+        base_dir=tmp_path
+    )
+
+    assert ClientConfig.load(tmp_path).appearance == APPEARANCE_DARK
+
+
+def test_an_appearance_value_the_client_does_not_know_falls_back(tmp_path) -> None:
+    """A hand-edited file is the only way one can arrive, and an unknown value
+    must not reach the theme loader as though it named a scheme."""
+    for written in ("midnight", "", 3, None, ["dark"]):
+        (tmp_path / "config.json").write_text(
+            json.dumps({"appearance": written}), encoding="utf-8"
+        )
+        assert ClientConfig.load(tmp_path).appearance == DEFAULT_APPEARANCE
+
+    assert DEFAULT_APPEARANCE in APPEARANCE_VALUES
 
 
 def test_an_address_that_cannot_be_used_is_recognized() -> None:

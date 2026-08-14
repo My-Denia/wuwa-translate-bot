@@ -85,6 +85,22 @@ if (-not (Test-Path $ExePath)) {
     exit 1
 }
 
+# The stylesheets have to be IN the artifact, and nothing else here would
+# notice if they were not. The application degrades to no styling when it
+# cannot read them - deliberately, so a missing resource is not a failed
+# start-up - which means the self-check below would still exit 0 and the
+# defect would first appear as an unstyled window on the owner's desk. The
+# spec lists the files and a client test compares that list to the directory;
+# this is the other half, catching a target path that does not land where the
+# application looks.
+$DistRoot = Join-Path $ClientRoot "dist\WuwaTerm"
+$StyleSheets = @(Get-ChildItem -Path $DistRoot -Filter "*.qss" -File -Recurse -ErrorAction SilentlyContinue)
+if ($StyleSheets.Count -eq 0) {
+    Write-Error "Build finished but no .qss stylesheet was packaged under: $DistRoot"
+    exit 1
+}
+Write-Host "Packaged stylesheets: $($StyleSheets.Count)"
+
 # A produced file is not a working program. This runs the artifact's own
 # start-up rehearsal: it imports and constructs everything a normal start
 # does, off-screen, and exits without showing a window, asking for a

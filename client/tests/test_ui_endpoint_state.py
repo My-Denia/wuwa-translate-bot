@@ -5,6 +5,14 @@ adopted a machine-local development address whenever its settings file could
 not be read, and nothing on screen said which address was in use - so a
 missing `config.json` looked exactly like an unreachable service.
 
+The claim is now made by three widgets instead of one label, and each of them
+is checked here: the chip in the navigation column (a word and a shortened
+address, plus the full sentence for assistive technology), the global banner
+that states nothing will be sent, and the setup checklist that says what is
+missing. They are refreshed together on purpose - a window that says "not
+configured" in one corner and shows an address in another is worse than one
+that says nothing - so they are asserted together too.
+
 Real Qt under the offscreen platform (conftest.py), like the other UI tests
 here; the state logic itself is a plain function so it can be checked without
 driving a widget.
@@ -25,7 +33,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from wuwaterm_client import strings  # noqa: E402
 from wuwaterm_client.config import ClientConfig  # noqa: E402
@@ -41,6 +49,32 @@ def qapp():
     yield app
 
 
+def _assert_the_three_areas_are_reachable(window: MainWindow) -> None:
+    """The areas exist, keep their order, and still switch.
+
+    This is what `tabs.count() == 3` used to stand for. A navigation column
+    plus a stack can satisfy a count while pointing at nothing, so the claim
+    is made in three parts instead of one.
+    """
+    assert window.stack.count() == 3
+    assert len(window.nav_buttons) == 3
+    assert [window.stack.widget(index) for index in range(3)] == [
+        window.terms_view,
+        window.translate_view,
+        window.status_view,
+    ]
+
+    for page, view in (
+        (main_window_module.PAGE_STATUS, window.status_view),
+        (main_window_module.PAGE_TRANSLATE, window.translate_view),
+        (main_window_module.PAGE_TERMS, window.terms_view),
+    ):
+        window.nav_buttons[page].click()
+        assert window.stack.currentWidget() is view
+        assert window.nav_buttons[page].isChecked()
+        assert [button.isChecked() for button in window.nav_buttons].count(True) == 1
+
+
 def test_the_state_logic_distinguishes_the_two_cases() -> None:
     unconfigured = endpoint_status_text(None)
     configured = endpoint_status_text(CONFIGURED)
@@ -51,9 +85,10 @@ def test_the_state_logic_distinguishes_the_two_cases() -> None:
     # unexpected can be recognised as such by reading the window.
     assert CONFIGURED in configured
     # ...and the unconfigured line names the place to fix it, because nothing
-    # the owner did put them in that state.
-    assert "Settings" in unconfigured
-    assert "not configured" in unconfigured
+    # the owner did put them in that state. The words are the ones the window
+    # now uses; the claim is the same one the English assertions made.
+    assert "设置" in unconfigured
+    assert "尚未配置" in unconfigured
 
 
 def test_the_window_shows_the_configured_address(qapp, monkeypatch) -> None:
@@ -61,8 +96,16 @@ def test_the_window_shows_the_configured_address(qapp, monkeypatch) -> None:
 
     window = MainWindow(ClientConfig(base_url=CONFIGURED))
 
-    assert window.endpoint_label.text() == endpoint_status_text(CONFIGURED)
-    assert CONFIGURED in window.endpoint_label.text()
+    assert window.endpoint_chip.is_configured is True
+    # The chip holds the whole address even though it draws a shortened one,
+    # and the full sentence is what it reports to assistive technology - so
+    # the state is never only available to someone who can read an elided
+    # string in a small font.
+    assert window.endpoint_chip.address_text == CONFIGURED
+    assert window.endpoint_chip.accessibleName() == endpoint_status_text(CONFIGURED)
+    assert CONFIGURED in window.endpoint_chip.accessibleName()
+    # A configured client says nothing standing about being unable to send.
+    assert window.global_banner.is_showing() is False
 
 
 def test_the_window_says_so_when_nothing_is_configured(qapp, monkeypatch) -> None:
@@ -72,18 +115,28 @@ def test_the_window_says_so_when_nothing_is_configured(qapp, monkeypatch) -> Non
 
     window = MainWindow(ClientConfig())
 
-    assert window.endpoint_label.text() == strings.ENDPOINT_NOT_CONFIGURED
-    assert "127.0.0.1" not in window.endpoint_label.text()
+    assert window.endpoint_chip.is_configured is False
+    assert window.endpoint_chip.address_text == strings.ENDPOINT_CHIP_NO_ADDRESS
+    assert window.endpoint_chip.accessibleName() == strings.ENDPOINT_NOT_CONFIGURED
+    assert "127.0.0.1" not in window.endpoint_chip.accessibleName()
+    assert "127.0.0.1" not in window.endpoint_chip.address_text
     assert window.api_client.is_configured is False
-    # The window is still usable: Settings is how the owner recovers, so it
-    # has to be reachable rather than blocked behind a broken client.
-    assert window.tabs.count() == 3
+    # Said once as a state and once as a task, because the two answer
+    # different questions: what is wrong, and what to do about it.
+    assert window.global_banner.is_showing() is True
+    assert window.global_banner.message_text == strings.GLOBAL_BANNER_NOT_CONFIGURED
+    assert window.setup_card.title_text == strings.SETUP_STEPS_TITLE
+    assert window.setup_card.isVisibleTo(window) is True
+    # The window is still usable: Settings is how the owner recovers, so all
+    # three areas have to stay reachable rather than be blocked behind a
+    # broken client.
+    _assert_the_three_areas_are_reachable(window)
 
 
 def test_setting_an_address_updates_what_the_window_shows(
     qapp, tmp_path, monkeypatch
 ) -> None:
-    """The label is not read once at start-up: a client configured during the
+    """The chip is not read once at start-up: a client configured during the
     session must stop reporting that it is not."""
     from wuwaterm_client import config as config_module
 
@@ -91,7 +144,8 @@ def test_setting_an_address_updates_what_the_window_shows(
     monkeypatch.setattr(main_window_module, "has_token", lambda: True)
 
     window = MainWindow(ClientConfig())
-    assert window.endpoint_label.text() == strings.ENDPOINT_NOT_CONFIGURED
+    assert window.endpoint_chip.is_configured is False
+    assert window.endpoint_chip.accessibleName() == strings.ENDPOINT_NOT_CONFIGURED
 
     class _AcceptedDialog:
         def __init__(self, *args, **kwargs):
@@ -106,8 +160,14 @@ def test_setting_an_address_updates_what_the_window_shows(
     monkeypatch.setattr(main_window_module, "SettingsDialog", _AcceptedDialog)
     window._on_settings_clicked()
 
-    assert window.endpoint_label.text() == endpoint_status_text(CONFIGURED)
+    assert window.endpoint_chip.is_configured is True
+    assert window.endpoint_chip.address_text == CONFIGURED
+    assert window.endpoint_chip.accessibleName() == endpoint_status_text(CONFIGURED)
     assert window.api_client.is_configured is True
+    # The standing "nothing will be sent" notice and the checklist are gone,
+    # because the condition they describe is over.
+    assert window.global_banner.message_text != strings.GLOBAL_BANNER_NOT_CONFIGURED
+    assert window.setup_card.isVisibleTo(window) is False
     # ...and it was written where the next launch will look for it.
     assert ClientConfig.load(tmp_path).base_url == CONFIGURED
 
@@ -115,12 +175,13 @@ def test_setting_an_address_updates_what_the_window_shows(
 def test_a_refused_address_does_not_change_what_the_window_shows(
     qapp, monkeypatch
 ) -> None:
-    """A refusal must not half-apply to the label either, or the window would
-    describe a client that does not exist."""
-    warned: list[tuple] = []
-    monkeypatch.setattr(
-        QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
-    )
+    """A refusal must not half-apply to the chip either, or the window would
+    describe a client that does not exist.
+
+    The refusal itself used to be a modal warning box; it is the global banner
+    now, which keeps it readable while the owner goes back and corrects the
+    address instead of taking the reason away on the first click.
+    """
     monkeypatch.setattr(main_window_module, "has_token", lambda: True)
 
     window = MainWindow(ClientConfig(base_url=CONFIGURED))
@@ -138,8 +199,11 @@ def test_a_refused_address_does_not_change_what_the_window_shows(
     monkeypatch.setattr(main_window_module, "SettingsDialog", _AcceptedDialog)
     window._on_settings_clicked()
 
-    assert warned
-    assert window.endpoint_label.text() == endpoint_status_text(CONFIGURED)
+    assert window.global_banner.is_showing() is True
+    assert window.global_banner.message_text == strings.ERROR_MSG_INSECURE_ENDPOINT
+    assert window.endpoint_chip.is_configured is True
+    assert window.endpoint_chip.address_text == CONFIGURED
+    assert window.endpoint_chip.accessibleName() == endpoint_status_text(CONFIGURED)
 
 
 class _PendingTask:
@@ -214,11 +278,15 @@ def test_changing_the_address_cancels_in_flight_work_and_clears_stale_answers(
             window.status_view.service_version_value.text()
             + window.status_view.term_count_value.text()
         )
-    # ...and the header names the new address, so nothing on screen still
-    # refers to the old one.
-    assert window.endpoint_label.text() == endpoint_status_text(
+    # ...and the chip names the new address, so nothing on screen still refers
+    # to the old one.
+    assert window.endpoint_chip.address_text == "https://other.example.invalid"
+    assert window.endpoint_chip.accessibleName() == endpoint_status_text(
         "https://other.example.invalid"
     )
+    # Three areas emptying at once reads as data loss unless something says it
+    # was deliberate.
+    assert window.global_banner.message_text == strings.ENDPOINT_CHANGED_BANNER
 
 
 def test_settings_that_leave_the_address_alone_do_not_discard_work(
@@ -255,7 +323,6 @@ def test_a_refused_address_does_not_discard_the_work_in_progress(
     qapp, monkeypatch
 ) -> None:
     """A refusal changes nothing, so it must not cancel anything either."""
-    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(main_window_module, "has_token", lambda: True)
 
     window = MainWindow(ClientConfig(base_url=CONFIGURED))
@@ -272,6 +339,9 @@ def test_a_refused_address_does_not_discard_the_work_in_progress(
 
     assert task.cancelled is False
     assert window.translate_view.result_edit.toPlainText() == "Jinhsi"
+    # The refusal is on screen all the same, so "nothing changed" is not
+    # indistinguishable from "nothing happened".
+    assert window.global_banner.message_text == strings.ERROR_MSG_INSECURE_ENDPOINT
 
 
 def test_the_settings_dialog_opens_empty_when_nothing_is_configured(qapp) -> None:
