@@ -50,3 +50,44 @@ def test_repo_hygiene_detects_a_database_by_content_not_by_name(tmp_path):
     assert not looks_like_a_database(empty)
 
     assert not looks_like_a_database(tmp_path / "does-not-exist")
+
+
+def test_repo_hygiene_reads_the_index_not_the_working_tree(tmp_path, monkeypatch):
+    """A commit carries the INDEX, so that is what the guard must inspect.
+
+    Stage a file and then delete it and the index still holds the original
+    blob while the path on disk is gone. A working-tree-only content check
+    reported such a repository clean - reproduced as an AD state with the
+    SQLite magic in the index - and the database blob was free to be committed.
+    The first version of this content check had exactly that gap: it fixed the
+    RULE, from filename to content, and kept reading the wrong SOURCE.
+    """
+    import subprocess
+    import sqlite3
+    import importlib
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    disguised = tmp_path / "disguised"
+    connection = sqlite3.connect(disguised)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    git("add", "disguised")
+    disguised.unlink()  # staged, then removed: the AD state
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+    assert guard.staged_blob_is_a_database("disguised"), (
+        "the staged blob carries the SQLite magic and must be seen"
+    )
+    assert guard.main() == 1, "a staged database blob must fail the guard"
+
+    git("rm", "--cached", "disguised")
+    assert guard.main() == 0
