@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 from pathlib import Path
 
@@ -334,6 +335,103 @@ def test_a_trailing_slash_is_not_a_route_even_on_edge(tmp_path, sample_db):
     for url in (f"{WEB_MOUNT_PATH}/translate/", f"{WEB_MOUNT_PATH}/lookup/"):
         response = run(call(app, "GET", url, headers=edge()))
         assert response.status_code == 404, (url, response.status_code)
+
+
+def test_the_bare_mount_path_does_not_redirect_off_edge(tmp_path, sample_db):
+    """The oracle that survived one level up.
+
+    A Mount matches only the slash-prefixed remainder, so the exact path
+    `/wuwaterm-web` never enters the sub-application - and the PARENT router's
+    slash redirect answered it with a 307 before the edge gate could look at
+    anything. Turning off redirect_slashes on the child could not fix that; the
+    redirect belonged to the parent. Measured before the fix: 307 with a
+    Location header and no hardening headers, while every other path under the
+    mount answered a bare 404.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    off_edge = run(call(app, "GET", WEB_MOUNT_PATH))
+    assert off_edge.status_code == 404, off_edge.status_code
+    assert off_edge.text == ""
+    assert "location" not in off_edge.headers
+    assert off_edge.headers["cache-control"] == "no-store"
+    # With the marker it is a normal redirect onto the slashed form.
+    on_edge = run(call(app, "GET", WEB_MOUNT_PATH, headers=edge()))
+    assert on_edge.status_code == 307
+    assert on_edge.headers["location"] == f"{WEB_MOUNT_PATH}/"
+    # ...and the API's own routes are untouched by the inserted route.
+    assert run(call(app, "GET", "/healthz")).status_code == 200
+
+
+def test_a_device_revoked_before_the_first_request_mints_no_session(
+    tmp_path, sample_db
+):
+    """The easy half: already revoked when the request arrives.
+
+    Closed by credential verification itself, not by the admission re-check -
+    which is exactly why this test alone does NOT prove the race below is
+    handled, and why both exist.
+    """
+    app, store, device, _token = build_web_app(tmp_path, sample_db)
+    store.revoke(device.device_id)
+    response = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
+    assert response.status_code == 401
+    assert SESSION_COOKIE_NAME not in response.cookies
+    assert len(app.state.web_sessions) == 0
+
+
+def test_a_revocation_committing_inside_the_mint_window_is_caught(
+    tmp_path, sample_db
+):
+    """The actual race, driven rather than described.
+
+    The window is between the credential verifying and the session being
+    created. Verification has already returned a live principal by then, so
+    nothing on that path can notice; only a re-check at admission can. The
+    revocation is committed from inside the verification call itself, which is
+    the narrowest reproduction of "it committed while the request was in
+    flight".
+    """
+    app, store, device, _token = build_web_app(tmp_path, sample_db)
+    real_authenticate = store.authenticate
+
+    def authenticate_then_revoke(token):
+        verified = real_authenticate(token)
+        # Commits AFTER verification succeeded and BEFORE the session is made.
+        store.revoke(device.device_id)
+        return verified
+
+    store.authenticate = authenticate_then_revoke
+    response = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
+    assert response.status_code == 401
+    assert SESSION_COOKIE_NAME not in response.cookies
+    assert len(app.state.web_sessions) == 0
+
+
+def test_the_authenticated_principal_reaches_the_completion_log(
+    tmp_path, sample_db, caplog
+):
+    """Browser traffic must be attributable to the device that spent the budget.
+
+    The parent's completion log reads the principal only from request.state,
+    so without the assignment every web request logged no principal at all -
+    on the one surface whose accepted cost is that it spends the desktop
+    client's allowance.
+
+    Asserted on the log line the parent actually emits for a real request, not
+    on a constructed object: the point is that the principal survives the whole
+    request path into the record an operator would read.
+    """
+    app, _store, _device, _token = build_web_app(tmp_path, sample_db)
+    with caplog.at_level(logging.INFO, logger="wuwaterm_api"):
+        response = run(call(app, "GET", f"{WEB_MOUNT_PATH}/", headers=edge()))
+    assert response.status_code == 200
+    completions = [
+        r.getMessage() for r in caplog.records if "request complete" in r.getMessage()
+    ]
+    assert completions, [r.getMessage() for r in caplog.records]
+    # "device=-" is the no-principal marker. Any web request logging it is a
+    # request nobody can attribute to the device that spent the shared budget.
+    assert not [line for line in completions if "device=-" in line], completions
 
 
 def test_a_non_ascii_edge_marker_is_refused_not_a_server_error(tmp_path, sample_db):

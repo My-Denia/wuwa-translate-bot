@@ -993,10 +993,28 @@ def create_app(
     # imports helpers from THIS module; deferring it to call time keeps the
     # dependency one-directional.
     if resolved.web_enabled:
-        from .web.app import create_web_app
+        from starlette.routing import Route as _PlainRoute
+
+        from .web.app import bare_mount_guard, create_web_app
         from .settings import WEB_MOUNT_PATH
 
         app.mount(WEB_MOUNT_PATH, create_web_app(app))
+        # The mount path WITHOUT its trailing slash, registered FIRST so it
+        # matches before this router's own slash redirect can answer it. A
+        # Mount matches only the slash-prefixed remainder, so `/wuwaterm-web`
+        # would otherwise be handled by the parent's redirect_slashes and
+        # answer 307 to a caller that never presented the edge marker —
+        # re-opening, one level up, exactly the existence oracle the
+        # sub-application closes. A plain Route, not an APIRoute, so the
+        # published OpenAPI document is still untouched.
+        app.router.routes.insert(
+            0,
+            _PlainRoute(
+                WEB_MOUNT_PATH,
+                bare_mount_guard(app),
+                methods=["GET", "HEAD"],
+            ),
+        )
     return app
 
 

@@ -35,6 +35,14 @@ an ordinary device from the credential store's point of view — it can be liste
 and revoked like any other, and revoking it ends the browser session on the
 next request.
 
+**Note where those values land.** The Compose deployment gives the bot and the
+API the *same* `../.env`, so writing the web variables there expands them into
+the bot's process as well — a service with no web surface holding the web
+device token and the edge marker. The Compose file therefore blanks all three
+in the bot service's `environment:` block, which overrides `env_file`. If you
+deploy some other way, reproduce that: either give the API its own environment
+file, or blank these three for every process that is not the API.
+
 ## The route
 
 Two things are added to the **existing** site block — the same one that already

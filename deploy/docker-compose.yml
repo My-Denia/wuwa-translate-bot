@@ -17,6 +17,16 @@ services:
       WUWATERM_STATE_DIR: /app/state
       WUWATERM_SETTINGS_PATH: /app/state/chat_settings.json
       WUWATERM_CHANNEL_REPLY_INDEX_PATH: /app/state/channel_replies.json
+      # Both services read the SAME ../.env, so the web presentation layer's
+      # credentials would otherwise be expanded into this process too - a bot
+      # that has no web surface would be holding the web device token and the
+      # edge marker. `environment` overrides `env_file`, so blanking them here
+      # keeps those secrets in the one process that needs them. Empty is also
+      # the safe value: the boolean reader treats an empty string as unset and
+      # returns the default, which is off.
+      WUWATERM_API_WEB_ENABLED: ""
+      WUWATERM_API_WEB_DEVICE_TOKEN: ""
+      WUWATERM_API_WEB_EDGE_SECRET: ""
     volumes:
       - ../data:/app/data:ro
       - ../state:/app/state

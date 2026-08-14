@@ -211,6 +211,30 @@ async def _establish_principal(request: Request, *, may_mint: bool):
         if device is None:
             LOGGER.error("configured web device token was rejected by the store")
             raise ApiError(ERROR_UNAUTHORIZED)
+        # Close the window between verification and session creation. A
+        # revocation committing in that gap would otherwise mint a live session
+        # for a principal that is already dead, and the session would then be
+        # honoured until its own liveness re-check on the NEXT request - so the
+        # first request after revocation would be served.
+        #
+        # record_use, not is_active, because that is what the JSON API's
+        # admission path uses at the same seam: it only stamps a row that is
+        # still active, so a zero affected-row count IS the revocation signal,
+        # and it also records the use. Checking liveness with a separate read
+        # would leave web traffic missing from the device's last-use record.
+        try:
+            updated = await _in_credential_pool(
+                request.app, state.device_store.record_use, device.device_id
+            )
+        except Exception:  # noqa: BLE001 - re-raised as a served error
+            LOGGER.warning("web credential store error on admission")
+            raise ApiError(
+                ERROR_INTERNAL, "credential store is temporarily unavailable",
+                status_code=503,
+            ) from None
+        if updated != 1:
+            LOGGER.info("web auth rejected: device revoked in flight")
+            raise ApiError(ERROR_UNAUTHORIZED)
         session = sessions.create(device)
         request.state.new_session = session
     else:
@@ -237,6 +261,14 @@ async def _establish_principal(request: Request, *, may_mint: bool):
     # (3) The per-device rate limit, on the PARENT'S limiter instance and keyed
     # by the same device id the API uses - so browser traffic and desktop
     # traffic for one device share one bucket instead of getting one each.
+    # Name the principal BEFORE the rate-limit decision, for the same reason
+    # the JSON API does: the parent's completion log reads the device only from
+    # request.state, so without this every web request - the served ones, the
+    # 403s, and the 429s below - is recorded as having no principal. That would
+    # make browser traffic the one consumer of the shared budget that cannot be
+    # attributed to the device which spent it, on the exact surface whose
+    # accepted cost is that it spends the desktop client's allowance.
+    request.state.device = device
     limiter = state.rate_limiter
     if not limiter.allow(device.device_id):
         raise ApiError(ERROR_RATE_LIMITED)
@@ -487,6 +519,34 @@ async def _lookup_redirect_view(request: Request, device) -> Response:
     error page on a surface that has no way to explain one.
     """
     return _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=303))
+
+
+def bare_mount_guard(parent_app):
+    """An endpoint for the mount path WITHOUT its trailing slash.
+
+    Starlette's Mount matches only the slash-prefixed remainder, so the exact
+    path `/wuwaterm-web` never enters the sub-application at all - and the
+    PARENT router's own slash redirect answers it with a 307 to the slashed
+    form. That redirect is produced before `_EdgeGate` can look at anything, so
+    a caller who never presented the edge marker learned both that something is
+    mounted here and that the switch is on, and the response carried none of
+    the hardening headers. Turning off `redirect_slashes` on the child router
+    did not and could not fix this; the redirect belongs to the parent, and
+    disabling it there would change behaviour for every existing API route.
+
+    So the exact path gets an endpoint of its own, registered ahead of the
+    mount: without the marker it answers exactly what every other path under
+    the mount answers, and with it, it redirects to the slashed form.
+    """
+
+    async def endpoint(request: Request) -> Response:
+        secret = parent_app.state.settings.web_edge_secret
+        if not _edge_marker_ok(request, secret):
+            LOGGER.info("web request refused at the bare mount path")
+            return _refuse()
+        return _bare(RedirectResponse(f"{WEB_MOUNT_PATH}/", status_code=307))
+
+    return endpoint
 
 
 class _EdgeGate:
