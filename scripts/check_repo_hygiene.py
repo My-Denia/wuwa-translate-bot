@@ -142,8 +142,15 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     a commit that exists in the object store) would leave those bytes in the
     pipe and make every later path read the wrong frame.
 
+    A missing response is ``<requested-name> missing`` with no body. The name
+    may itself contain spaces, so detection is by the trailing `` missing``
+    marker rather than by splitting and inspecting a fixed field index.
+
     Only the SQLite header is retained from a blob. The remainder is discarded
     in bounded chunks so a large blob never lands in memory whole.
+
+    If ``cat-file`` itself fails (for example because this Git build does not
+    support ``-Z``), the gate fails closed rather than reporting a clean tree.
     """
     if not paths:
         return set()
@@ -152,9 +159,10 @@ def staged_database_paths(paths: list[str]) -> set[str]:
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
     found: set[str] = set()
+    stream_error: str | None = None
     try:
         assert proc.stdin is not None and proc.stdout is not None
         for rel in paths:
@@ -162,33 +170,59 @@ def staged_database_paths(paths: list[str]) -> set[str]:
             proc.stdin.flush()
             header = _read_until_nul(proc.stdout)
             if header is None:
+                stream_error = "cat-file stream ended before all paths were answered"
                 break
-            parts = header.split()
-            # "<name> missing" has no body and no trailing object delimiter.
-            if len(parts) < 3 or parts[1] == b"missing":
+            # Missing responses: "<requested-name> missing". The name can
+            # contain spaces, so never split-and-index to find the marker.
+            if header.endswith(b" missing"):
                 continue
-            size = int(parts[2])
-            is_blob = parts[1] == b"blob"
+            parts = header.split()
+            # Resolved: "<oid> <type> <size>". oid and type are single tokens.
+            if len(parts) < 3:
+                stream_error = f"malformed cat-file header: {header!r}"
+                break
+            try:
+                size = int(parts[-1])
+            except ValueError:
+                stream_error = f"malformed cat-file size in header: {header!r}"
+                break
+            obj_type = parts[-2]
+            is_blob = obj_type == b"blob"
             wanted = min(size, len(SQLITE_MAGIC)) if is_blob else 0
             magic_hdr = b""
             if wanted:
                 magic_hdr = proc.stdout.read(wanted)
                 if len(magic_hdr) < wanted:
+                    stream_error = "cat-file stream ended mid-object"
                     break
             if not _drain(proc.stdout, size - wanted):
+                stream_error = "cat-file stream ended mid-object"
                 break
             # Resolved objects are followed by a NUL object delimiter under -Z.
             trail = proc.stdout.read(1)
             if trail != b"\0":
+                stream_error = "cat-file stream missing object delimiter"
                 break
             if is_blob and magic_hdr == SQLITE_MAGIC:
                 found.add(rel)
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
+        stderr_data = b""
+        if proc.stderr is not None:
+            stderr_data = proc.stderr.read()
+            proc.stderr.close()
         if proc.stdout is not None:
             proc.stdout.close()
-        proc.wait()
+        rc = proc.wait()
+    if rc != 0:
+        err = stderr_data.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"git cat-file --batch -Z failed (rc={rc})"
+            + (f": {err}" if err else "")
+        )
+    if stream_error is not None:
+        raise RuntimeError(stream_error)
     return found
 
 
