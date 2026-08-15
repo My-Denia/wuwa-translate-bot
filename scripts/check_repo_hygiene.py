@@ -92,17 +92,38 @@ def staged_blob_is_a_database(rel: str) -> bool:
     blob was free to be committed. What a commit carries is the index, so that
     is what has to be inspected.
 
-    Only the HEADER is read. ``git cat-file blob`` writes the whole object, and
-    buffering it to look at sixteen bytes would mean loading an arbitrarily
-    large file into memory - including exactly the bulk game data this guard
-    exists to reject, so the check could be killed by the very thing it is
-    meant to report. The pipe is closed after the header, which ends the
-    writer.
+    Only the HEADER is read. ``git cat-file`` can stream an arbitrarily large
+    object; buffering it to look at sixteen bytes would mean loading bulk game
+    data this guard exists to reject, so the check could be killed by the very
+    thing it is meant to report. Bytes after the magic are discarded in chunks.
     """
     return rel in staged_database_paths([rel])
 
 
 _SKIP_CHUNK = 1 << 16
+
+
+def _read_until_nul(stream) -> bytes | None:
+    """Read one NUL-terminated frame. None means the stream ended mid-frame."""
+    buf = bytearray()
+    while True:
+        ch = stream.read(1)
+        if not ch:
+            return None if not buf else bytes(buf)
+        if ch == b"\0":
+            return bytes(buf)
+        buf.extend(ch)
+
+
+def _drain(stream, nbytes: int) -> bool:
+    """Discard exactly nbytes, or return False if the stream ends early."""
+    remaining = nbytes
+    while remaining > 0:
+        chunk = stream.read(min(remaining, _SKIP_CHUNK))
+        if not chunk:
+            return False
+        remaining -= len(chunk)
+    return True
 
 
 def staged_database_paths(paths: list[str]) -> set[str]:
@@ -113,52 +134,111 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     0.03 seconds before, growing linearly with the index. That is a bad trade
     for a gate that runs on every commit and in CI.
 
-    ``--batch`` answers the whole list down one pipe. It streams each object's
-    bytes, so the header is read and the remainder is DISCARDED IN CHUNKS
-    rather than accumulated - the memory bound from the previous fix survives,
-    and the process count drops to one.
+    ``--batch -Z`` answers the whole list down one pipe with NUL framing on
+    both sides. Git paths may contain newlines, so newline-delimited requests
+    would split one path into several queries and desynchronise the stream.
+    Every resolved object — blob or not — has its declared body and trailing
+    delimiter consumed; skipping the body of a non-blob (a gitlink resolving to
+    a commit that exists in the object store) would leave those bytes in the
+    pipe and make every later path read the wrong frame.
+
+    A missing response is ``<requested-name> missing`` with no body. The name
+    may itself contain spaces, so detection is by the trailing `` missing``
+    marker rather than by splitting and inspecting a fixed field index.
+
+    Git 2.51+ additionally emits ``<oid> submodule`` (no size, no body) for
+    gitlink index entries whose target is absent; treat that form the same as
+    an ordinary missing response so the gate neither crashes nor desyncs.
+
+    Only the SQLite header is retained from a blob. The remainder is discarded
+    in bounded chunks so a large blob never lands in memory whole.
+
+    If ``cat-file`` itself fails (for example because this Git build does not
+    support ``-Z``), the gate fails closed rather than reporting a clean tree.
     """
     if not paths:
         return set()
     proc = subprocess.Popen(
-        ["git", "cat-file", "--batch"],
+        ["git", "cat-file", "--batch", "-Z"],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
     found: set[str] = set()
+    stream_error: str | None = None
     try:
         assert proc.stdin is not None and proc.stdout is not None
         for rel in paths:
-            proc.stdin.write(f":{rel}\n".encode("utf-8"))
-            proc.stdin.flush()
-            info = proc.stdout.readline()
-            if not info:
+            try:
+                proc.stdin.write(b":" + rel.encode("utf-8") + b"\0")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                # cat-file already exited (unsupported -Z, crash, etc.).
+                # Fall through to the rc / stream_error checks below.
+                stream_error = "cat-file process closed stdin early"
                 break
-            parts = info.split()
-            # "<oid> missing" for anything git cannot resolve.
-            if len(parts) < 3 or parts[1] != b"blob":
+            header = _read_until_nul(proc.stdout)
+            if header is None:
+                stream_error = "cat-file stream ended before all paths were answered"
+                break
+            # Missing responses: "<requested-name> missing". The name can
+            # contain spaces, so never split-and-index to find the marker.
+            if header.endswith(b" missing"):
                 continue
-            size = int(parts[2])
-            wanted = min(size, len(SQLITE_MAGIC))
-            header = proc.stdout.read(wanted)
-            if header == SQLITE_MAGIC:
-                found.add(rel)
-            # Drain the rest of this object plus git's trailing newline, in
-            # bounded chunks, so a large blob never lands in memory whole.
-            remaining = size - wanted + 1
-            while remaining > 0:
-                chunk = proc.stdout.read(min(remaining, _SKIP_CHUNK))
-                if not chunk:
+            parts = header.split()
+            # Git 2.51+ gitlink (absent target): "<oid> submodule" (no size/body).
+            if len(parts) == 2 and parts[1] == b"submodule":
+                continue
+            # Resolved: "<oid> <type> <size>". oid and type are single tokens.
+            if len(parts) < 3:
+                stream_error = f"malformed cat-file header: {header!r}"
+                break
+            try:
+                size = int(parts[-1])
+            except ValueError:
+                stream_error = f"malformed cat-file size in header: {header!r}"
+                break
+            obj_type = parts[-2]
+            is_blob = obj_type == b"blob"
+            wanted = min(size, len(SQLITE_MAGIC)) if is_blob else 0
+            magic_hdr = b""
+            if wanted:
+                magic_hdr = proc.stdout.read(wanted)
+                if len(magic_hdr) < wanted:
+                    stream_error = "cat-file stream ended mid-object"
                     break
-                remaining -= len(chunk)
+            if not _drain(proc.stdout, size - wanted):
+                stream_error = "cat-file stream ended mid-object"
+                break
+            # Resolved objects are followed by a NUL object delimiter under -Z.
+            trail = proc.stdout.read(1)
+            if trail != b"\0":
+                stream_error = "cat-file stream missing object delimiter"
+                break
+            if is_blob and magic_hdr == SQLITE_MAGIC:
+                found.add(rel)
     finally:
         if proc.stdin is not None:
-            proc.stdin.close()
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+        stderr_data = b""
+        if proc.stderr is not None:
+            stderr_data = proc.stderr.read()
+            proc.stderr.close()
         if proc.stdout is not None:
             proc.stdout.close()
-        proc.wait()
+        rc = proc.wait()
+    if rc != 0:
+        err = stderr_data.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"git cat-file --batch -Z failed (rc={rc})"
+            + (f": {err}" if err else "")
+        )
+    if stream_error is not None:
+        raise RuntimeError(stream_error)
     return found
 
 

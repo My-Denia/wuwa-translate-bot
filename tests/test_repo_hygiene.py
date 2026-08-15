@@ -64,7 +64,6 @@ def test_repo_hygiene_reads_the_index_not_the_working_tree(tmp_path, monkeypatch
     """
     import subprocess
     import sqlite3
-    import importlib
 
     def git(*args):
         subprocess.run(["git", *args], cwd=tmp_path, check=True,
@@ -239,3 +238,211 @@ def test_repo_hygiene_inspects_the_index_in_one_git_process(tmp_path, monkeypatc
     assert found == {"disguised"}, found
     assert len(spawns) == 1, f"one git process for the whole index, got {len(spawns)}"
     assert peak < 1_000_000, peak
+
+
+def test_repo_hygiene_drains_non_blob_objects(tmp_path, monkeypatch):
+    """A non-blob resolved object must still have its body consumed.
+
+    git cat-file --batch returns oid type size + body for any resolved object.
+    If the body of a commit (e.g. from a gitlink) is left in the pipe, every
+    subsequent path reads the wrong frame and the guard becomes unreliable.
+    The gitlink is named so it sorts before the database path; without an
+    unconditional drain the database is never seen.
+    """
+    import subprocess
+    import sqlite3
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+
+    (tmp_path / "readme").write_text("x", encoding="utf-8")
+    git("add", "readme")
+    git("commit", "--no-gpg-sign", "-m", "c")
+    commit_sha = git("rev-parse", "HEAD").stdout.decode().strip()
+
+    # Stage a gitlink whose target commit is present in this object store.
+    git("update-index", "--add", "--cacheinfo", f"160000,{commit_sha},aaa-sub")
+
+    disguised = tmp_path / "disguised"
+    connection = sqlite3.connect(disguised)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    git("add", "disguised")
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    tracked = guard.tracked_paths()
+    assert "aaa-sub" in tracked and "disguised" in tracked, tracked
+
+    found = guard.staged_database_paths(tracked)
+    assert found == {"disguised"}, (
+        "after draining the gitlink/commit body the database must still be "
+        f"recognised; got {found!r}"
+    )
+
+
+def test_repo_hygiene_accepts_newline_in_staged_path(tmp_path, monkeypatch):
+    """Request framing must tolerate paths that contain newlines.
+
+    Newline-delimited cat-file requests split a path that itself contains a
+    newline into multiple queries, desynchronising the response stream. With
+    ``--batch -Z`` both sides are NUL-framed, so the path is one frame.
+    """
+    import subprocess
+    import sqlite3
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+
+    payload = tmp_path / "payload.bin"
+    connection = sqlite3.connect(payload)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    blob_sha = git("hash-object", "-w", str(payload)).stdout.decode().strip()
+    weird_path = "dir/with\nnewline"
+    # Pass the path with a real newline via argv; git accepts it in --cacheinfo.
+    git(
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"100644,{blob_sha},{weird_path}",
+    )
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    tracked = guard.tracked_paths()
+    assert weird_path in tracked, tracked
+
+    found = guard.staged_database_paths(tracked)
+    assert found == {weird_path}, (
+        "a database staged under a path containing a newline must still be "
+        f"detected under NUL framing; got {found!r}"
+    )
+
+
+def test_repo_hygiene_missing_response_with_space_in_path(tmp_path, monkeypatch):
+    """A missing response whose path contains spaces must not crash the gate.
+
+    cat-file answers ``:sub module missing\0``. Splitting that header and
+    reading a fixed field index treats ``module`` as the type and tries to
+    parse ``missing`` as a size. Detection is by the trailing `` missing``
+    marker so the requested name can contain any characters the protocol
+    permits.
+    """
+    import subprocess
+    import sqlite3
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+
+    # gitlink whose target commit is absent → missing response.
+    fake = "a" * 40
+    git("update-index", "--add", "--cacheinfo", f"160000,{fake},sub module")
+
+    disguised = tmp_path / "disguised"
+    connection = sqlite3.connect(disguised)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    git("add", "disguised")
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    tracked = guard.tracked_paths()
+    assert "sub module" in tracked and "disguised" in tracked, tracked
+
+    found = guard.staged_database_paths(tracked)
+    assert found == {"disguised"}, (
+        "a missing response with spaces in the path must be skipped without "
+        f"desync or crash; got {found!r}"
+    )
+
+
+def test_repo_hygiene_fails_closed_when_cat_file_batch_fails(tmp_path, monkeypatch):
+    """If cat-file itself fails, the gate must not report a clean tree.
+
+    An older Git without ``-Z``, or any other launch failure, used to leave
+    stdout empty; the reader returned an empty set and main() printed
+    ``repo hygiene ok`` while a staged database sat in the index. Process
+    failure is now a hard error.
+    """
+    import subprocess
+    import sqlite3
+
+    def git(*args):
+        subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    disguised = tmp_path / "disguised"
+    connection = sqlite3.connect(disguised)
+    connection.execute("create table t(x)")
+    connection.commit()
+    connection.close()
+    git("add", "disguised")
+
+    import scripts.check_repo_hygiene as guard
+
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    real_popen = subprocess.Popen
+
+    def failing_popen(args, *rest, **kwargs):
+        if isinstance(args, (list, tuple)) and "cat-file" in list(args):
+            # Force the same class of failure as an unsupported -Z option.
+            args = ["git", "cat-file", "--batch", "--not-a-real-flag"]
+        return real_popen(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", failing_popen)
+
+    try:
+        guard.staged_database_paths(["disguised"])
+    except RuntimeError as exc:
+        assert "cat-file" in str(exc).lower() or "failed" in str(exc).lower(), exc
+    else:
+        raise AssertionError("cat-file failure must raise, not return an empty set")
