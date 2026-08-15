@@ -146,6 +146,10 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     may itself contain spaces, so detection is by the trailing `` missing``
     marker rather than by splitting and inspecting a fixed field index.
 
+    Git 2.51+ additionally emits ``<oid> submodule`` (no size, no body) for
+    gitlink index entries whose target is absent; treat that form the same as
+    an ordinary missing response so the gate neither crashes nor desyncs.
+
     Only the SQLite header is retained from a blob. The remainder is discarded
     in bounded chunks so a large blob never lands in memory whole.
 
@@ -183,6 +187,9 @@ def staged_database_paths(paths: list[str]) -> set[str]:
             if header.endswith(b" missing"):
                 continue
             parts = header.split()
+            # Git 2.51+ gitlink (absent target): "<oid> submodule" (no size/body).
+            if len(parts) == 2 and parts[1] == b"submodule":
+                continue
             # Resolved: "<oid> <type> <size>". oid and type are single tokens.
             if len(parts) < 3:
                 stream_error = f"malformed cat-file header: {header!r}"
