@@ -92,17 +92,38 @@ def staged_blob_is_a_database(rel: str) -> bool:
     blob was free to be committed. What a commit carries is the index, so that
     is what has to be inspected.
 
-    Only the HEADER is read. ``git cat-file blob`` writes the whole object, and
-    buffering it to look at sixteen bytes would mean loading an arbitrarily
-    large file into memory - including exactly the bulk game data this guard
-    exists to reject, so the check could be killed by the very thing it is
-    meant to report. The pipe is closed after the header, which ends the
-    writer.
+    Only the HEADER is read. ``git cat-file`` can stream an arbitrarily large
+    object; buffering it to look at sixteen bytes would mean loading bulk game
+    data this guard exists to reject, so the check could be killed by the very
+    thing it is meant to report. Bytes after the magic are discarded in chunks.
     """
     return rel in staged_database_paths([rel])
 
 
 _SKIP_CHUNK = 1 << 16
+
+
+def _read_until_nul(stream) -> bytes | None:
+    """Read one NUL-terminated frame. None means the stream ended mid-frame."""
+    buf = bytearray()
+    while True:
+        ch = stream.read(1)
+        if not ch:
+            return None if not buf else bytes(buf)
+        if ch == b"\0":
+            return bytes(buf)
+        buf.extend(ch)
+
+
+def _drain(stream, nbytes: int) -> bool:
+    """Discard exactly nbytes, or return False if the stream ends early."""
+    remaining = nbytes
+    while remaining > 0:
+        chunk = stream.read(min(remaining, _SKIP_CHUNK))
+        if not chunk:
+            return False
+        remaining -= len(chunk)
+    return True
 
 
 def staged_database_paths(paths: list[str]) -> set[str]:
@@ -113,15 +134,21 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     0.03 seconds before, growing linearly with the index. That is a bad trade
     for a gate that runs on every commit and in CI.
 
-    ``--batch`` answers the whole list down one pipe. It streams each object's
-    bytes, so the header is read and the remainder is DISCARDED IN CHUNKS
-    rather than accumulated - the memory bound from the previous fix survives,
-    and the process count drops to one.
+    ``--batch -Z`` answers the whole list down one pipe with NUL framing on
+    both sides. Git paths may contain newlines, so newline-delimited requests
+    would split one path into several queries and desynchronise the stream.
+    Every resolved object — blob or not — has its declared body and trailing
+    delimiter consumed; skipping the body of a non-blob (a gitlink resolving to
+    a commit that exists in the object store) would leave those bytes in the
+    pipe and make every later path read the wrong frame.
+
+    Only the SQLite header is retained from a blob. The remainder is discarded
+    in bounded chunks so a large blob never lands in memory whole.
     """
     if not paths:
         return set()
     proc = subprocess.Popen(
-        ["git", "cat-file", "--batch"],
+        ["git", "cat-file", "--batch", "-Z"],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -131,28 +158,31 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     try:
         assert proc.stdin is not None and proc.stdout is not None
         for rel in paths:
-            proc.stdin.write(f":{rel}\n".encode("utf-8"))
+            proc.stdin.write(b":" + rel.encode("utf-8") + b"\0")
             proc.stdin.flush()
-            info = proc.stdout.readline()
-            if not info:
+            header = _read_until_nul(proc.stdout)
+            if header is None:
                 break
-            parts = info.split()
-            # "<oid> missing" for anything git cannot resolve.
-            if len(parts) < 3 or parts[1] != b"blob":
+            parts = header.split()
+            # "<name> missing" has no body and no trailing object delimiter.
+            if len(parts) < 3 or parts[1] == b"missing":
                 continue
             size = int(parts[2])
-            wanted = min(size, len(SQLITE_MAGIC))
-            header = proc.stdout.read(wanted)
-            if header == SQLITE_MAGIC:
-                found.add(rel)
-            # Drain the rest of this object plus git's trailing newline, in
-            # bounded chunks, so a large blob never lands in memory whole.
-            remaining = size - wanted + 1
-            while remaining > 0:
-                chunk = proc.stdout.read(min(remaining, _SKIP_CHUNK))
-                if not chunk:
+            is_blob = parts[1] == b"blob"
+            wanted = min(size, len(SQLITE_MAGIC)) if is_blob else 0
+            magic_hdr = b""
+            if wanted:
+                magic_hdr = proc.stdout.read(wanted)
+                if len(magic_hdr) < wanted:
                     break
-                remaining -= len(chunk)
+            if not _drain(proc.stdout, size - wanted):
+                break
+            # Resolved objects are followed by a NUL object delimiter under -Z.
+            trail = proc.stdout.read(1)
+            if trail != b"\0":
+                break
+            if is_blob and magic_hdr == SQLITE_MAGIC:
+                found.add(rel)
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
