@@ -166,8 +166,14 @@ def staged_database_paths(paths: list[str]) -> set[str]:
     try:
         assert proc.stdin is not None and proc.stdout is not None
         for rel in paths:
-            proc.stdin.write(b":" + rel.encode("utf-8") + b"\0")
-            proc.stdin.flush()
+            try:
+                proc.stdin.write(b":" + rel.encode("utf-8") + b"\0")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                # cat-file already exited (unsupported -Z, crash, etc.).
+                # Fall through to the rc / stream_error checks below.
+                stream_error = "cat-file process closed stdin early"
+                break
             header = _read_until_nul(proc.stdout)
             if header is None:
                 stream_error = "cat-file stream ended before all paths were answered"
@@ -207,7 +213,10 @@ def staged_database_paths(paths: list[str]) -> set[str]:
                 found.add(rel)
     finally:
         if proc.stdin is not None:
-            proc.stdin.close()
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
         stderr_data = b""
         if proc.stderr is not None:
             stderr_data = proc.stderr.read()
