@@ -103,7 +103,7 @@ class CapacitySkipNotifier:
         """Record a skip; returns (should attempt a DM now, counts snapshot).
 
         The snapshot is a copy: skips accumulating per reason while the DM is
-        in flight must not alias into it.
+        in flight must not leak into it.
         """
         self._pending_counts[reason] += 1
         now = self._clock()
