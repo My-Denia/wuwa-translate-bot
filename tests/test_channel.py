@@ -2229,17 +2229,33 @@ def test_queue_rejected_edit_does_not_supersede_admitted_edit(monkeypatch, sampl
 def test_capacity_notifier_keeps_skips_arriving_during_send():
     now = [100.0]
     notifier = CapacitySkipNotifier(clock=lambda: now[0])
-    should, count = notifier.note_skip()
-    assert (should, count) == (True, 1)
+    should, counts = notifier.note_skip("llm_budget")
+    assert (should, counts) == (True, {"llm_budget": 1})
     # A skip lands while the first DM is still in flight.
-    should, count = notifier.note_skip()
-    assert (should, count) == (False, 2)
-    notifier.mark_result(True, counted=1)
+    should, counts = notifier.note_skip("llm_budget")
+    assert should is False and counts == {"llm_budget": 2}
+    notifier.mark_result(True, counted={"llm_budget": 1})
     # Only the count captured by the sent DM is cleared; the concurrent skip
     # is carried into the next window's notice.
     now[0] += 601.0
-    should, count = notifier.note_skip()
-    assert (should, count) == (True, 2)
+    should, counts = notifier.note_skip("llm_budget")
+    assert (should, counts) == (True, {"llm_budget": 2})
+
+
+def test_capacity_notifier_reports_mixed_reasons_separately():
+    now = [100.0]
+    notifier = CapacitySkipNotifier(clock=lambda: now[0])
+    should, counts = notifier.note_skip("queue_full")
+    assert (should, counts) == (True, {"queue_full": 1})
+    notifier.mark_result(True, counted=counts)
+    # queue_full and llm_budget skips accumulate together under cooldown...
+    notifier.note_skip("queue_full")
+    notifier.note_skip("llm_budget")
+    now[0] += 601.0
+    should, counts = notifier.note_skip("llm_budget")
+    # ...and the next notice attributes each count to its own reason.
+    assert should is True
+    assert counts == {"queue_full": 1, "llm_budget": 2}
 
 
 def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db):
@@ -2777,6 +2793,48 @@ def test_channel_edit_uneditable_later_chunk_is_deleted_not_orphaned(
     assert bot.deleted_messages == [(-2001, 5297)]
     assert len(edit_message.replies) == 1
     assert reply_index.get_many(-2001, 4296) == (5296, 5297)
+
+
+def test_channel_edit_failed_later_chunk_delete_is_tracked_as_stale_extra(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        [
+            "I" * (TELEGRAM_TEXT_MESSAGE_LIMIT * 2 + 8),  # original: 3 chunks
+            "J" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6),  # edit: 2 chunks
+        ]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    # Chunk 2's tracked reply rejects edits, and deleting it fails too.
+    bot = FakeBot(
+        edit_raises=lambda _text, _parse_mode, _chat_id, message_id: (
+            BadRequest("Message can't be edited") if message_id == 5306 else None
+        ),
+        delete_raises=lambda _chat_id, message_id: (
+            TelegramError("transient delete failure") if message_id == 5306 else None
+        ),
+    )
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4305)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 3
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4305) == (5305, 5306, 5307)
+
+    edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4305, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Chunk 2 lands on the third tracked reply; the stale uneditable reply
+    # whose delete failed is appended as an extra, NOT at the chunk position
+    # it failed at - otherwise the next edit would map chunk 2 onto it.
+    assert [edit[3] for edit in bot.edits] == [5305, 5307]
+    assert reply_index.get_many(-2001, 4305) == (5305, 5307, 5306)
+    outcomes = context.application.bot_data[CHANNEL_RUNTIME_KEY].snapshot().outcomes
+    assert outcomes["delivery:stale_chunks_retained"] == 1
 
 
 def test_edit_admitted_on_fresh_window_under_low_budget(monkeypatch, sample_db):

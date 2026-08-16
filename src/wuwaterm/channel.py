@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -75,12 +76,13 @@ class CapacitySkipNotifier:
 
     A post dropped because the queue or LLM budget is full is invisible from
     the channel itself: nothing appears and nobody complains to the bot. The
-    DM is capped at one per cooldown window; ``note_skip`` returns the number
-    of skips since the previous notification so a burst produces one message
-    that says how much was dropped instead of one message per dropped post.
-    The cooldown and pending count are committed only when the DM actually
-    sends (``mark_result``): otherwise a transient send failure would both
-    suppress alerts for the rest of the window and lose the failed count.
+    DM is capped at one per cooldown window; ``note_skip`` returns the
+    per-reason counts since the previous notification so a burst produces one
+    message that says how much was dropped instead of one message per dropped
+    post. The cooldown and pending counts are committed only when the DM
+    actually sends (``mark_result``): otherwise a transient send failure
+    would both suppress alerts for the rest of the window and lose the failed
+    counts.
     """
 
     def __init__(
@@ -95,10 +97,15 @@ class CapacitySkipNotifier:
         self._clock = clock
         self._last_attempt_at: float | None = None
         self._last_attempt_ok = True
-        self._pending_count = 0
+        self._pending_counts: Counter[str] = Counter()
 
-    def note_skip(self) -> tuple[bool, int]:
-        self._pending_count += 1
+    def note_skip(self, reason: str) -> tuple[bool, dict[str, int]]:
+        """Record a skip; returns (should attempt a DM now, counts snapshot).
+
+        The snapshot is a copy: skips accumulating per reason while the DM is
+        in flight must not alias into it.
+        """
+        self._pending_counts[reason] += 1
         now = self._clock()
         if self._last_attempt_at is not None:
             cooldown = (
@@ -107,11 +114,13 @@ class CapacitySkipNotifier:
                 else self._failure_retry_seconds
             )
             if now - self._last_attempt_at < cooldown:
-                return False, self._pending_count
+                return False, dict(self._pending_counts)
         self._last_attempt_at = now
-        return True, self._pending_count
+        return True, dict(self._pending_counts)
 
-    def mark_result(self, sent: bool, *, counted: int = 0) -> None:
+    def mark_result(
+        self, sent: bool, *, counted: dict[str, int] | None = None
+    ) -> None:
         """Commit the outcome of a DM attempt.
 
         On success only the skips captured in that DM are cleared: skips that
@@ -119,8 +128,13 @@ class CapacitySkipNotifier:
         into the next notice instead of being silently zeroed.
         """
         self._last_attempt_ok = sent
-        if sent:
-            self._pending_count = max(0, self._pending_count - counted)
+        if sent and counted:
+            for reason, amount in counted.items():
+                remaining = self._pending_counts.get(reason, 0) - amount
+                if remaining > 0:
+                    self._pending_counts[reason] = remaining
+                else:
+                    self._pending_counts.pop(reason, None)
 
 
 def _capacity_notifier(context: ContextTypes.DEFAULT_TYPE) -> CapacitySkipNotifier:
@@ -148,11 +162,16 @@ async def _notify_owner_capacity_skip(
     if not owner_user_id:
         return
     notifier = _capacity_notifier(context)
-    should_notify, count = notifier.note_skip()
+    should_notify, counts = notifier.note_skip(reason)
     if not should_notify:
         return
+    total = sum(counts.values())
+    # The aggregate may span several reasons (cooldown or failure-retry
+    # windows); attribute each count to its own reason instead of labelling
+    # everything with the reason that happened to trigger this notice.
+    breakdown = "、".join(f"{name} ×{n}" for name, n in sorted(counts.items()))
     text = (
-        f"频道自动翻译因容量限制跳过了 {count} 条帖子（原因：{reason}）。"
+        f"频道自动翻译因容量限制跳过了 {total} 条帖子（{breakdown}）。"
         "频道内不会显示任何提示，请关注交付情况；"
         "可用 /status 查看计数，需要更高吞吐时调大 "
         "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE 或 WUWATERM_CHANNEL_MAX_PENDING。"
@@ -160,14 +179,14 @@ async def _notify_owner_capacity_skip(
     try:
         await context.bot.send_message(chat_id=owner_user_id, text=text)
     except Exception as exc:
-        # Count and short retry re-arm stay uncommitted so the next skip
+        # Counts and short retry re-arm stay uncommitted so the next skip
         # retries with the failed skips folded into the eventual message.
         notifier.mark_result(False)
         LOGGER.info(
             "channel capacity notice to owner failed: %s", safe_error_type(exc)
         )
         return
-    notifier.mark_result(True, counted=count)
+    notifier.mark_result(True, counted=counts)
 
 
 async def send_with_flood_retry(send_callable, *, retry_gate=None):
@@ -1281,6 +1300,12 @@ async def _edit_reply_chunks(
     if chat_id is None or not existing_reply_ids:
         return "edit_target_unavailable"
     remembered_reply_ids: list[int] = []
+    # Ids kept tracked only because their delete failed. Collected apart from
+    # freshly updated/sent chunk ids and appended at the very end: splicing
+    # them in at the position where the delete failed would map the next
+    # edit's chunk onto the stale, still-uneditable reply and treat the real
+    # replacement as an extra chunk to delete.
+    stale_extra_ids: list[int] = []
     remaining_reply_ids = list(existing_reply_ids)
     for chunk in chunks:
         while remaining_reply_ids:
@@ -1318,7 +1343,7 @@ async def _edit_reply_chunks(
                     chat_id=chat_id,
                     reply_message_ids=(reply_message_id,),
                 )
-                remembered_reply_ids.extend(failed_delete_ids)
+                stale_extra_ids.extend(failed_delete_ids)
                 continue
             if not remembered_reply_ids:
                 # "gone" needs no delete of the failed id (it no longer
@@ -1389,16 +1414,16 @@ async def _edit_reply_chunks(
             chat_id=chat_id,
             reply_message_ids=tuple(remaining_reply_ids),
         )
-        remembered_reply_ids.extend(failed_delete_ids)
-    else:
-        failed_delete_ids = ()
-    if remembered_reply_ids:
+        stale_extra_ids.extend(failed_delete_ids)
+    if remembered_reply_ids or stale_extra_ids:
         reply_index.remember_many(
-            chat_id, message.message_id, tuple(remembered_reply_ids)
+            chat_id,
+            message.message_id,
+            tuple(remembered_reply_ids) + tuple(stale_extra_ids),
         )
     else:
         reply_index.forget(chat_id, message.message_id)
-    if failed_delete_ids:
+    if stale_extra_ids:
         return "stale_chunks_retained"
     return "success"
 

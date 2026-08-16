@@ -60,6 +60,12 @@ does not distribute generated game data or generated SQLite databases.
 - A multi-chunk edit whose later tracked reply rejects edits ("uneditable")
   now deletes that reply instead of dropping it from the rebuilt index while
   leaving it visible — the same orphan the first-chunk path already handles.
+  When that delete itself fails, the id stays tracked as a trailing stale
+  extra rather than at the chunk position, so the next edit does not map a
+  fresh chunk onto the still-uneditable reply.
+- The capacity owner notice now reports per-reason counts
+  (e.g. `llm_budget ×2、queue_full ×1`) instead of labelling the whole
+  aggregated count with whichever reason happened to trigger the notice.
 - Web stylesheet: decorative glyphs are literal Unicode again — CSS
   code-point escapes like `\25C6` in a plain Python string parse as octal
   control characters, so the heading diamonds and em-dashes rendered as
