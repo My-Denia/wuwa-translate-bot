@@ -47,7 +47,19 @@ does not distribute generated game data or generated SQLite databases.
   (and a cancelled one rewritten inline from memory), and the flush waits out
   an executor write already in flight so an older snapshot cannot replace the
   final one on disk. Replies remembered just before exit survive the restart
-  instead of causing duplicate translations.
+  instead of causing duplicate translations. The flush also runs when the
+  translator close raises (independent `finally`), and the offloaded writer
+  now uses a dedicated single-worker executor whose futures can be awaited
+  safely — a job cancelled while still queued raises immediately instead of
+  hanging the shutdown flush.
+- The edit budget-yield gate is capped by the configured per-minute
+  capacity: at `WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE` of 1-3 the
+  required+headroom sum is unreachable even on a fresh window, which would
+  have yielded every edit forever; a completely unused window now always
+  admits one edit.
+- A multi-chunk edit whose later tracked reply rejects edits ("uneditable")
+  now deletes that reply instead of dropping it from the rebuilt index while
+  leaving it visible — the same orphan the first-chunk path already handles.
 - Web stylesheet: decorative glyphs are literal Unicode again — CSS
   code-point escapes like `\25C6` in a plain Python string parse as octal
   control characters, so the heading diamonds and em-dashes rendered as

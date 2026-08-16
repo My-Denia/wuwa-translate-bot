@@ -2740,6 +2740,71 @@ def test_channel_edit_uneditable_reply_is_deleted_not_orphaned(
     assert outcomes["delivery:edit_target_unavailable"] == 1
 
 
+def test_channel_edit_uneditable_later_chunk_is_deleted_not_orphaned(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        [
+            "I" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 4),  # original: 2 chunks
+            "J" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6),  # edit: 2 chunks
+        ]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    # Chunk 1 edits fine; the second tracked reply rejects edits.
+    bot = FakeBot(
+        edit_raises=lambda _text, _parse_mode, _chat_id, message_id: (
+            BadRequest("Message can't be edited") if message_id == 5297 else None
+        )
+    )
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4296)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4296) == (5296, 5297)
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4296, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Chunk 1 applied in place; the uneditable chunk-2 reply is deleted
+    # rather than dropped from the rebuilt index while staying visible, and
+    # its replacement chunk goes out as a new reply (the fake reuses the id).
+    assert [edit[3] for edit in bot.edits] == [5296]
+    assert bot.deleted_messages == [(-2001, 5297)]
+    assert len(edit_message.replies) == 1
+    assert reply_index.get_many(-2001, 4296) == (5296, 5297)
+
+
+def test_edit_admitted_on_fresh_window_under_low_budget(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+    context = make_context(
+        sample_db,
+        config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+    )
+    # A dictionary exact-hit original: a tracked reply without spending budget.
+    original, original_message = channel_update(
+        text="Echo", text_html="Echo", message_id=4320
+    )
+    asyncio.run(channel_post_handler(original, context))
+    assert original_message.replies == [("声骸", None, 4320)]
+    assert calls == []
+
+    edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4320, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Capacity 1: required(1) + headroom(2) is unreachable, but a completely
+    # unused window must still admit one edit instead of yielding forever.
+    assert context.bot.edits == [("translated", "HTML", -2001, 5320)]
+    assert len(calls) == 1
+
+
 def test_channel_reply_index_edit_tokens_expire_with_ttl():
     now = 500.0
     index = ChannelReplyIndex(ttl_seconds=30.0, clock=lambda: now)

@@ -606,10 +606,16 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         allow_plain_fallback = bool(html_text) and required_calls >= 2
         # New posts outrank edits near budget exhaustion. The check and the
         # reserve below are both synchronous on the single event loop, so the
-        # headroom reading cannot race the reservation it gates.
+        # headroom reading cannot race the reservation it gates. The gate is
+        # capped by the configured capacity itself: with a per-minute budget
+        # of 1-3 the required+headroom sum is unreachable even on a
+        # completely fresh window, which would yield every edit forever.
         if is_edit and (
             runtime.budget_remaining()
-            < required_calls + EDIT_BUDGET_HEADROOM_CALLS
+            < min(
+                required_calls + EDIT_BUDGET_HEADROOM_CALLS,
+                runtime.llm_calls_per_minute,
+            )
         ):
             _channel_event(
                 runtime,
@@ -1301,6 +1307,19 @@ async def _edit_reply_chunks(
             if edit_result == "applied":
                 remembered_reply_ids.append(reply_message_id)
                 break
+            if edit_result == "uneditable" and remembered_reply_ids:
+                # A later-chunk reply that rejects edits would otherwise be
+                # dropped from the rebuilt index while staying visible - the
+                # orphan this path exists to prevent. Delete it whatever the
+                # chunk position; keep it tracked only if the delete fails.
+                failed_delete_ids = await _delete_reply_chunks(
+                    context,
+                    message=message,
+                    chat_id=chat_id,
+                    reply_message_ids=(reply_message_id,),
+                )
+                remembered_reply_ids.extend(failed_delete_ids)
+                continue
             if not remembered_reply_ids:
                 # "gone" needs no delete of the failed id (it no longer
                 # exists); "uneditable" must include it, or the post keeps a

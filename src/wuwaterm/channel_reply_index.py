@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass
 import json
-import threading
 import logging
 import os
 import tempfile
@@ -85,12 +85,14 @@ class ChannelReplyIndex:
         self._last_save_durable: bool | None = None
         self._pending_save_payload: dict | None = None
         self._save_task: asyncio.Task | None = None
-        # Set by the executor wrapper when a write thread finishes. aflush()
-        # waits on this before its inline final write: cancelling the save
-        # task does not stop a write already running in the executor, and
-        # without the wait that older snapshot could os.replace over the
-        # newer one afterwards.
-        self._write_inflight: threading.Event | None = None
+        # Own single worker keeps writes serialized and gives aflush() a real
+        # concurrent.futures.Future to wait on: cancelling the asyncio task
+        # cannot drop a running write silently, and a job cancelled before it
+        # started raises immediately instead of hanging the shutdown flush.
+        self._write_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="channel-reply-index-save"
+        )
+        self._inflight_write: concurrent.futures.Future | None = None
         self._load()
 
     def remember(
@@ -382,11 +384,20 @@ class ChannelReplyIndex:
             except (asyncio.CancelledError, OSError):
                 pass
         # A cancelled task does not stop a write already running in the
-        # executor; wait for that thread before the inline final write, or
+        # executor: wait for that future before the inline final write, or
         # the older snapshot can replace the newer one on disk afterwards.
-        in_flight = self._write_inflight
-        if in_flight is not None:
-            await asyncio.to_thread(in_flight.wait)
+        # A job cancelled before it started raises CancelledError from
+        # result() instead of hanging here.
+        in_flight = self._inflight_write
+        if in_flight is not None and not in_flight.done():
+
+            def _wait(future: concurrent.futures.Future) -> None:
+                try:
+                    future.result()
+                except concurrent.futures.CancelledError:
+                    pass
+
+            await asyncio.to_thread(_wait, in_flight)
         self._pending_save_payload = None
         self._write_payload_recording(self._build_payload())
 
@@ -450,29 +461,23 @@ class ChannelReplyIndex:
         # because the snapshot is taken at the last call before it starts.
         self._pending_save_payload = self._build_payload()
         if self._save_task is None or self._save_task.done():
-            self._save_task = loop.create_task(self._save_offloaded(loop))
+            self._save_task = loop.create_task(self._save_offloaded())
 
-    async def _save_offloaded(self, loop: asyncio.AbstractEventLoop) -> None:
+    async def _save_offloaded(self) -> None:
         while self._pending_save_payload is not None:
             payload = self._pending_save_payload
             self._pending_save_payload = None
-            write_done = threading.Event()
-            self._write_inflight = write_done
+            self._inflight_write = self._write_executor.submit(
+                self._write_payload_recording, payload
+            )
             try:
-                await loop.run_in_executor(
-                    None, self._write_payload_tracked, payload, write_done
-                )
+                await asyncio.wrap_future(self._inflight_write)
             except Exception:
                 # The sync path deliberately surfaces only OSError; in a
                 # background task anything unexpected would otherwise die as
-                # an unretrieved task exception.
+                # an unretrieved task exception. asyncio.CancelledError is
+                # BaseException and propagates to cancel the task.
                 LOGGER.exception("channel reply index save failed unexpectedly")
-
-    def _write_payload_tracked(self, payload: dict, done: threading.Event) -> None:
-        try:
-            self._write_payload_recording(payload)
-        finally:
-            done.set()
 
     def _write_payload_recording(self, payload: dict) -> None:
         """Write one snapshot, updating the durability counters.
