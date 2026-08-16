@@ -45,6 +45,31 @@ def test_channel_runtime_bounds_active_and_pending() -> None:
     asyncio.run(exercise())
 
 
+def test_channel_runtime_budget_remaining_tracks_window() -> None:
+    now = 100.0
+    runtime = ChannelRuntime(
+        max_active=1,
+        max_pending=4,
+        llm_calls_per_minute=5,
+        clock=lambda: now,
+    )
+    assert runtime.budget_remaining() == 5
+    lease, reason = runtime.reserve(2)
+    assert lease is not None and reason is None
+    assert runtime.budget_remaining() == 3
+
+    async def exercise() -> None:
+        async with lease:
+            lease.mark_call_started()
+            assert runtime.budget_remaining() == 3
+        # Exit returns the unstarted reservation; the started one ages out.
+        assert runtime.budget_remaining() == 4
+
+    asyncio.run(exercise())
+    now = 161.0
+    assert runtime.budget_remaining() == 5
+
+
 def test_channel_runtime_reserves_multichunk_budget_atomically() -> None:
     async def exercise() -> None:
         now = 100.0

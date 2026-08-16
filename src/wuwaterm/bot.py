@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -1673,6 +1674,9 @@ async def translate_query_async(
         translator,
         TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
         splitter=_telegram_llm_splitter,
+        # The dictionary stage (exact + full-table fuzzy over sqlite) is
+        # synchronous; keep it off the event loop like the API does.
+        offload=asyncio.to_thread,
     )
     return _telegram_text(outcome)
 
@@ -1696,6 +1700,7 @@ async def telegram_translation_reply(
         input_limit=input_limit,
         markup_translator=_telegram_markup_translator(translator),
         splitter=_telegram_llm_splitter,
+        offload=asyncio.to_thread,
     )
     return _telegram_reply(outcome)
 

@@ -61,7 +61,7 @@ from wuwaterm.application import (
 )
 from wuwaterm.logging_utils import redact_id
 
-from . import API_VERSION
+from . import API_VERSION, TERM_QUERY_MAX_LENGTH
 from .auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, Device, DeviceStore
 from .errors import MESSAGE_BY_CODE, ApiError, error_body
 
@@ -79,8 +79,6 @@ _ROUTING_ERROR_CODES = {
 LOGGER = logging.getLogger("wuwaterm_api")
 
 REQUEST_ID_HEADER = "X-Request-Id"
-
-TERM_QUERY_MAX_LENGTH = 200
 
 # --------------------------------------------------------------------------
 # Log field rendering

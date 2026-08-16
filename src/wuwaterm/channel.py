@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Literal
 
 from telegram import Update
 from telegram.error import BadRequest, RetryAfter, TelegramError
@@ -15,6 +16,7 @@ from telegram.ext import ContextTypes
 from .channel_reply_index import ChannelReplyIndex, OriginalPostClaim
 from .channel_runtime import ChannelRuntime
 from .runtime_keys import (
+    CHANNEL_CAPACITY_NOTIFIER_KEY,
     CHANNEL_REPLY_INDEX_KEY,
     CHANNEL_RUNTIME_KEY,
     CHAT_SETTINGS_KEY,
@@ -50,6 +52,93 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 LONG_OUTPUT_MODE_SUFFIX = "plain-split"
 FLOOD_RETRY_MAX_SLEEP_SECONDS = 60.0
+# Capacity rejections the owner should hear about. Content gates (language,
+# length, staleness, authorization) stay silent by design - they are policy,
+# not degradation.
+CAPACITY_SKIP_REASONS = frozenset({"queue_full", "llm_budget"})
+# One DM per window no matter how large the burst; the message carries the
+# suppressed count instead.
+CAPACITY_NOTIFY_COOLDOWN_SECONDS = 600.0
+# Headroom an edit must leave unused so a burst of edits cannot starve the
+# next new post: a yielded edit only delays refreshing an already-delivered
+# translation, a rejected new post means no translation appears at all.
+EDIT_BUDGET_HEADROOM_CALLS = 2
+
+
+class CapacitySkipNotifier:
+    """Rate-limited owner DM bookkeeping for capacity-driven channel skips.
+
+    A post dropped because the queue or LLM budget is full is invisible from
+    the channel itself: nothing appears and nobody complains to the bot. The
+    DM is capped at one per cooldown window; ``note_skip`` returns the number
+    of skips since the previous notification so a burst produces one message
+    that says how much was dropped instead of one message per dropped post.
+    """
+
+    def __init__(
+        self,
+        *,
+        cooldown_seconds: float = CAPACITY_NOTIFY_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._last_sent_at: float | None = None
+        self._pending_count = 0
+
+    def note_skip(self) -> tuple[bool, int]:
+        self._pending_count += 1
+        now = self._clock()
+        if (
+            self._last_sent_at is not None
+            and now - self._last_sent_at < self._cooldown_seconds
+        ):
+            return False, self._pending_count
+        self._last_sent_at = now
+        count = self._pending_count
+        self._pending_count = 0
+        return True, count
+
+
+def _capacity_notifier(context: ContextTypes.DEFAULT_TYPE) -> CapacitySkipNotifier:
+    notifier = context.application.bot_data.get(CHANNEL_CAPACITY_NOTIFIER_KEY)
+    if isinstance(notifier, CapacitySkipNotifier):
+        return notifier
+    notifier = CapacitySkipNotifier()
+    context.application.bot_data[CHANNEL_CAPACITY_NOTIFIER_KEY] = notifier
+    return notifier
+
+
+async def _notify_owner_capacity_skip(
+    context: ContextTypes.DEFAULT_TYPE, config: "BotConfig", reason: str
+) -> None:
+    """DM the owner when a channel post is dropped for capacity reasons.
+
+    The notice carries counts and internal reason vocabulary only - never
+    post text - and its own delivery failure (owner never started the bot,
+    network error) must not break the handler, so it is swallowed into the
+    log with the same redaction rules as everything else.
+    """
+    if reason not in CAPACITY_SKIP_REASONS:
+        return
+    owner_user_id = getattr(config, "owner_user_id", None)
+    if not owner_user_id:
+        return
+    should_notify, count = _capacity_notifier(context).note_skip()
+    if not should_notify:
+        return
+    text = (
+        f"频道自动翻译因容量限制跳过了 {count} 条帖子（原因：{reason}）。"
+        "频道内不会显示任何提示，请关注交付情况；"
+        "可用 /status 查看计数，需要更高吞吐时调大 "
+        "WUWATERM_CHANNEL_LLM_CALLS_PER_MINUTE 或 WUWATERM_CHANNEL_MAX_PENDING。"
+    )
+    try:
+        await context.bot.send_message(chat_id=owner_user_id, text=text)
+    except Exception as exc:
+        LOGGER.info(
+            "channel capacity notice to owner failed: %s", safe_error_type(exc)
+        )
 
 
 async def send_with_flood_retry(send_callable, *, retry_gate=None):
@@ -481,6 +570,24 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 split_telegram_text(plain, limit=LLM_INPUT_CHAR_LIMIT)
             )
         allow_plain_fallback = bool(html_text) and required_calls >= 2
+        # New posts outrank edits near budget exhaustion. The check and the
+        # reserve below are both synchronous on the single event loop, so the
+        # headroom reading cannot race the reservation it gates.
+        if is_edit and (
+            runtime.budget_remaining()
+            < required_calls + EDIT_BUDGET_HEADROOM_CALLS
+        ):
+            _channel_event(
+                runtime,
+                stage="skipped",
+                reason="edit_yield",
+                message=message,
+                chat_id=chat_id,
+                is_edit=is_edit,
+                direction=direction,
+                text_len=safe_text_len(plain),
+            )
+            return
         admission, rejection_reason = runtime.reserve(required_calls)
         if admission is None:
             _channel_event(
@@ -492,6 +599,9 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 is_edit=is_edit,
                 direction=direction,
                 text_len=safe_text_len(plain),
+            )
+            await _notify_owner_capacity_skip(
+                context, config, rejection_reason or "admission_rejected"
             )
             return
         translator: SentenceTranslator = context.application.bot_data[TRANSLATOR_KEY]
@@ -1127,7 +1237,7 @@ async def _edit_reply_chunks(
             ):
                 return "gated"
             reply_message_id = remaining_reply_ids.pop(0)
-            edit_applied = await _edit_existing_reply(
+            edit_result = await _edit_existing_reply(
                 context,
                 message=message,
                 chat_type=chat_type,
@@ -1137,15 +1247,24 @@ async def _edit_reply_chunks(
                 parse_mode=parse_mode,
                 mode=mode,
             )
-            if edit_applied:
+            if edit_result == "applied":
                 remembered_reply_ids.append(reply_message_id)
                 break
             if not remembered_reply_ids:
+                # "gone" needs no delete of the failed id (it no longer
+                # exists); "uneditable" must include it, or the post keeps a
+                # stale translation that is no longer tracked - every later
+                # edit would skip as untracked and it would never update.
+                prune_ids = (
+                    tuple(remaining_reply_ids)
+                    if edit_result == "gone"
+                    else (reply_message_id, *remaining_reply_ids)
+                )
                 failed_delete_ids = await _delete_reply_chunks(
                     context,
                     message=message,
                     chat_id=chat_id,
-                    reply_message_ids=tuple(remaining_reply_ids),
+                    reply_message_ids=prune_ids,
                 )
                 if failed_delete_ids:
                     reply_index.remember_many(
@@ -1280,7 +1399,14 @@ async def _edit_existing_reply(
     chat_id: int | None,
     parse_mode: str | None,
     mode: str,
-) -> bool:
+) -> Literal["applied", "gone", "uneditable"]:
+    """Edit one tracked reply in place.
+
+    The caller needs the failure shape, not just success/failure: "gone" the
+    message no longer exists (nothing to clean up), "uneditable" it still
+    exists but rejects the edit (it must be deleted, or it stays visible
+    with stale text while no longer tracked - an orphan).
+    """
     try:
         # The flood sleep here runs inside edit_delivery_lock; a newer edit
         # queues behind it and re-checks is_latest_edit after acquiring, so
@@ -1302,26 +1428,35 @@ async def _edit_existing_reply(
             ),
         )
     except BadRequest as exc:
-        if "not modified" in str(exc).lower():
+        lowered = str(exc).lower()
+        if "not modified" in lowered:
             LOGGER.info(
                 "channel edit no-op (unchanged translation) "
                 "incoming_message=%s reply_message=%s",
                 redact_id(message.message_id),
                 redact_id(existing_reply_id),
             )
-            return True
+            return "applied"
         if parse_mode is not None:
             # HTML edit rejected -> let the caller retry as plain.
             raise
+        if "not found" in lowered:
+            LOGGER.info(
+                "channel edit skipped: reply already gone "
+                "incoming_message=%s reply_message=%s",
+                redact_id(message.message_id),
+                redact_id(existing_reply_id),
+            )
+            return "gone"
         LOGGER.info(
             "channel edit skipped: reply not updatable "
             "incoming_message=%s reply_message=%s",
             redact_id(message.message_id),
             redact_id(existing_reply_id),
         )
-        return False
+        return "uneditable"
     _log_emit(chat_type, message, existing_reply_id, mode, edited=True, text=text)
-    return True
+    return "applied"
 
 
 def _log_emit(

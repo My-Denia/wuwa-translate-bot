@@ -3,6 +3,54 @@
 All notable source changes for this project are tracked here. This repository
 does not distribute generated game data or generated SQLite databases.
 
+## Unreleased
+
+### Channel Adapter
+
+- Capacity-driven channel skips (`queue_full`, `llm_budget`) now DM the bot
+  owner, rate-limited to one notice per 10-minute window with the suppressed
+  count folded in. Content gates stay silent by design; only degradation the
+  owner could not otherwise see is reported. The notice carries counts and
+  internal reason vocabulary only, never post text, and its own delivery
+  failure is swallowed into the log.
+- Edits now yield to new posts near LLM-budget exhaustion: an edit is
+  admitted only if the remaining per-minute budget covers its calls plus a
+  two-call headroom (`skipped:edit_yield`). A yielded edit delays refreshing
+  an already-delivered translation; a rejected new post would mean no
+  translation at all. `ChannelRuntime.budget_remaining` exposes the read-only
+  reading the gate uses; admission itself still goes through `reserve`.
+- Edit-token bookkeeping is now bounded: tokens share the entry TTL and are
+  pruned on `begin_edit` itself, so edits skipped before any remember
+  (content gates) no longer accumulate in-process forever.
+- Reply-index persistence no longer runs on the event loop. Payloads are
+  snapshotted on the loop thread and the write (tmp file + fsync + replace +
+  directory fsync) is offloaded, single-flight, coalescing multi-chunk bursts
+  into the latest snapshot. Sync callers keep the original inline semantics.
+- An edit whose tracked reply still exists but rejects the in-place edit
+  ("uneditable", distinct from "gone") now deletes that reply instead of
+  leaving it visible but untracked — an orphan that no later edit could ever
+  update again. The no-repost-on-gone policy is unchanged.
+
+### Telegram Bot
+
+- The dictionary stage (exact + full-table fuzzy over sqlite) now runs off
+  the event loop via the pipeline's existing `offload` seam, matching what
+  the HTTP adapter already did; a fuzzy lookup can no longer stall every
+  concurrent handler.
+
+### HTTP API / Web Presentation Layer
+
+- `TERM_QUERY_MAX_LENGTH` is defined once in `wuwaterm_api` and imported by
+  both the JSON routes and the web views (previously 200 vs a local 120).
+- The web surface envelope now matches the mount path exactly or its
+  children only, so a future sibling like `/wuwaterm-webhooks` is not
+  rewritten as a web page.
+- Restyled the owner-private web surface (markup unchanged): ink-and-gold
+  palette with a sharp 3px geometry, underline tabs, gold provenance heading
+  on result cards, gold focus rings, and a brand bar across the viewport top.
+  All previous functional rules stand: system fonts only, zero scripts, one
+  round trip, 16px inputs, `pre-wrap` results.
+
 ## 0.3.0 - 2026-08-12
 
 API-first release: the Telegram-only bot becomes a multi-adapter system. One
