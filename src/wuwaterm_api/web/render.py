@@ -127,7 +127,7 @@ body {
 header { padding: 1.1rem 0 0.9rem; }
 h1 { font-size: 1.45rem; margin: 0; letter-spacing: 0.06em; font-weight: 700; }
 h1::before {
-  content: "\25C6";
+  content: "◆";
   color: var(--accent);
   font-size: 0.8em;
   margin-right: 0.55rem;
@@ -235,7 +235,7 @@ button:focus-visible {
   font-weight: 600;
 }
 .card h2::before {
-  content: "\2014";
+  content: "—";
   margin-right: 0.45rem;
   opacity: 0.75;
 }
@@ -273,7 +273,7 @@ footer {
   letter-spacing: 0.04em;
 }
 footer::before {
-  content: "\25C6";
+  content: "◆";
   color: var(--accent);
   font-size: 0.6rem;
   display: block;

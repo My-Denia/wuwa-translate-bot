@@ -111,10 +111,16 @@ class CapacitySkipNotifier:
         self._last_attempt_at = now
         return True, self._pending_count
 
-    def mark_result(self, sent: bool) -> None:
+    def mark_result(self, sent: bool, *, counted: int = 0) -> None:
+        """Commit the outcome of a DM attempt.
+
+        On success only the skips captured in that DM are cleared: skips that
+        arrived while ``send_message`` was in flight stay pending and fold
+        into the next notice instead of being silently zeroed.
+        """
         self._last_attempt_ok = sent
         if sent:
-            self._pending_count = 0
+            self._pending_count = max(0, self._pending_count - counted)
 
 
 def _capacity_notifier(context: ContextTypes.DEFAULT_TYPE) -> CapacitySkipNotifier:
@@ -161,7 +167,7 @@ async def _notify_owner_capacity_skip(
             "channel capacity notice to owner failed: %s", safe_error_type(exc)
         )
         return
-    notifier.mark_result(True)
+    notifier.mark_result(True, counted=count)
 
 
 async def send_with_flood_retry(send_callable, *, retry_gate=None):
@@ -616,15 +622,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text_len=safe_text_len(plain),
             )
             return
-        # Register only now that the edit is admitted past the yield check:
-        # this is what supersedes any older in-flight edit for the same post.
-        if is_edit and chat_id is not None:
-            update_id = getattr(update, "update_id", None)
-            edit_work_token = reply_index.begin_edit(
-                chat_id,
-                message.message_id,
-                update_id if isinstance(update_id, int) else None,
-            )
         admission, rejection_reason = runtime.reserve(required_calls)
         if admission is None:
             _channel_event(
@@ -672,7 +669,7 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             def mark_channel_llm_call_started() -> None:
                 """Recheck volatile policy after the shared LLM-slot wait."""
 
-                nonlocal started_calls
+                nonlocal started_calls, edit_work_token
 
                 if not _message_is_fresh(
                     message, config.channel_max_age_seconds
@@ -687,6 +684,23 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         reason="authorization_changed_before_llm",
                     )
                 admission.mark_call_started()
+                if started_calls == 0 and is_edit and chat_id is not None:
+                    # The edit is now committed to its first LLM call. This is
+                    # the earliest point at which registering the supersede
+                    # token is safe: every earlier bail path (edit_yield,
+                    # queue_full, llm_budget, stale, authorization) must leave
+                    # an admitted in-flight edit's token untouched, or the
+                    # admitted edit's completed translation is dropped as
+                    # stale with nothing replacing it. Registration order
+                    # still matches arrival order: on the single event loop
+                    # the older edit's task reaches every FIFO primitive
+                    # (admission semaphore, LLM slot) first.
+                    update_id = getattr(update, "update_id", None)
+                    edit_work_token = reply_index.begin_edit(
+                        chat_id,
+                        message.message_id,
+                        update_id if isinstance(update_id, int) else None,
+                    )
                 started_calls += 1
                 _channel_event(
                     runtime,

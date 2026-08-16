@@ -2151,6 +2151,97 @@ def test_yielded_edit_does_not_supersede_admitted_edit(monkeypatch, sample_db):
     asyncio.run(run())
 
 
+def test_queue_rejected_edit_does_not_supersede_admitted_edit(monkeypatch, sample_db):
+    async def run() -> None:
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                edit_started.set()
+                await release_edit.wait()
+                return "admitted edit translation"
+            return "original translation"
+
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        # One active slot, no pending: edit B passes the budget-yield check
+        # (plenty of budget) but loses reserve() to queue_full.
+        context = make_context(
+            sample_db,
+            config=BotConfig(
+                owner_user_id=11,
+                llm_max_concurrency=1,
+                channel_max_pending=0,
+                channel_llm_calls_per_minute=10,
+            ),
+        )
+        now = datetime.now(timezone.utc)
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4235, date=now
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("original translation", "HTML", 4235)]
+
+        edit_a, _ = channel_update(
+            text=CN_TEXT + "（第一次编辑）",
+            message_id=4235,
+            update_id=301,
+            date=now,
+            edit_date=now,
+        )
+        task_a = asyncio.create_task(channel_post_handler(edit_a, context))
+        await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+        edit_b, _ = channel_update(
+            text=CN_TEXT + "（第二次编辑）",
+            message_id=4235,
+            update_id=302,
+            date=now,
+            edit_date=now,
+        )
+        await channel_post_handler(edit_b, context)
+        assert calls == 2
+
+        release_edit.set()
+        await asyncio.wait_for(task_a, timeout=1)
+        # queue_full rejection must not have superseded A's edit token.
+        assert context.bot.edits == [
+            ("admitted edit translation", "HTML", -2001, 5235)
+        ]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_capacity_notifier_keeps_skips_arriving_during_send():
+    now = [100.0]
+    notifier = CapacitySkipNotifier(clock=lambda: now[0])
+    should, count = notifier.note_skip()
+    assert (should, count) == (True, 1)
+    # A skip lands while the first DM is still in flight.
+    should, count = notifier.note_skip()
+    assert (should, count) == (False, 2)
+    notifier.mark_result(True, counted=1)
+    # Only the count captured by the sent DM is cleared; the concurrent skip
+    # is carried into the next window's notice.
+    now[0] += 601.0
+    should, count = notifier.note_skip()
+    assert (should, count) == (True, 2)
+
+
 def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
@@ -2722,6 +2813,42 @@ def test_channel_reply_index_aflush_survives_cancelled_save_task(tmp_path):
 
         reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
         assert reloaded.get_many(-2001, 4001) == (5001,)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_outlives_cancelled_executor_write(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        write_started = threading.Event()
+        release_write = threading.Event()
+        original_write = index._write_payload_recording
+
+        def blocking_write(payload):
+            write_started.set()
+            release_write.wait(timeout=5)
+            original_write(payload)
+
+        index._write_payload_recording = blocking_write
+        index.remember_many(-2001, 4001, (5001,))
+        while not write_started.is_set():
+            await asyncio.sleep(0.001)
+        # A newer remember queues behind the blocked write; teardown then
+        # cancels the save task, but the executor thread keeps running.
+        index.remember_many(-2001, 4002, (5002,))
+        task = index._save_task
+        assert task is not None
+        task.cancel()
+
+        flusher = asyncio.create_task(index.aflush())
+        await asyncio.sleep(0.05)  # let aflush reach the in-flight wait
+        release_write.set()  # the stale snapshot completes first
+        await flusher  # then the final inline write must land after it
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
+        assert reloaded.get_many(-2001, 4002) == (5002,)
 
     asyncio.run(run())
 

@@ -26,6 +26,7 @@ import httpx
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, DeviceStore
 from wuwaterm_api.settings import WEB_MOUNT_PATH, ApiSettings
+from wuwaterm_api.web import render
 from wuwaterm_api.web.app import EDGE_HEADER_NAME, SESSION_COOKIE_NAME
 from wuwaterm_api.web.session import SessionStore
 
@@ -1466,3 +1467,13 @@ def test_an_absent_identifier_resolves_to_nothing():
     assert store.resolve(None) is None
     assert store.resolve("") is None
     assert store.resolve("never-issued") is None
+
+
+def test_stylesheet_uses_literal_decorative_glyphs():
+    # CSS code-point escapes do not survive a plain Python string: "\25C6"
+    # parses as the octal control character U+0015 followed by "C6". The
+    # decorative glyphs must be literal Unicode in the stylesheet.
+    style = render._STYLE
+    assert "◆" in style
+    assert "—" in style
+    assert all(ord(ch) >= 0x20 or ch in "\n\r\t" for ch in style)

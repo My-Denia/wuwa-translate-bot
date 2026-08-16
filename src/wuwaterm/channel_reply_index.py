@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import threading
 import logging
 import os
 import tempfile
@@ -84,6 +85,12 @@ class ChannelReplyIndex:
         self._last_save_durable: bool | None = None
         self._pending_save_payload: dict | None = None
         self._save_task: asyncio.Task | None = None
+        # Set by the executor wrapper when a write thread finishes. aflush()
+        # waits on this before its inline final write: cancelling the save
+        # task does not stop a write already running in the executor, and
+        # without the wait that older snapshot could os.replace over the
+        # newer one afterwards.
+        self._write_inflight: threading.Event | None = None
         self._load()
 
     def remember(
@@ -374,6 +381,12 @@ class ChannelReplyIndex:
                 await task
             except (asyncio.CancelledError, OSError):
                 pass
+        # A cancelled task does not stop a write already running in the
+        # executor; wait for that thread before the inline final write, or
+        # the older snapshot can replace the newer one on disk afterwards.
+        in_flight = self._write_inflight
+        if in_flight is not None:
+            await asyncio.to_thread(in_flight.wait)
         self._pending_save_payload = None
         self._write_payload_recording(self._build_payload())
 
@@ -443,15 +456,23 @@ class ChannelReplyIndex:
         while self._pending_save_payload is not None:
             payload = self._pending_save_payload
             self._pending_save_payload = None
+            write_done = threading.Event()
+            self._write_inflight = write_done
             try:
                 await loop.run_in_executor(
-                    None, self._write_payload_recording, payload
+                    None, self._write_payload_tracked, payload, write_done
                 )
             except Exception:
                 # The sync path deliberately surfaces only OSError; in a
                 # background task anything unexpected would otherwise die as
                 # an unretrieved task exception.
                 LOGGER.exception("channel reply index save failed unexpectedly")
+
+    def _write_payload_tracked(self, payload: dict, done: threading.Event) -> None:
+        try:
+            self._write_payload_recording(payload)
+        finally:
+            done.set()
 
     def _write_payload_recording(self, payload: dict) -> None:
         """Write one snapshot, updating the durability counters.

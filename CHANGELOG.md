@@ -33,17 +33,25 @@ does not distribute generated game data or generated SQLite databases.
 - Review follow-ups (PR #76): the capacity-notice cooldown and pending count
   are now committed only after the owner DM actually sends; a transient
   failure keeps the count and re-arms after a 60-second retry delay instead
-  of silencing alerts for the whole 10-minute window.
-- Edit-token registration is deferred until an edit is actually admitted to
-  a delivery path (dictionary fast path, or past the budget-yield check), so
-  a yielded edit no longer supersedes an admitted in-flight edit — previously
-  the admitted edit's completed translation was dropped as stale after
-  spending its LLM budget.
+  of silencing alerts for the whole 10-minute window. A successful notice
+  clears only the skips it reported, so skips that arrive while the DM is in
+  flight survive into the next notice instead of being silently zeroed.
+- Edit-token registration is deferred to the moment an edit actually starts
+  its first LLM call (the dictionary fast path registers just before its
+  emit), so an edit rejected by any bail path — `edit_yield`, `queue_full`,
+  `llm_budget`, staleness or authorization rechecks — no longer supersedes an
+  admitted in-flight edit whose completed translation was then dropped as
+  stale with nothing replacing it.
 - The reply index gains `aflush()`, wired to the application's
   `post_shutdown` hook: an offloaded save still queued at shutdown is drained
-  (and a cancelled one rewritten inline from memory), so replies remembered
-  just before exit survive the restart instead of causing duplicate
-  translations.
+  (and a cancelled one rewritten inline from memory), and the flush waits out
+  an executor write already in flight so an older snapshot cannot replace the
+  final one on disk. Replies remembered just before exit survive the restart
+  instead of causing duplicate translations.
+- Web stylesheet: decorative glyphs are literal Unicode again — CSS
+  code-point escapes like `\25C6` in a plain Python string parse as octal
+  control characters, so the heading diamonds and em-dashes rendered as
+  mojibake since the restyle.
 
 ### Telegram Bot
 
