@@ -904,6 +904,12 @@ async def _close_translator_on_shutdown(application: Application) -> None:
     translator = application.bot_data.get(TRANSLATOR_KEY)
     if isinstance(translator, SentenceTranslator):
         await translator.aclose()
+    reply_index = application.bot_data.get(CHANNEL_REPLY_INDEX_KEY)
+    if isinstance(reply_index, ChannelReplyIndex):
+        # Flush queued snapshots so replies remembered just before exit are
+        # durable; otherwise the offloaded save task can be cancelled during
+        # loop teardown and replayed posts would be retranslated on restart.
+        await reply_index.aflush()
 
 
 def _chat_settings_path_from_env(db_path: str | Path) -> Path:

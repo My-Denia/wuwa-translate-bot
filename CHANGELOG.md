@@ -30,6 +30,20 @@ does not distribute generated game data or generated SQLite databases.
   ("uneditable", distinct from "gone") now deletes that reply instead of
   leaving it visible but untracked — an orphan that no later edit could ever
   update again. The no-repost-on-gone policy is unchanged.
+- Review follow-ups (PR #76): the capacity-notice cooldown and pending count
+  are now committed only after the owner DM actually sends; a transient
+  failure keeps the count and re-arms after a 60-second retry delay instead
+  of silencing alerts for the whole 10-minute window.
+- Edit-token registration is deferred until an edit is actually admitted to
+  a delivery path (dictionary fast path, or past the budget-yield check), so
+  a yielded edit no longer supersedes an admitted in-flight edit — previously
+  the admitted edit's completed translation was dropped as stale after
+  spending its LLM budget.
+- The reply index gains `aflush()`, wired to the application's
+  `post_shutdown` hook: an offloaded save still queued at shutdown is drained
+  (and a cancelled one rewritten inline from memory), so replies remembered
+  just before exit survive the restart instead of causing duplicate
+  translations.
 
 ### Telegram Bot
 

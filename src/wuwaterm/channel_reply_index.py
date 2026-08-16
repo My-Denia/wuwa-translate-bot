@@ -356,6 +356,27 @@ class ChannelReplyIndex:
     def last_save_durable(self) -> bool | None:
         return self._last_save_durable
 
+    async def aflush(self) -> None:
+        """Drain any queued offloaded save, then persist the current snapshot.
+
+        Wired to the application shutdown hook: without it, a remember close
+        to process exit can leave its payload queued in the background save
+        task while the loop tears down, losing the newest reply ids (duplicate
+        translations after restart). Cancellation of the in-flight task is
+        deliberately swallowed so the final inline write is best-effort
+        guaranteed even during loop teardown.
+        """
+        if self.storage_path is None:
+            return
+        task = self._save_task
+        if task is not None and not task.done():
+            try:
+                await task
+            except (asyncio.CancelledError, OSError):
+                pass
+        self._pending_save_payload = None
+        self._write_payload_recording(self._build_payload())
+
     def _record_load_failure(
         self, message: str = "channel reply index unreadable, starting empty"
     ) -> None:

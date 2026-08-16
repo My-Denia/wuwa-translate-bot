@@ -59,6 +59,11 @@ CAPACITY_SKIP_REASONS = frozenset({"queue_full", "llm_budget"})
 # One DM per window no matter how large the burst; the message carries the
 # suppressed count instead.
 CAPACITY_NOTIFY_COOLDOWN_SECONDS = 600.0
+# After a failed DM attempt the next skip retries sooner than the full
+# cooldown, so a transient Telegram blip cannot silence the alert for the
+# whole window; still bounded so a persistent failure (e.g. owner never
+# started the bot) does not cost one API call per dropped post.
+CAPACITY_NOTIFY_FAILURE_RETRY_SECONDS = 60.0
 # Headroom an edit must leave unused so a burst of edits cannot starve the
 # next new post: a yielded edit only delays refreshing an already-delivered
 # translation, a rejected new post means no translation appears at all.
@@ -73,31 +78,43 @@ class CapacitySkipNotifier:
     DM is capped at one per cooldown window; ``note_skip`` returns the number
     of skips since the previous notification so a burst produces one message
     that says how much was dropped instead of one message per dropped post.
+    The cooldown and pending count are committed only when the DM actually
+    sends (``mark_result``): otherwise a transient send failure would both
+    suppress alerts for the rest of the window and lose the failed count.
     """
 
     def __init__(
         self,
         *,
         cooldown_seconds: float = CAPACITY_NOTIFY_COOLDOWN_SECONDS,
+        failure_retry_seconds: float = CAPACITY_NOTIFY_FAILURE_RETRY_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cooldown_seconds = cooldown_seconds
+        self._failure_retry_seconds = failure_retry_seconds
         self._clock = clock
-        self._last_sent_at: float | None = None
+        self._last_attempt_at: float | None = None
+        self._last_attempt_ok = True
         self._pending_count = 0
 
     def note_skip(self) -> tuple[bool, int]:
         self._pending_count += 1
         now = self._clock()
-        if (
-            self._last_sent_at is not None
-            and now - self._last_sent_at < self._cooldown_seconds
-        ):
-            return False, self._pending_count
-        self._last_sent_at = now
-        count = self._pending_count
-        self._pending_count = 0
-        return True, count
+        if self._last_attempt_at is not None:
+            cooldown = (
+                self._cooldown_seconds
+                if self._last_attempt_ok
+                else self._failure_retry_seconds
+            )
+            if now - self._last_attempt_at < cooldown:
+                return False, self._pending_count
+        self._last_attempt_at = now
+        return True, self._pending_count
+
+    def mark_result(self, sent: bool) -> None:
+        self._last_attempt_ok = sent
+        if sent:
+            self._pending_count = 0
 
 
 def _capacity_notifier(context: ContextTypes.DEFAULT_TYPE) -> CapacitySkipNotifier:
@@ -124,7 +141,8 @@ async def _notify_owner_capacity_skip(
     owner_user_id = getattr(config, "owner_user_id", None)
     if not owner_user_id:
         return
-    should_notify, count = _capacity_notifier(context).note_skip()
+    notifier = _capacity_notifier(context)
+    should_notify, count = notifier.note_skip()
     if not should_notify:
         return
     text = (
@@ -136,9 +154,14 @@ async def _notify_owner_capacity_skip(
     try:
         await context.bot.send_message(chat_id=owner_user_id, text=text)
     except Exception as exc:
+        # Count and short retry re-arm stay uncommitted so the next skip
+        # retries with the failed skips folded into the eventual message.
+        notifier.mark_result(False)
         LOGGER.info(
             "channel capacity notice to owner failed: %s", safe_error_type(exc)
         )
+        return
+    notifier.mark_result(True)
 
 
 async def send_with_flood_retry(send_callable, *, retry_gate=None):
@@ -390,14 +413,12 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             is_edit = False
             resume_observed = True
+    # Edit-token registration is deferred to the moment the edit is actually
+    # admitted to a delivery path (the dictionary fast path, or right after
+    # the budget-yield check on the LLM path). Registering here would let an
+    # edit that later yields or is content-gated supersede the token of an
+    # admitted in-flight edit, whose delivery would then be dropped as stale.
     edit_work_token: int | None = None
-    if is_edit and chat_id is not None:
-        update_id = getattr(update, "update_id", None)
-        edit_work_token = reply_index.begin_edit(
-            chat_id,
-            message.message_id,
-            update_id if isinstance(update_id, int) else None,
-        )
     original_claim: OriginalPostClaim | None = None
     if not is_edit and chat_id is not None:
         claim = reply_index.claim_original(
@@ -527,6 +548,13 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     text_len=safe_text_len(plain),
                 )
                 return
+            if is_edit and chat_id is not None:
+                update_id = getattr(update, "update_id", None)
+                edit_work_token = reply_index.begin_edit(
+                    chat_id,
+                    message.message_id,
+                    update_id if isinstance(update_id, int) else None,
+                )
             _channel_event(
                 runtime,
                 stage="dictionary",
@@ -588,6 +616,15 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text_len=safe_text_len(plain),
             )
             return
+        # Register only now that the edit is admitted past the yield check:
+        # this is what supersedes any older in-flight edit for the same post.
+        if is_edit and chat_id is not None:
+            update_id = getattr(update, "update_id", None)
+            edit_work_token = reply_index.begin_edit(
+                chat_id,
+                message.message_id,
+                update_id if isinstance(update_id, int) else None,
+            )
         admission, rejection_reason = runtime.reserve(required_calls)
         if admission is None:
             _channel_event(

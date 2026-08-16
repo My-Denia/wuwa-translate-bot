@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -31,11 +32,13 @@ from wuwaterm.bot import (
     term_command,
 )
 from wuwaterm.channel import (
+    CapacitySkipNotifier,
     channel_post_handler,
     count_cjk,
     strip_telegram_html,
     validate_telegram_html,
 )
+from wuwaterm.runtime_keys import CHANNEL_CAPACITY_NOTIFIER_KEY
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -1117,6 +1120,49 @@ def test_capacity_notice_failure_stays_silent(monkeypatch, sample_db):
     asyncio.run(run())
 
 
+def test_capacity_notice_failure_retries_and_preserves_count(monkeypatch, sample_db):
+    async def run() -> None:
+        calls = []
+        enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+        bot = FakeBot(send_raises=TelegramError("transient network error"))
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+            bot=bot,
+        )
+        # Controllable clock so the short failure-retry window can be crossed.
+        now = [1000.0]
+        context.application.bot_data[CHANNEL_CAPACITY_NOTIFIER_KEY] = (
+            CapacitySkipNotifier(clock=lambda: now[0])
+        )
+        stamp = datetime.now(timezone.utc)
+        first, _ = channel_update(text=CN_TEXT, message_id=4790, date=stamp)
+        await channel_post_handler(first, context)
+
+        # First rejection: the DM attempt fails; the failed count is kept.
+        second, _ = channel_update(text=CN_TEXT, message_id=4791, date=stamp)
+        await channel_post_handler(second, context)
+        assert bot.sent_messages == []
+
+        # Inside the failure retry window the next skip is aggregated, not sent.
+        third, _ = channel_update(text=CN_TEXT, message_id=4792, date=stamp)
+        await channel_post_handler(third, context)
+        assert bot.sent_messages == []
+
+        # Past the retry window the alert goes out with all three skips folded in.
+        bot._send_raises = None
+        now[0] += 61.0
+        fourth, _ = channel_update(text=CN_TEXT, message_id=4793, date=stamp)
+        await channel_post_handler(fourth, context)
+        assert len(bot.sent_messages) == 1
+        chat_id, text = bot.sent_messages[0]
+        assert chat_id == 11
+        assert "3" in text
+        assert CN_TEXT not in text
+
+    asyncio.run(run())
+
+
 def test_channel_multichunk_budget_rejects_before_first_llm_call(
     monkeypatch, sample_db
 ):
@@ -2031,6 +2077,80 @@ def test_concurrent_edits_do_not_overwrite_newer_translation(monkeypatch, sample
     asyncio.run(run())
 
 
+def test_yielded_edit_does_not_supersede_admitted_edit(monkeypatch, sample_db):
+    async def run() -> None:
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                edit_started.set()
+                await release_edit.wait()
+                return "admitted edit translation"
+            return "original translation"
+
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=6),
+        )
+        now = datetime.now(timezone.utc)
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4225, date=now
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("original translation", "HTML", 4225)]
+
+        # Edit A is admitted (remaining 4 >= required 2 + headroom 2) and
+        # blocks inside its LLM call; it reserves 2, leaving 2.
+        edit_a, _ = channel_update(
+            text=CN_TEXT + "（第一次编辑）",
+            message_id=4225,
+            update_id=201,
+            date=now,
+            edit_date=now,
+        )
+        task_a = asyncio.create_task(channel_post_handler(edit_a, context))
+        await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+        # Edit B arrives while A is in flight: remaining 2 < required 2 +
+        # headroom 2, so B yields - and must not supersede A's edit token.
+        edit_b, _ = channel_update(
+            text=CN_TEXT + "（第二次编辑）",
+            message_id=4225,
+            update_id=202,
+            date=now,
+            edit_date=now,
+        )
+        await channel_post_handler(edit_b, context)
+        assert calls == 2
+        assert context.bot.edits == []
+
+        release_edit.set()
+        await asyncio.wait_for(task_a, timeout=1)
+        # A's completed translation is delivered; with the old early
+        # begin_edit, B's token superseded A's and A was dropped as stale.
+        assert context.bot.edits == [
+            ("admitted edit translation", "HTML", -2001, 5225)
+        ]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
 def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
@@ -2553,6 +2673,55 @@ def test_channel_reply_index_save_offloaded_still_persists(tmp_path):
         await task
         reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
         assert reloaded.get_many(-2001, 4001) == (5001, 5002)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_drains_queued_snapshot(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        write_started = threading.Event()
+        release_write = threading.Event()
+        original_write = index._write_payload_recording
+
+        def blocking_write(payload):
+            write_started.set()
+            release_write.wait(timeout=5)
+            original_write(payload)
+
+        index._write_payload_recording = blocking_write
+        index.remember_many(-2001, 4001, (5001,))
+        while not write_started.is_set():
+            await asyncio.sleep(0.001)
+        # A second remember lands while the executor holds the first write:
+        # its payload sits queued in _pending_save_payload.
+        index.remember_many(-2001, 4002, (5002,))
+        release_write.set()
+
+        await index.aflush()
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
+        assert reloaded.get_many(-2001, 4002) == (5002,)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_survives_cancelled_save_task(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        index.remember_many(-2001, 4001, (5001,))
+        task = index._save_task
+        assert task is not None
+        # Shutdown tears the loop down before the offloaded write completes.
+        task.cancel()
+
+        await index.aflush()
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
 
     asyncio.run(run())
 
