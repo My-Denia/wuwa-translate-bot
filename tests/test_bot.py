@@ -1707,6 +1707,44 @@ def test_create_application_shutdown_closes_translator(monkeypatch, sample_db):
     assert closed == [True]
 
 
+def test_create_application_shutdown_flushes_reply_index(monkeypatch, sample_db):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    reply_index = app.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    flushed = []
+
+    async def fake_aflush():
+        flushed.append(True)
+
+    monkeypatch.setattr(reply_index, "aflush", fake_aflush)
+
+    asyncio.run(app.post_shutdown(app))
+
+    assert flushed == [True]
+
+
+def test_create_application_shutdown_flushes_even_if_translator_close_fails(
+    monkeypatch, sample_db
+):
+    app = create_application("123:ABC", sample_db, config=BotConfig())
+    translator = app.bot_data[TRANSLATOR_KEY]
+    reply_index = app.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    flushed = []
+
+    async def failing_aclose():
+        raise RuntimeError("transport close failed")
+
+    async def fake_aflush():
+        flushed.append(True)
+
+    monkeypatch.setattr(translator, "aclose", failing_aclose)
+    monkeypatch.setattr(reply_index, "aflush", fake_aflush)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(app.post_shutdown(app))
+
+    assert flushed == [True]
+
+
 def test_state_dir_keeps_runtime_state_writable_when_db_parent_is_read_only(
     monkeypatch, sample_db
 ):

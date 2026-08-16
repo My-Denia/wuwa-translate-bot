@@ -54,6 +54,10 @@ from wuwaterm.application import (
 
 from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 
+# Shared with the JSON routes for the same reason as TEXT_MAX_LENGTH above:
+# this layer once carried its own copy (120 vs the API's 200).
+from wuwaterm_api import TERM_QUERY_MAX_LENGTH
+
 from ..auth import SCOPE_META, SCOPE_TRANSLATE
 from ..errors import ApiError
 from ..settings import WEB_MOUNT_PATH
@@ -72,7 +76,6 @@ EDGE_HEADER_NAME = "x-wuwaterm-edge"
 # the divergence a second presentation layer is most likely to introduce, and
 # exactly the thing copying a number instead of importing it produces.
 TEXT_MAX_LENGTH = LLM_INPUT_CHAR_LIMIT
-TERM_QUERY_MAX_LENGTH = 120
 
 # Published error vocabulary rendered for a human reading Chinese. The API
 # answers these as codes in JSON; this surface answers the same conditions with
@@ -654,9 +657,12 @@ class WebSurfaceEnvelope:
         self.app = app
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or not str(
-            scope.get("path", "")
-        ).startswith(WEB_MOUNT_PATH):
+        # Exact mount or a child of it only: a bare startswith would also
+        # claim a future sibling like /wuwaterm-webhooks.
+        path = str(scope.get("path", ""))
+        if scope["type"] != "http" or not (
+            path == WEB_MOUNT_PATH or path.startswith(WEB_MOUNT_PATH + "/")
+        ):
             await self.app(scope, receive, send)
             return
 

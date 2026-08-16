@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -900,9 +901,18 @@ async def _log_update_error(
 
 
 async def _close_translator_on_shutdown(application: Application) -> None:
-    translator = application.bot_data.get(TRANSLATOR_KEY)
-    if isinstance(translator, SentenceTranslator):
-        await translator.aclose()
+    try:
+        translator = application.bot_data.get(TRANSLATOR_KEY)
+        if isinstance(translator, SentenceTranslator):
+            await translator.aclose()
+    finally:
+        # Independent of the translator close above: flush queued snapshots
+        # so replies remembered just before exit are durable; otherwise the
+        # offloaded save task can be cancelled during loop teardown and
+        # replayed posts would be retranslated on restart.
+        reply_index = application.bot_data.get(CHANNEL_REPLY_INDEX_KEY)
+        if isinstance(reply_index, ChannelReplyIndex):
+            await reply_index.aflush()
 
 
 def _chat_settings_path_from_env(db_path: str | Path) -> Path:
@@ -1673,6 +1683,9 @@ async def translate_query_async(
         translator,
         TranslationJob(text=query, forced_to_chinese=forced_to_chinese),
         splitter=_telegram_llm_splitter,
+        # The dictionary stage (exact + full-table fuzzy over sqlite) is
+        # synchronous; keep it off the event loop like the API does.
+        offload=asyncio.to_thread,
     )
     return _telegram_text(outcome)
 
@@ -1696,6 +1709,7 @@ async def telegram_translation_reply(
         input_limit=input_limit,
         markup_translator=_telegram_markup_translator(translator),
         splitter=_telegram_llm_splitter,
+        offload=asyncio.to_thread,
     )
     return _telegram_reply(outcome)
 

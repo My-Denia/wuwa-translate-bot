@@ -11,6 +11,13 @@ cannot bypass the shared translation pipeline.
 
 from __future__ import annotations
 
-__all__ = ["API_VERSION"]
+__all__ = ["API_VERSION", "TERM_QUERY_MAX_LENGTH"]
 
 API_VERSION = "v1"
+
+# Both presentation layers in this package (the JSON routes and the web
+# views) must reject over-long term queries at the same length, so the
+# constant lives here rather than in either layer. A previous local copy in
+# the web layer (120) disagreed with the JSON layer (200) - the exact drift
+# that importing instead of restating is meant to prevent.
+TERM_QUERY_MAX_LENGTH = 200

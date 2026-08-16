@@ -101,6 +101,17 @@ class ChannelRuntime:
     def record(self, stage: str, reason: str) -> None:
         self._outcomes[f"{stage}:{reason}"] += 1
 
+    def budget_remaining(self) -> int:
+        """LLM calls still reservable in the current window.
+
+        Read-only advisory for prioritisation policy (edits yield to new
+        posts near exhaustion). Admission itself stays with ``reserve``;
+        because both are synchronous on the single event loop, a check
+        against this value cannot race the reservation that follows it.
+        """
+        self._prune_budget()
+        return max(0, self.llm_calls_per_minute - len(self._budget_tokens))
+
     def snapshot(self) -> ChannelRuntimeSnapshot:
         return ChannelRuntimeSnapshot(
             active=self._active,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -31,11 +32,13 @@ from wuwaterm.bot import (
     term_command,
 )
 from wuwaterm.channel import (
+    CapacitySkipNotifier,
     channel_post_handler,
     count_cjk,
     strip_telegram_html,
     validate_telegram_html,
 )
+from wuwaterm.runtime_keys import CHANNEL_CAPACITY_NOTIFIER_KEY
 from wuwaterm.lookup import TermService
 from wuwaterm.sentence import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -107,20 +110,30 @@ class FakeBot:
         default_status: str = "administrator",
         edit_raises=None,
         delete_raises=None,
+        send_raises=None,
     ):
         self.default_status = default_status
         self.member_calls: list[tuple[int, int]] = []
         self.edits: list[tuple[str, str | None, int | None, int | None]] = []
         self.edit_attempts: list[tuple[str, str | None, int | None, int | None]] = []
         self.deleted_messages: list[tuple[int | None, int | None]] = []
+        self.sent_messages: list[tuple[int | None, str | None]] = []
         # edit_raises(text, parse_mode, chat_id, message_id) -> Exception | None
         self._edit_raises = edit_raises
         # delete_raises(chat_id, message_id) -> Exception | None
         self._delete_raises = delete_raises
+        # send_raises: exception instance raised by send_message
+        self._send_raises = send_raises
 
     async def get_chat_member(self, chat_id: int, user_id: int):
         self.member_calls.append((chat_id, user_id))
         return SimpleNamespace(status=self.default_status)
+
+    async def send_message(self, chat_id=None, text=None, **kwargs):
+        if self._send_raises is not None:
+            raise self._send_raises
+        self.sent_messages.append((chat_id, text))
+        return SimpleNamespace(message_id=1)
 
     async def edit_message_text(self, text=None, chat_id=None, message_id=None, **kwargs):
         parse_mode = kwargs.get("parse_mode")
@@ -998,6 +1011,154 @@ def test_channel_llm_burst_is_bounded_and_queue_full_is_observable(
         assert updates[2][1].replies == []
         assert runtime.snapshot().active == 0
         assert runtime.snapshot().pending == 0
+
+    asyncio.run(run())
+
+
+def test_edit_yields_to_new_posts_near_budget_exhaustion(monkeypatch, sample_db):
+    async def run() -> None:
+        calls = []
+        enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=4),
+        )
+        now = datetime.now(timezone.utc)
+
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4760, date=now
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("translated", "HTML", 4760)]
+        # The original consumed 1 started call of the 4/min budget; an edit
+        # needing 2 calls would leave less than the new-post headroom.
+        edit, edit_message = channel_update(
+            text=f"{CN_TEXT}更新",
+            message_id=4760,
+            update_id=300,
+            date=now,
+            edit_date=now,
+        )
+        await channel_post_handler(edit, context)
+        runtime = context.application.bot_data[CHANNEL_RUNTIME_KEY]
+        assert runtime.snapshot().outcomes["skipped:edit_yield"] == 1
+        assert context.bot.edits == []
+        assert edit_message.replies == []
+
+        # A new post may still spend what the edit was not allowed to.
+        fresh, fresh_message = channel_update(
+            text=CN_TEXT, message_id=4761, date=now
+        )
+        await channel_post_handler(fresh, context)
+        assert fresh_message.replies == [("translated", "HTML", 4761)]
+
+    asyncio.run(run())
+
+
+def test_capacity_skip_dm_reaches_owner_once_per_cooldown(monkeypatch, sample_db):
+    async def run() -> None:
+        calls = []
+        enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+        bot = FakeBot()
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+            bot=bot,
+        )
+        now = datetime.now(timezone.utc)
+        first, first_message = channel_update(
+            text=CN_TEXT, message_id=4770, date=now
+        )
+        await channel_post_handler(first, context)
+        assert first_message.replies == [("translated", "HTML", 4770)]
+
+        second, second_message = channel_update(
+            text=CN_TEXT, message_id=4771, date=now
+        )
+        await channel_post_handler(second, context)
+        assert second_message.replies == []
+        assert len(bot.sent_messages) == 1
+        chat_id, text = bot.sent_messages[0]
+        assert chat_id == 11
+        assert "llm_budget" in text
+        # The notice must never carry channel content.
+        assert CN_TEXT not in text
+
+        # Cooldown: a further skip within the window is counted, not sent.
+        third, third_message = channel_update(
+            text=CN_TEXT, message_id=4772, date=now
+        )
+        await channel_post_handler(third, context)
+        assert third_message.replies == []
+        assert len(bot.sent_messages) == 1
+
+    asyncio.run(run())
+
+
+def test_capacity_notice_failure_stays_silent(monkeypatch, sample_db):
+    async def run() -> None:
+        calls = []
+        enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+        bot = FakeBot(send_raises=TelegramError("owner blocked the bot"))
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+            bot=bot,
+        )
+        now = datetime.now(timezone.utc)
+        first, _first_message = channel_update(
+            text=CN_TEXT, message_id=4780, date=now
+        )
+        await channel_post_handler(first, context)
+        second, second_message = channel_update(
+            text=CN_TEXT, message_id=4781, date=now
+        )
+        # A rejected post whose owner notice fails must not raise or reply.
+        await channel_post_handler(second, context)
+        assert second_message.replies == []
+
+    asyncio.run(run())
+
+
+def test_capacity_notice_failure_retries_and_preserves_count(monkeypatch, sample_db):
+    async def run() -> None:
+        calls = []
+        enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+        bot = FakeBot(send_raises=TelegramError("transient network error"))
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+            bot=bot,
+        )
+        # Controllable clock so the short failure-retry window can be crossed.
+        now = [1000.0]
+        context.application.bot_data[CHANNEL_CAPACITY_NOTIFIER_KEY] = (
+            CapacitySkipNotifier(clock=lambda: now[0])
+        )
+        stamp = datetime.now(timezone.utc)
+        first, _ = channel_update(text=CN_TEXT, message_id=4790, date=stamp)
+        await channel_post_handler(first, context)
+
+        # First rejection: the DM attempt fails; the failed count is kept.
+        second, _ = channel_update(text=CN_TEXT, message_id=4791, date=stamp)
+        await channel_post_handler(second, context)
+        assert bot.sent_messages == []
+
+        # Inside the failure retry window the next skip is aggregated, not sent.
+        third, _ = channel_update(text=CN_TEXT, message_id=4792, date=stamp)
+        await channel_post_handler(third, context)
+        assert bot.sent_messages == []
+
+        # Past the retry window the alert goes out with all three skips folded in.
+        bot._send_raises = None
+        now[0] += 61.0
+        fourth, _ = channel_update(text=CN_TEXT, message_id=4793, date=stamp)
+        await channel_post_handler(fourth, context)
+        assert len(bot.sent_messages) == 1
+        chat_id, text = bot.sent_messages[0]
+        assert chat_id == 11
+        assert "3" in text
+        assert CN_TEXT not in text
 
     asyncio.run(run())
 
@@ -1916,6 +2077,187 @@ def test_concurrent_edits_do_not_overwrite_newer_translation(monkeypatch, sample
     asyncio.run(run())
 
 
+def test_yielded_edit_does_not_supersede_admitted_edit(monkeypatch, sample_db):
+    async def run() -> None:
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                edit_started.set()
+                await release_edit.wait()
+                return "admitted edit translation"
+            return "original translation"
+
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        context = make_context(
+            sample_db,
+            config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=6),
+        )
+        now = datetime.now(timezone.utc)
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4225, date=now
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("original translation", "HTML", 4225)]
+
+        # Edit A is admitted (remaining 4 >= required 2 + headroom 2) and
+        # blocks inside its LLM call; it reserves 2, leaving 2.
+        edit_a, _ = channel_update(
+            text=CN_TEXT + "（第一次编辑）",
+            message_id=4225,
+            update_id=201,
+            date=now,
+            edit_date=now,
+        )
+        task_a = asyncio.create_task(channel_post_handler(edit_a, context))
+        await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+        # Edit B arrives while A is in flight: remaining 2 < required 2 +
+        # headroom 2, so B yields - and must not supersede A's edit token.
+        edit_b, _ = channel_update(
+            text=CN_TEXT + "（第二次编辑）",
+            message_id=4225,
+            update_id=202,
+            date=now,
+            edit_date=now,
+        )
+        await channel_post_handler(edit_b, context)
+        assert calls == 2
+        assert context.bot.edits == []
+
+        release_edit.set()
+        await asyncio.wait_for(task_a, timeout=1)
+        # A's completed translation is delivered; with the old early
+        # begin_edit, B's token superseded A's and A was dropped as stale.
+        assert context.bot.edits == [
+            ("admitted edit translation", "HTML", -2001, 5225)
+        ]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_queue_rejected_edit_does_not_supersede_admitted_edit(monkeypatch, sample_db):
+    async def run() -> None:
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+        calls = 0
+
+        async def fake_call(
+            _locked_text,
+            _locks,
+            html_mode=False,
+            to_chinese=False,
+            timeout_seconds=30.0,
+            transport=None,
+        ):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                edit_started.set()
+                await release_edit.wait()
+                return "admitted edit translation"
+            return "original translation"
+
+        monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+        monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "test-model")
+        monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+        # One active slot, no pending: edit B passes the budget-yield check
+        # (plenty of budget) but loses reserve() to queue_full.
+        context = make_context(
+            sample_db,
+            config=BotConfig(
+                owner_user_id=11,
+                llm_max_concurrency=1,
+                channel_max_pending=0,
+                channel_llm_calls_per_minute=10,
+            ),
+        )
+        now = datetime.now(timezone.utc)
+        original, original_message = channel_update(
+            text=CN_TEXT, message_id=4235, date=now
+        )
+        await channel_post_handler(original, context)
+        assert original_message.replies == [("original translation", "HTML", 4235)]
+
+        edit_a, _ = channel_update(
+            text=CN_TEXT + "（第一次编辑）",
+            message_id=4235,
+            update_id=301,
+            date=now,
+            edit_date=now,
+        )
+        task_a = asyncio.create_task(channel_post_handler(edit_a, context))
+        await asyncio.wait_for(edit_started.wait(), timeout=1)
+
+        edit_b, _ = channel_update(
+            text=CN_TEXT + "（第二次编辑）",
+            message_id=4235,
+            update_id=302,
+            date=now,
+            edit_date=now,
+        )
+        await channel_post_handler(edit_b, context)
+        assert calls == 2
+
+        release_edit.set()
+        await asyncio.wait_for(task_a, timeout=1)
+        # queue_full rejection must not have superseded A's edit token.
+        assert context.bot.edits == [
+            ("admitted edit translation", "HTML", -2001, 5235)
+        ]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_capacity_notifier_keeps_skips_arriving_during_send():
+    now = [100.0]
+    notifier = CapacitySkipNotifier(clock=lambda: now[0])
+    should, counts = notifier.note_skip("llm_budget")
+    assert (should, counts) == (True, {"llm_budget": 1})
+    # A skip lands while the first DM is still in flight.
+    should, counts = notifier.note_skip("llm_budget")
+    assert should is False and counts == {"llm_budget": 2}
+    notifier.mark_result(True, counted={"llm_budget": 1})
+    # Only the count captured by the sent DM is cleared; the concurrent skip
+    # is carried into the next window's notice.
+    now[0] += 601.0
+    should, counts = notifier.note_skip("llm_budget")
+    assert (should, counts) == (True, {"llm_budget": 2})
+
+
+def test_capacity_notifier_reports_mixed_reasons_separately():
+    now = [100.0]
+    notifier = CapacitySkipNotifier(clock=lambda: now[0])
+    should, counts = notifier.note_skip("queue_full")
+    assert (should, counts) == (True, {"queue_full": 1})
+    notifier.mark_result(True, counted=counts)
+    # queue_full and llm_budget skips accumulate together under cooldown...
+    notifier.note_skip("queue_full")
+    notifier.note_skip("llm_budget")
+    now[0] += 601.0
+    should, counts = notifier.note_skip("llm_budget")
+    # ...and the next notice attributes each count to its own reason.
+    assert should is True
+    assert counts == {"queue_full": 1, "llm_budget": 2}
+
+
 def test_edit_with_no_tracked_reply_and_no_date_is_silent(monkeypatch, sample_db):
     calls = []
     enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: "translated")
@@ -2383,6 +2725,255 @@ def test_channel_edit_reply_gone_prunes_tracked_continuation_chunks(
     reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
     assert reply_index.get_many(-2001, 4299) == ()
     assert len(calls) == 2
+
+
+def test_channel_edit_uneditable_reply_is_deleted_not_orphaned(
+    monkeypatch, sample_db
+):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+    bot = FakeBot(edit_raises=lambda *_: BadRequest("Message can't be edited"))
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4300)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert new_message.replies == [("translated", "HTML", 4300)]
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    tracked = reply_index.get_many(-2001, 4300)
+    assert len(tracked) == 1
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4300, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # The uneditable reply is deleted rather than left as an untracked orphan,
+    # and the index forgets the post (a fresh edit starts clean).
+    assert context.bot.deleted_messages == [(-2001, tracked[0])]
+    assert reply_index.get_many(-2001, 4300) == ()
+    assert edit_message.replies == []
+    outcomes = context.application.bot_data[CHANNEL_RUNTIME_KEY].snapshot().outcomes
+    assert outcomes["delivery:edit_target_unavailable"] == 1
+
+
+def test_channel_edit_uneditable_later_chunk_is_deleted_not_orphaned(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        [
+            "I" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 4),  # original: 2 chunks
+            "J" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6),  # edit: 2 chunks
+        ]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    # Chunk 1 edits fine; the second tracked reply rejects edits.
+    bot = FakeBot(
+        edit_raises=lambda _text, _parse_mode, _chat_id, message_id: (
+            BadRequest("Message can't be edited") if message_id == 5297 else None
+        )
+    )
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4296)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 2
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4296) == (5296, 5297)
+
+    edit_update, edit_message = channel_update(
+        text=CN_TEXT, message_id=4296, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Chunk 1 applied in place; the uneditable chunk-2 reply is deleted
+    # rather than dropped from the rebuilt index while staying visible, and
+    # its replacement chunk goes out as a new reply (the fake reuses the id).
+    assert [edit[3] for edit in bot.edits] == [5296]
+    assert bot.deleted_messages == [(-2001, 5297)]
+    assert len(edit_message.replies) == 1
+    assert reply_index.get_many(-2001, 4296) == (5296, 5297)
+
+
+def test_channel_edit_failed_later_chunk_delete_is_tracked_as_stale_extra(
+    monkeypatch, sample_db
+):
+    calls = []
+    responses = iter(
+        [
+            "I" * (TELEGRAM_TEXT_MESSAGE_LIMIT * 2 + 8),  # original: 3 chunks
+            "J" * (TELEGRAM_TEXT_MESSAGE_LIMIT + 6),  # edit: 2 chunks
+        ]
+    )
+    enable_mock_llm(monkeypatch, calls, lambda _locked_text, _locks: next(responses))
+    # Chunk 2's tracked reply rejects edits, and deleting it fails too.
+    bot = FakeBot(
+        edit_raises=lambda _text, _parse_mode, _chat_id, message_id: (
+            BadRequest("Message can't be edited") if message_id == 5306 else None
+        ),
+        delete_raises=lambda _chat_id, message_id: (
+            TelegramError("transient delete failure") if message_id == 5306 else None
+        ),
+    )
+    context = make_context(sample_db, bot=bot)
+
+    new_update, new_message = channel_update(text=CN_TEXT, message_id=4305)
+    asyncio.run(channel_post_handler(new_update, context))
+    assert len(new_message.replies) == 3
+    reply_index = context.application.bot_data[CHANNEL_REPLY_INDEX_KEY]
+    assert reply_index.get_many(-2001, 4305) == (5305, 5306, 5307)
+
+    edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4305, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Chunk 2 lands on the third tracked reply; the stale uneditable reply
+    # whose delete failed is appended as an extra, NOT at the chunk position
+    # it failed at - otherwise the next edit would map chunk 2 onto it.
+    assert [edit[3] for edit in bot.edits] == [5305, 5307]
+    assert reply_index.get_many(-2001, 4305) == (5305, 5307, 5306)
+    outcomes = context.application.bot_data[CHANNEL_RUNTIME_KEY].snapshot().outcomes
+    assert outcomes["delivery:stale_chunks_retained"] == 1
+
+
+def test_edit_admitted_on_fresh_window_under_low_budget(monkeypatch, sample_db):
+    calls = []
+    enable_mock_llm(monkeypatch, calls, lambda _t, _l: "translated")
+    context = make_context(
+        sample_db,
+        config=BotConfig(owner_user_id=11, channel_llm_calls_per_minute=1),
+    )
+    # A dictionary exact-hit original: a tracked reply without spending budget.
+    original, original_message = channel_update(
+        text="Echo", text_html="Echo", message_id=4320
+    )
+    asyncio.run(channel_post_handler(original, context))
+    assert original_message.replies == [("声骸", None, 4320)]
+    assert calls == []
+
+    edit_update, _ = channel_update(
+        text=CN_TEXT, message_id=4320, edit_date=datetime.now(timezone.utc)
+    )
+    asyncio.run(channel_post_handler(edit_update, context))
+
+    # Capacity 1: required(1) + headroom(2) is unreachable, but a completely
+    # unused window must still admit one edit instead of yielding forever.
+    assert context.bot.edits == [("translated", "HTML", -2001, 5320)]
+    assert len(calls) == 1
+
+
+def test_channel_reply_index_edit_tokens_expire_with_ttl():
+    now = 500.0
+    index = ChannelReplyIndex(ttl_seconds=30.0, clock=lambda: now)
+    token = index.begin_edit(1, 1, update_id=10)
+    assert index.is_latest_edit(1, 1, token) is True
+
+    now = 531.0
+    assert index.is_latest_edit(1, 1, token) is False
+    # After expiry a fresh edit for the same post is admitted again.
+    new_token = index.begin_edit(1, 1, update_id=11)
+    assert index.is_latest_edit(1, 1, new_token) is True
+
+
+def test_channel_reply_index_save_offloaded_still_persists(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        index.remember_many(-2001, 4001, (5001, 5002))
+        # The write is offloaded on a running loop; flush it before asserting.
+        task = index._save_task
+        assert task is not None
+        await task
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001, 5002)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_drains_queued_snapshot(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        write_started = threading.Event()
+        release_write = threading.Event()
+        original_write = index._write_payload_recording
+
+        def blocking_write(payload):
+            write_started.set()
+            release_write.wait(timeout=5)
+            original_write(payload)
+
+        index._write_payload_recording = blocking_write
+        index.remember_many(-2001, 4001, (5001,))
+        while not write_started.is_set():
+            await asyncio.sleep(0.001)
+        # A second remember lands while the executor holds the first write:
+        # its payload sits queued in _pending_save_payload.
+        index.remember_many(-2001, 4002, (5002,))
+        release_write.set()
+
+        await index.aflush()
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
+        assert reloaded.get_many(-2001, 4002) == (5002,)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_survives_cancelled_save_task(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        index.remember_many(-2001, 4001, (5001,))
+        task = index._save_task
+        assert task is not None
+        # Shutdown tears the loop down before the offloaded write completes.
+        task.cancel()
+
+        await index.aflush()
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
+
+    asyncio.run(run())
+
+
+def test_channel_reply_index_aflush_outlives_cancelled_executor_write(tmp_path):
+    async def run() -> None:
+        path = tmp_path / "channel_replies.json"
+        index = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        write_started = threading.Event()
+        release_write = threading.Event()
+        original_write = index._write_payload_recording
+
+        def blocking_write(payload):
+            write_started.set()
+            release_write.wait(timeout=5)
+            original_write(payload)
+
+        index._write_payload_recording = blocking_write
+        index.remember_many(-2001, 4001, (5001,))
+        while not write_started.is_set():
+            await asyncio.sleep(0.001)
+        # A newer remember queues behind the blocked write; teardown then
+        # cancels the save task, but the executor thread keeps running.
+        index.remember_many(-2001, 4002, (5002,))
+        task = index._save_task
+        assert task is not None
+        task.cancel()
+
+        flusher = asyncio.create_task(index.aflush())
+        await asyncio.sleep(0.05)  # let aflush reach the in-flight wait
+        release_write.set()  # the stale snapshot completes first
+        await flusher  # then the final inline write must land after it
+
+        reloaded = ChannelReplyIndex(ttl_seconds=60.0, storage_path=path)
+        assert reloaded.get_many(-2001, 4001) == (5001,)
+        assert reloaded.get_many(-2001, 4002) == (5002,)
+
+    asyncio.run(run())
 
 
 def test_channel_edit_missing_continuation_chunk_replaces_and_drops_bad_id(

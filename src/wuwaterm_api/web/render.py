@@ -79,34 +79,40 @@ def esc(value: object) -> str:
 _STYLE = """
 :root {
   color-scheme: light dark;
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --ink: #1a1c1f;
-  --muted: #5d6570;
-  --line: #dfe3e8;
-  --accent: #2f6fdb;
-  --accent-ink: #ffffff;
-  --warn-bg: #fdf2f2;
-  --warn-line: #e6b3b3;
-  --warn-ink: #8a2020;
+  --bg: #f4f1ea;
+  --panel: #fffdf7;
+  --ink: #23201a;
+  --muted: #6e6858;
+  --line: #e0dacb;
+  --accent: #8a6d3b;
+  --accent-ink: #fffdf7;
+  --accent-soft: rgba(138, 109, 59, 0.18);
+  --warn-bg: #f9efec;
+  --warn-line: #d8b4ac;
+  --warn-ink: #7c2f26;
+  --radius: 3px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14161a;
-    --panel: #1d2026;
-    --ink: #e8eaed;
-    --muted: #9aa3af;
-    --line: #2e333c;
-    --accent: #5b93f0;
-    --accent-ink: #0d1117;
-    --warn-bg: #2a1c1c;
-    --warn-line: #6b3535;
-    --warn-ink: #f0b4b4;
+    --bg: #0f1113;
+    --panel: #16191d;
+    --ink: #e9e6dc;
+    --muted: #9a937f;
+    --line: #282d34;
+    --accent: #c9a86a;
+    --accent-ink: #17130a;
+    --accent-soft: rgba(201, 168, 106, 0.16);
+    --warn-bg: #221414;
+    --warn-line: #5c3636;
+    --warn-ink: #e0a49c;
   }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
+  /* The one piece of chrome with no DOM node: a brand bar across the top of
+     the viewport, in the gold the whole palette hangs on. */
+  border-top: 3px solid var(--accent);
   background: var(--bg);
   color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
@@ -116,29 +122,50 @@ body {
   line-height: 1.75;
   -webkit-text-size-adjust: 100%;
 }
-.wrap { max-width: 40rem; margin: 0 auto; padding: 1rem 1rem 3rem; }
-header { padding: 0.5rem 0 1rem; }
-h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.02em; }
-header p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.875rem; }
-nav { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+::selection { background: var(--accent-soft); }
+.wrap { max-width: 40rem; margin: 0 auto; padding: 0.5rem 1rem 3rem; }
+header { padding: 1.1rem 0 0.9rem; }
+h1 { font-size: 1.45rem; margin: 0; letter-spacing: 0.06em; font-weight: 700; }
+h1::before {
+  content: "◆";
+  color: var(--accent);
+  font-size: 0.8em;
+  margin-right: 0.55rem;
+  vertical-align: 0.08em;
+}
+header p {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+}
+nav {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.4rem;
+  border-bottom: 1px solid var(--line);
+}
 nav a {
-  flex: 1 1 0;
-  text-align: center;
-  padding: 0.7rem 0.5rem;
-  border: 1px solid var(--line);
-  border-radius: 0.6rem;
-  background: var(--panel);
+  padding: 0.5rem 0.15rem;
+  margin-bottom: -1px;
   color: var(--muted);
   text-decoration: none;
   font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  border-bottom: 2px solid transparent;
 }
 nav a[aria-current="page"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
-form { margin: 0 0 1rem; }
-label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.4rem; }
+form { margin: 0 0 1.25rem; }
+label {
+  display: block;
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 0.45rem;
+}
 input[type="text"], textarea {
   width: 100%;
   font: inherit;
@@ -146,30 +173,72 @@ input[type="text"], textarea {
   color: var(--ink);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 0.6rem;
+  border-radius: var(--radius);
   padding: 0.7rem 0.8rem;
 }
+input[type="text"]:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 textarea { min-height: 7rem; resize: vertical; line-height: 1.75; }
+input[type="text"]::placeholder, textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.75;
+}
+input[type="text"], textarea { caret-color: var(--accent); }
 button {
-  margin-top: 0.75rem;
+  margin-top: 0.85rem;
   width: 100%;
   /* 44px is the smallest reliably tappable target on a phone. */
   min-height: 2.75rem;
   font: inherit;
-  font-size: 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.35em;
+  text-indent: 0.35em;
   color: var(--accent-ink);
   background: var(--accent);
   border: 0;
-  border-radius: 0.6rem;
+  border-radius: var(--radius);
+}
+button:hover { filter: brightness(1.07); }
+button:active { filter: brightness(0.94); }
+/* The page has no scripts, so state changes are all CSS-driven; keep them
+   instant for users who ask the OS for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  input[type="text"], textarea {
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  button { transition: filter 0.15s ease; }
+  nav a { transition: color 0.15s ease, border-bottom-color 0.15s ease; }
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 0.6rem;
-  padding: 0.9rem 1rem;
-  margin-bottom: 0.75rem;
+  /* The result slab wears the accent on its top edge: provenance is this
+     product's promise, so the surface that carries it gets the brand mark. */
+  border-top: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin-bottom: 0.9rem;
 }
-.card h2 { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.5rem; font-weight: 600; }
+.card h2 {
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin: 0 0 0.55rem;
+  font-weight: 600;
+}
+.card h2::before {
+  content: "—";
+  margin-right: 0.45rem;
+  opacity: 0.75;
+}
 /* Chinese has no inter-word spaces, so the default break-on-space rule leaves a
    long run of Han characters overflowing its container on a narrow screen.
    anywhere lets the line break between glyphs, which is how Chinese wraps. */
@@ -177,23 +246,40 @@ button {
    and the browser's default collapsing turned dialogue, paragraphs and chunked
    results into one continuous block - discarding structure the translation had
    actually preserved. */
-.result { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.term { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; padding: 0.5rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-.term:first-of-type { border-top: 0; }
+/* The translation itself is the hero content of the page; it sets one step
+   above body size on purpose. */
+.result { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 1.04rem; }
+.term { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; padding: 0.65rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.term:first-of-type { border-top: 0; padding-top: 0.1rem; }
 .term .zh { font-weight: 600; }
 .term .en { color: var(--accent); overflow-wrap: anywhere; }
-.term .meta { color: var(--muted); font-size: 0.85rem; width: 100%; }
+.term .meta { color: var(--muted); font-size: 0.78rem; width: 100%; letter-spacing: 0.03em; opacity: 0.85; }
 .empty { color: var(--muted); margin: 0; }
 .error {
   background: var(--warn-bg);
   border: 1px solid var(--warn-line);
   color: var(--warn-ink);
-  border-radius: 0.6rem;
+  border-radius: var(--radius);
   padding: 0.8rem 1rem;
   margin-bottom: 0.75rem;
   overflow-wrap: anywhere;
 }
-footer { margin-top: 1.5rem; color: var(--muted); font-size: 0.8rem; }
+footer {
+  margin-top: 2.25rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+footer::before {
+  content: "◆";
+  color: var(--accent);
+  font-size: 0.6rem;
+  display: block;
+  text-align: center;
+  margin-bottom: 0.5rem;
+}
 """
 
 _TAB_LOOKUP = "lookup"

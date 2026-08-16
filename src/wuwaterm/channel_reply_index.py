@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass
 import json
 import logging
@@ -70,7 +71,11 @@ class ChannelReplyIndex:
         self._entries: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
         self._observed_without_reply: dict[tuple[int, int], float] = {}
         self._in_flight: dict[tuple[int, int], asyncio.Event] = {}
-        self._latest_edit_tokens: dict[tuple[int, int], int] = {}
+        # token -> (value, expires_at): tokens only matter while an edit is
+        # in flight, so they share the entry TTL and are pruned on their own
+        # schedule - before that, edits skipped before any remember (content
+        # gates) accumulated tokens forever.
+        self._latest_edit_tokens: dict[tuple[int, int], tuple[int, float]] = {}
         self._edit_delivery_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self._next_edit_token = 0
         self._load_failures = 0
@@ -78,6 +83,16 @@ class ChannelReplyIndex:
         self._save_failures = 0
         self._last_save_ok: bool | None = None
         self._last_save_durable: bool | None = None
+        self._pending_save_payload: dict | None = None
+        self._save_task: asyncio.Task | None = None
+        # Own single worker keeps writes serialized and gives aflush() a real
+        # concurrent.futures.Future to wait on: cancelling the asyncio task
+        # cannot drop a running write silently, and a job cancelled before it
+        # started raises immediately instead of hanging the shutdown flush.
+        self._write_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="channel-reply-index-save"
+        )
+        self._inflight_write: concurrent.futures.Future | None = None
         self._load()
 
     def remember(
@@ -231,7 +246,10 @@ class ChannelReplyIndex:
         self, chat_id: int, message_id: int, update_id: int | None = None
     ) -> int:
         key = (chat_id, message_id)
-        latest = self._latest_edit_tokens.get(key)
+        now = self._clock()
+        self._prune_edit_tokens(now)
+        latest_entry = self._latest_edit_tokens.get(key)
+        latest = latest_entry[0] if latest_entry is not None else None
         if update_id is None:
             floor = latest if latest is not None else 0
             self._next_edit_token = max(self._next_edit_token, floor) + 1
@@ -240,11 +258,36 @@ class ChannelReplyIndex:
             token = update_id
             self._next_edit_token = max(self._next_edit_token, token)
         if latest is None or token > latest:
-            self._latest_edit_tokens[key] = token
+            self._latest_edit_tokens[key] = (token, now + self.ttl_seconds)
         return token
 
     def is_latest_edit(self, chat_id: int, message_id: int, token: int) -> bool:
-        return self._latest_edit_tokens.get((chat_id, message_id)) == token
+        entry = self._latest_edit_tokens.get((chat_id, message_id))
+        if entry is None:
+            return False
+        latest, expires_at = entry
+        if self._clock() >= expires_at:
+            return False
+        return latest == token
+
+    def _prune_edit_tokens(self, now: float) -> None:
+        self._latest_edit_tokens = {
+            key: value
+            for key, value in self._latest_edit_tokens.items()
+            if value[1] > now
+        }
+        overflow = len(self._latest_edit_tokens) - self.max_entries
+        if overflow > 0:
+            oldest = sorted(
+                self._latest_edit_tokens,
+                key=lambda key: (
+                    self._latest_edit_tokens[key][1],
+                    key[0],
+                    key[1],
+                ),
+            )
+            for key in oldest[:overflow]:
+                self._latest_edit_tokens.pop(key, None)
 
     def edit_delivery_lock(self, chat_id: int, message_id: int) -> asyncio.Lock:
         return self._edit_delivery_locks.setdefault(
@@ -322,6 +365,42 @@ class ChannelReplyIndex:
     def last_save_durable(self) -> bool | None:
         return self._last_save_durable
 
+    async def aflush(self) -> None:
+        """Drain any queued offloaded save, then persist the current snapshot.
+
+        Wired to the application shutdown hook: without it, a remember close
+        to process exit can leave its payload queued in the background save
+        task while the loop tears down, losing the newest reply ids (duplicate
+        translations after restart). Cancellation of the in-flight task is
+        deliberately swallowed so the final inline write is best-effort
+        guaranteed even during loop teardown.
+        """
+        if self.storage_path is None:
+            return
+        task = self._save_task
+        if task is not None and not task.done():
+            try:
+                await task
+            except (asyncio.CancelledError, OSError):
+                pass
+        # A cancelled task does not stop a write already running in the
+        # executor: wait for that future before the inline final write, or
+        # the older snapshot can replace the newer one on disk afterwards.
+        # A job cancelled before it started raises CancelledError from
+        # result() instead of hanging here.
+        in_flight = self._inflight_write
+        if in_flight is not None and not in_flight.done():
+
+            def _wait(future: concurrent.futures.Future) -> None:
+                try:
+                    future.result()
+                except concurrent.futures.CancelledError:
+                    pass
+
+            await asyncio.to_thread(_wait, in_flight)
+        self._pending_save_payload = None
+        self._write_payload_recording(self._build_payload())
+
     def _record_load_failure(
         self, message: str = "channel reply index unreadable, starting empty"
     ) -> None:
@@ -366,7 +445,50 @@ class ChannelReplyIndex:
         if self.storage_path is None:
             return
         try:
-            self._save()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Sync callers (construction, CLI, tests) keep the original
+            # inline semantics: the write has completed when the call returns.
+            self._write_payload_recording(self._build_payload())
+            return
+        # On the bot's event loop the write (tmp file + fsync + replace +
+        # directory fsync) must not run inline: remember_many fires once per
+        # delivered chunk, so a multi-chunk post would otherwise stall
+        # polling, other chats and flood sleeps once per chunk. Snapshot the
+        # payload on the loop thread and offload the write, single-flight; a
+        # burst coalesces into the latest snapshot instead of queueing one
+        # fsync pair per chunk. A save that lands late still holds every row,
+        # because the snapshot is taken at the last call before it starts.
+        self._pending_save_payload = self._build_payload()
+        if self._save_task is None or self._save_task.done():
+            self._save_task = loop.create_task(self._save_offloaded())
+
+    async def _save_offloaded(self) -> None:
+        while self._pending_save_payload is not None:
+            payload = self._pending_save_payload
+            self._pending_save_payload = None
+            self._inflight_write = self._write_executor.submit(
+                self._write_payload_recording, payload
+            )
+            try:
+                await asyncio.wrap_future(self._inflight_write)
+            except Exception:
+                # The sync path deliberately surfaces only OSError; in a
+                # background task anything unexpected would otherwise die as
+                # an unretrieved task exception. asyncio.CancelledError is
+                # BaseException and propagates to cancel the task.
+                LOGGER.exception("channel reply index save failed unexpectedly")
+
+    def _write_payload_recording(self, payload: dict) -> None:
+        """Write one snapshot, updating the durability counters.
+
+        May run on an executor thread; the counters are plain int/bool/bool
+        assignments, which stay consistent for the /status reader under the
+        GIL. Everything it touches besides the counters is immutable
+        (``storage_path``) or passed in (``payload``).
+        """
+        try:
+            self._write_payload(payload)
         except ChannelReplyIndexDurabilityError:
             self._save_failures += 1
             self._last_save_ok = True
@@ -381,9 +503,7 @@ class ChannelReplyIndex:
             self._last_save_ok = True
             self._last_save_durable = True
 
-    def _save(self) -> None:
-        assert self.storage_path is not None
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+    def _build_payload(self) -> dict:
         rows = []
         for (chat_id, message_id), (expires_at, reply_ids) in sorted(
             self._entries.items()
@@ -396,7 +516,11 @@ class ChannelReplyIndex:
                     "reply_message_ids": list(reply_ids),
                 }
             )
-        payload = {"version": CHANNEL_REPLY_INDEX_VERSION, "entries": rows}
+        return {"version": CHANNEL_REPLY_INDEX_VERSION, "entries": rows}
+
+    def _write_payload(self, payload: dict) -> None:
+        assert self.storage_path is not None
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(
             prefix=f".{self.storage_path.name}.", dir=self.storage_path.parent
         )
