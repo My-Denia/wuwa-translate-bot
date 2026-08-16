@@ -14,10 +14,13 @@ UV_VERSION="0.11.3"
 
 # Prefer a user-site install so no root privileges are needed; ~/.local/bin is
 # added to PATH by the login shell's ~/.profile, so uv is available to future
-# interactive sessions too. Fall back to --break-system-packages for images
-# whose system Python is externally managed (PEP 668).
+# interactive sessions too. The fallback keeps --user (so it stays writable
+# without root) and only adds --break-system-packages for images whose system
+# Python is externally managed (PEP 668): --break-system-packages permits
+# modifying an externally managed install but does not by itself select the
+# user scope, so both flags are needed together.
 if ! python3 -m pip install --user --quiet "uv==${UV_VERSION}"; then
-  python3 -m pip install --break-system-packages --quiet "uv==${UV_VERSION}"
+  python3 -m pip install --user --break-system-packages --quiet "uv==${UV_VERSION}"
 fi
 export PATH="${HOME}/.local/bin:${PATH}"
 
