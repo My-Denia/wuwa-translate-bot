@@ -36,6 +36,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Allow bot-authored pull requests (for example Cursor cloud agents)
+          # to be reviewed; without this the action aborts with "Workflow
+          # initiated by non-human actor" on any PR opened or synchronized by a
+          # bot. Use '*' to allow all bots.
+          allowed_bots: '*'
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
