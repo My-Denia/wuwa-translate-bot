@@ -1,15 +1,17 @@
 """Environment-driven settings for the HTTP adapter.
 
-Every knob is read once at startup and validated with an explicit range, so a
-typo fails the process instead of silently disabling a limit. Invalid values
-are reported without echoing the raw value (it may contain a secret).
+Every knob is read once at startup. Serve-only values are parsed leniently
+here because every operator subcommand constructs these settings; the serve
+path validates their retained raw forms strictly before producing any side
+effect. Invalid values are reported without echoing the raw value (it may
+contain a secret).
 """
 
 from __future__ import annotations
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -100,7 +102,7 @@ MAX_PORT = 65535
 def validate_port(value: int) -> int:
     """Return ``value`` if it is a usable TCP port, else raise ApiConfigError.
 
-    ``WUWATERM_API_PORT`` is range-checked by ``_env_int``; the ``--port``
+    ``WUWATERM_API_PORT`` is range-checked on the serve path; the ``--port``
     override used to skip that check entirely and go straight to uvicorn, so
     ``--port 999999`` and ``--port -1`` reached the socket layer and escaped as
     a raw error instead of a config error, and ``--port 0`` was silently
@@ -190,7 +192,7 @@ def parse_bool(raw: str, default: bool) -> bool:
 
 
 def parse_int(raw: str, default: int, *, minimum: int, maximum: int) -> int:
-    """Lenient integer parsing for WEB-ONLY settings read on every subcommand.
+    """Lenient integer parsing for serve-only settings read on every command.
 
     Same contract and same reason as ``parse_bool``: unreadable or out of range
     becomes the default rather than an exception, because ``from_env()`` runs
@@ -201,6 +203,17 @@ def parse_int(raw: str, default: int, *, minimum: int, maximum: int) -> int:
     """
     try:
         value = int((raw or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def parse_float(
+    raw: str, default: float, *, minimum: float, maximum: float
+) -> float:
+    """Lenient float parsing with strict validation deferred to ``serve``."""
+    try:
+        value = float((raw or "").strip())
     except (TypeError, ValueError):
         return default
     return value if minimum <= value <= maximum else default
@@ -244,30 +257,30 @@ def validate_web_enabled(raw: str) -> bool:
     )
 
 
-def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
+def _validate_int(name: str, raw: str, *, minimum: int, maximum: int) -> None:
+    candidate = (raw or "").strip()
+    if not candidate:
+        return
     try:
-        value = int(raw.strip())
-    except ValueError as exc:
-        raise ApiConfigError(f"{name} must be an integer") from exc
+        value = int(candidate)
+    except ValueError:
+        raise ApiConfigError(f"{name} must be an integer") from None
     if not minimum <= value <= maximum:
         raise ApiConfigError(f"{name} must be between {minimum} and {maximum}")
-    return value
 
 
-def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
+def _validate_float(
+    name: str, raw: str, *, minimum: float, maximum: float
+) -> None:
+    candidate = (raw or "").strip()
+    if not candidate:
+        return
     try:
-        value = float(raw.strip())
-    except ValueError as exc:
-        raise ApiConfigError(f"{name} must be a number") from exc
+        value = float(candidate)
+    except ValueError:
+        raise ApiConfigError(f"{name} must be a number") from None
     if not minimum <= value <= maximum:
         raise ApiConfigError(f"{name} must be between {minimum} and {maximum}")
-    return value
 
 
 def _env_path(name: str, default: str) -> Path:
@@ -275,6 +288,20 @@ def _env_path(name: str, default: str) -> Path:
     if raw is None or not raw.strip():
         return Path(default)
     return Path(raw.strip())
+
+
+@dataclass(frozen=True)
+class _ServeNumericRaw:
+    """Raw numeric environment forms retained for strict serve validation."""
+
+    port: str = ""
+    llm_timeout_seconds: str = ""
+    llm_max_concurrency: str = ""
+    llm_calls_per_minute: str = ""
+    rate_limit_per_minute: str = ""
+    max_body_bytes: str = ""
+    request_timeout_seconds: str = ""
+    auth_max_concurrency: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +321,13 @@ class ApiSettings:
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
     auth_max_concurrency: int = DEFAULT_AUTH_MAX_CONCURRENCY
+    # Every operator command constructs ApiSettings, so these serve-only raw
+    # values cannot be validated until `_serve`. Keep them immutable and out of
+    # repr/equality: raw environment input must not leak or change value
+    # semantics merely because validation was deferred.
+    _serve_numeric_raw: _ServeNumericRaw = field(
+        default_factory=_ServeNumericRaw, repr=False, compare=False
+    )
     log_level: str = DEFAULT_LOG_LEVEL
     web_enabled: bool = DEFAULT_WEB_ENABLED
     # The raw string as the operator wrote it, kept so the serve path can
@@ -322,6 +356,30 @@ class ApiSettings:
     def from_env(cls) -> "ApiSettings":
         state_dir = _env_path("WUWATERM_API_STATE_DIR", DEFAULT_STATE_DIR)
         device_db = os.getenv("WUWATERM_API_DEVICE_DB_PATH")
+        numeric_raw = _ServeNumericRaw(
+            port=(os.getenv("WUWATERM_API_PORT") or "").strip(),
+            llm_timeout_seconds=(
+                os.getenv("WUWATERM_API_LLM_TIMEOUT_SECONDS") or ""
+            ).strip(),
+            llm_max_concurrency=(
+                os.getenv("WUWATERM_API_LLM_MAX_CONCURRENCY") or ""
+            ).strip(),
+            llm_calls_per_minute=(
+                os.getenv("WUWATERM_API_LLM_CALLS_PER_MINUTE") or ""
+            ).strip(),
+            rate_limit_per_minute=(
+                os.getenv("WUWATERM_API_RATE_LIMIT_PER_MINUTE") or ""
+            ).strip(),
+            max_body_bytes=(
+                os.getenv("WUWATERM_API_MAX_BODY_BYTES") or ""
+            ).strip(),
+            request_timeout_seconds=(
+                os.getenv("WUWATERM_API_REQUEST_TIMEOUT_SECONDS") or ""
+            ).strip(),
+            auth_max_concurrency=(
+                os.getenv("WUWATERM_API_AUTH_MAX_CONCURRENCY") or ""
+            ).strip(),
+        )
         return cls(
             db_path=_env_path("WUWATERM_DB_PATH", DEFAULT_DB_PATH),
             device_db_path=(
@@ -338,51 +396,52 @@ class ApiSettings:
             # actually bound; see validate_loopback_bind and cli._serve.
             bind=(os.getenv("WUWATERM_API_BIND") or DEFAULT_BIND).strip()
             or DEFAULT_BIND,
-            port=_env_int(
-                "WUWATERM_API_PORT", DEFAULT_PORT, minimum=MIN_PORT, maximum=MAX_PORT
+            port=parse_int(
+                numeric_raw.port, DEFAULT_PORT, minimum=MIN_PORT, maximum=MAX_PORT
             ),
-            llm_timeout_seconds=_env_float(
-                "WUWATERM_API_LLM_TIMEOUT_SECONDS",
+            llm_timeout_seconds=parse_float(
+                numeric_raw.llm_timeout_seconds,
                 DEFAULT_LLM_TIMEOUT_SECONDS,
                 minimum=0.1,
                 maximum=300.0,
             ),
-            llm_max_concurrency=_env_int(
-                "WUWATERM_API_LLM_MAX_CONCURRENCY",
+            llm_max_concurrency=parse_int(
+                numeric_raw.llm_max_concurrency,
                 DEFAULT_LLM_MAX_CONCURRENCY,
                 minimum=1,
                 maximum=64,
             ),
-            llm_calls_per_minute=_env_int(
-                "WUWATERM_API_LLM_CALLS_PER_MINUTE",
+            llm_calls_per_minute=parse_int(
+                numeric_raw.llm_calls_per_minute,
                 DEFAULT_LLM_CALLS_PER_MINUTE,
                 minimum=1,
                 maximum=10000,
             ),
-            rate_limit_per_minute=_env_int(
-                "WUWATERM_API_RATE_LIMIT_PER_MINUTE",
+            rate_limit_per_minute=parse_int(
+                numeric_raw.rate_limit_per_minute,
                 DEFAULT_RATE_LIMIT_PER_MINUTE,
                 minimum=1,
                 maximum=10000,
             ),
-            max_body_bytes=_env_int(
-                "WUWATERM_API_MAX_BODY_BYTES",
+            max_body_bytes=parse_int(
+                numeric_raw.max_body_bytes,
                 DEFAULT_MAX_BODY_BYTES,
                 minimum=64,
                 maximum=1024 * 1024,
             ),
-            request_timeout_seconds=_env_float(
-                "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
+            request_timeout_seconds=parse_float(
+                numeric_raw.request_timeout_seconds,
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 minimum=1.0,
                 maximum=600.0,
             ),
-            auth_max_concurrency=_env_int(
-                "WUWATERM_API_AUTH_MAX_CONCURRENCY",
+            auth_max_concurrency=parse_int(
+                numeric_raw.auth_max_concurrency,
                 DEFAULT_AUTH_MAX_CONCURRENCY,
                 minimum=1,
                 maximum=64,
             ),
+            _serve_numeric_raw=numeric_raw,
             # Carried raw for the same reason as `bind`, and validated in the
             # same place: from_env() runs for EVERY subcommand, so a typo in a
             # serve-time knob must not be able to block `device revoke`. See
@@ -429,3 +488,27 @@ class ApiSettings:
                 os.getenv("WUWATERM_API_WEB_MAX_SESSIONS") or ""
             ).strip(),
         )
+
+
+def validate_serve_numeric_settings(settings: ApiSettings) -> None:
+    """Strictly validate raw numeric settings on the only path that serves."""
+    raw = settings._serve_numeric_raw
+    for name, value, minimum, maximum in (
+        ("WUWATERM_API_PORT", raw.port, MIN_PORT, MAX_PORT),
+        ("WUWATERM_API_LLM_MAX_CONCURRENCY", raw.llm_max_concurrency, 1, 64),
+        ("WUWATERM_API_LLM_CALLS_PER_MINUTE", raw.llm_calls_per_minute, 1, 10000),
+        ("WUWATERM_API_RATE_LIMIT_PER_MINUTE", raw.rate_limit_per_minute, 1, 10000),
+        ("WUWATERM_API_MAX_BODY_BYTES", raw.max_body_bytes, 64, 1024 * 1024),
+        ("WUWATERM_API_AUTH_MAX_CONCURRENCY", raw.auth_max_concurrency, 1, 64),
+    ):
+        _validate_int(name, value, minimum=minimum, maximum=maximum)
+    for name, value, minimum, maximum in (
+        ("WUWATERM_API_LLM_TIMEOUT_SECONDS", raw.llm_timeout_seconds, 0.1, 300.0),
+        (
+            "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
+            raw.request_timeout_seconds,
+            1.0,
+            600.0,
+        ),
+    ):
+        _validate_float(name, value, minimum=minimum, maximum=maximum)

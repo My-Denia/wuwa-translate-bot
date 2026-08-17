@@ -30,6 +30,7 @@ from .settings import (
     validate_log_level,
     validate_loopback_bind,
     validate_port,
+    validate_serve_numeric_settings,
     validate_web_enabled,
     validate_web_limits,
 )
@@ -111,6 +112,11 @@ def _serve(args: argparse.Namespace) -> int:
     from .app import create_app
 
     settings = ApiSettings.from_env()
+    # These serve-only values are parsed leniently by from_env because every
+    # operator subcommand constructs the same settings object. Restore strict
+    # validation HERE, before even logging is configured, so a typo refuses to
+    # serve but can never block `device revoke`.
+    validate_serve_numeric_settings(settings)
     # First, so that everything below this line — including the bind warning —
     # has somewhere to go. Validated on this path for the same reason the bind
     # is: a mistyped level must not be able to block `device revoke`.
@@ -129,8 +135,8 @@ def _serve(args: argparse.Namespace) -> int:
     # built or bound, so the override cannot reopen the exposure the setting
     # closes. ApiConfigError propagates to main() -> exit 2.
     host = _resolve_bind(args, settings)
-    # Same class for the port: the environment variable is range-checked in
-    # settings, so the override is too. `args.port or settings.port` used to
+    # Same class for the port: the environment variable is range-checked above,
+    # so the override is too. `args.port or settings.port` used to
     # send 999999 and -1 straight to uvicorn and to swallow an explicit 0.
     port = settings.port if args.port is None else validate_port(args.port)
     store = DeviceStore(
