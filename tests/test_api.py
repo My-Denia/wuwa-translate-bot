@@ -764,11 +764,172 @@ def test_openapi_snapshot_documents_the_versioned_surface():
     assert check_tokens(raw) == []
 
 
-def test_settings_reject_out_of_range_values(monkeypatch):
-    monkeypatch.setenv("WUWATERM_API_PORT", "70000")
+API_NUMERIC_SETTING_CASES = (
+    (
+        "WUWATERM_API_PORT",
+        "port",
+        8788,
+        ("1", 1),
+        ("65535", 65535),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "65536"),
+    ),
+    (
+        "WUWATERM_API_LLM_TIMEOUT_SECONDS",
+        "llm_timeout_seconds",
+        45.0,
+        ("0.1", 0.1),
+        ("300", 300.0),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "301", "nan", "inf"),
+    ),
+    (
+        "WUWATERM_API_LLM_MAX_CONCURRENCY",
+        "llm_max_concurrency",
+        2,
+        ("1", 1),
+        ("64", 64),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "65"),
+    ),
+    (
+        "WUWATERM_API_LLM_CALLS_PER_MINUTE",
+        "llm_calls_per_minute",
+        30,
+        ("1", 1),
+        ("10000", 10000),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "10001"),
+    ),
+    (
+        "WUWATERM_API_RATE_LIMIT_PER_MINUTE",
+        "rate_limit_per_minute",
+        30,
+        ("1", 1),
+        ("10000", 10000),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "10001"),
+    ),
+    (
+        "WUWATERM_API_MAX_BODY_BYTES",
+        "max_body_bytes",
+        32 * 1024,
+        ("64", 64),
+        (str(1024 * 1024), 1024 * 1024),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "63", str(1024 * 1024 + 1)),
+    ),
+    (
+        "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
+        "request_timeout_seconds",
+        90.0,
+        ("1", 1.0),
+        ("600", 600.0),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "601", "nan", "inf"),
+    ),
+    (
+        "WUWATERM_API_AUTH_MAX_CONCURRENCY",
+        "auth_max_concurrency",
+        2,
+        ("1", 1),
+        ("64", 64),
+        ("SENSITIVE_RAW_DO_NOT_ECHO", "0", "65"),
+    ),
+)
 
-    with pytest.raises(ApiConfigError):
-        ApiSettings.from_env()
+
+@pytest.mark.parametrize(
+    ("env_name", "attribute", "default", "minimum", "maximum", "invalid_values"),
+    API_NUMERIC_SETTING_CASES,
+)
+def test_api_numeric_settings_are_lenient_until_serve(
+    monkeypatch, env_name, attribute, default, minimum, maximum, invalid_values
+):
+    monkeypatch.delenv(env_name, raising=False)
+    assert getattr(ApiSettings.from_env(), attribute) == default
+
+    for raw in invalid_values:
+        monkeypatch.setenv(env_name, raw)
+        settings = ApiSettings.from_env()
+        assert getattr(settings, attribute) == default
+        assert getattr(settings._serve_numeric_raw, attribute) == raw
+
+    for raw, expected in (minimum, maximum):
+        monkeypatch.setenv(env_name, raw)
+        assert getattr(ApiSettings.from_env(), attribute) == expected
+
+
+def test_api_numeric_raw_values_are_immutable_hidden_and_nonsemantic(monkeypatch):
+    from dataclasses import FrozenInstanceError
+
+    monkeypatch.delenv("WUWATERM_API_PORT", raising=False)
+    baseline = ApiSettings.from_env()
+    monkeypatch.setenv("WUWATERM_API_PORT", "SENSITIVE_RAW_DO_NOT_ECHO")
+    settings = ApiSettings.from_env()
+
+    assert settings == baseline
+    assert "SENSITIVE_RAW_DO_NOT_ECHO" not in repr(settings)
+    with pytest.raises(FrozenInstanceError):
+        settings._serve_numeric_raw.port = "changed"
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attribute", "default", "minimum", "maximum", "invalid_values"),
+    API_NUMERIC_SETTING_CASES,
+)
+def test_api_numeric_errors_do_not_block_real_device_revocation(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    env_name,
+    attribute,
+    default,
+    minimum,
+    maximum,
+    invalid_values,
+):
+    import wuwaterm_api.cli as cli
+
+    store_path = tmp_path / env_name / "devices.db"
+    store = DeviceStore(store_path, guard_legacy_default=False)
+    device, _ = issue_device(store, "owner desktop")
+    monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(store_path))
+    monkeypatch.setenv(env_name, invalid_values[0])
+
+    assert cli.main(["device", "revoke", "--device-id", device.device_id]) == 0
+    capsys.readouterr()
+    persisted = {
+        item.device_id: item
+        for item in DeviceStore(store_path, guard_legacy_default=False).list_devices()
+    }
+    assert persisted[device.device_id].revoked
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attribute", "default", "minimum", "maximum", "invalid_values"),
+    API_NUMERIC_SETTING_CASES,
+)
+def test_api_numeric_errors_fail_serve_before_any_side_effect(
+    monkeypatch,
+    capsys,
+    env_name,
+    attribute,
+    default,
+    minimum,
+    maximum,
+    invalid_values,
+):
+    import wuwaterm_api.cli as cli
+
+    for raw in invalid_values:
+        calls = []
+        monkeypatch.setenv(env_name, raw)
+        monkeypatch.setattr(cli, "configure_logging", lambda *a, **k: calls.append("log"))
+        monkeypatch.setattr(cli, "DeviceStore", lambda *a, **k: calls.append("store"))
+        monkeypatch.setattr(
+            "wuwaterm_api.app.create_app", lambda *a, **k: calls.append("app")
+        )
+        monkeypatch.setattr("uvicorn.run", lambda *a, **k: calls.append("uvicorn"))
+
+        assert cli.main(["serve"]) == 2
+        captured = capsys.readouterr()
+        assert calls == []
+        if raw == "SENSITIVE_RAW_DO_NOT_ECHO":
+            assert raw not in captured.err
 
 
 def test_settings_defaults_bind_to_loopback(monkeypatch):

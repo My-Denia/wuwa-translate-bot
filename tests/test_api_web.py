@@ -100,23 +100,6 @@ def mounted_web_app(app):
     return None
 
 
-# Environment variables that ALREADY block `device revoke` on origin/main when
-# they carry a bad value, because from_env range-checks them strictly. They are
-# not introduced by this change and are tracked separately; listing them here
-# is what lets the full-set assertion below cover everything else and fail on
-# any NEW addition to the set.
-PRE_EXISTING_STRICT_ENV_VARS = frozenset({
-    "WUWATERM_API_PORT",
-    "WUWATERM_API_LLM_TIMEOUT_SECONDS",
-    "WUWATERM_API_LLM_MAX_CONCURRENCY",
-    "WUWATERM_API_LLM_CALLS_PER_MINUTE",
-    "WUWATERM_API_RATE_LIMIT_PER_MINUTE",
-    "WUWATERM_API_MAX_BODY_BYTES",
-    "WUWATERM_API_REQUEST_TIMEOUT_SECONDS",
-    "WUWATERM_API_AUTH_MAX_CONCURRENCY",
-})
-
-
 def _env_names_read_by_settings() -> set[str]:
     """Every environment variable from_env actually reads, DERIVED not listed.
 
@@ -148,7 +131,7 @@ def _env_names_read_by_settings() -> set[str]:
     return names
 
 
-def test_no_setting_this_change_added_can_block_device_revocation(
+def test_no_setting_read_by_from_env_can_block_device_revocation(
     tmp_path, sample_db, monkeypatch, capsys
 ):
     """FULL-SET ASSERTION over the environment dimension, derived not listed.
@@ -161,19 +144,14 @@ def test_no_setting_this_change_added_can_block_device_revocation(
 
     So this enumerates the variables the settings module actually reads, drives
     the REAL CLI with a bad value for each, and requires revocation to succeed.
-    Variables already strict on origin/main are exempted by name, and the
-    exemption set is itself asserted, so a NEW strict variable fails here
-    rather than joining the exemption quietly.
+    No serve-only variable is exempt: adding a new strict reader fails here
+    rather than quietly making credential revocation configuration-dependent.
     """
     from wuwaterm_api.cli import main as cli_main
 
     discovered = _env_names_read_by_settings()
     assert discovered, "the derivation found nothing - it has broken"
-    assert PRE_EXISTING_STRICT_ENV_VARS <= discovered, (
-        "the exemption list names variables the module no longer reads: "
-        f"{PRE_EXISTING_STRICT_ENV_VARS - discovered}"
-    )
-    must_be_safe = sorted(discovered - PRE_EXISTING_STRICT_ENV_VARS)
+    must_be_safe = sorted(discovered)
 
     # The property is that reading the environment does not RAISE - that is the
     # mechanism by which an unrelated setting blocks revocation. Asserted on
@@ -202,8 +180,8 @@ def test_no_setting_this_change_added_can_block_device_revocation(
     device = store.issue("compromised", secret=DEVICE_SECRET)
     monkeypatch.setenv("WUWATERM_API_DEVICE_DB_PATH", str(store_path))
     monkeypatch.setenv("WUWATERM_DB_PATH", str(sample_db))
-    monkeypatch.setenv("WUWATERM_API_WEB_SESSION_TTL_SECONDS", "not-a-number")
-    monkeypatch.setenv("WUWATERM_API_WEB_MAX_SESSIONS", "-999")
+    monkeypatch.setenv("WUWATERM_API_PORT", "not-an-integer")
+    monkeypatch.setenv("WUWATERM_API_LLM_TIMEOUT_SECONDS", "not-a-number")
     assert cli_main(["device", "revoke", "--device-id", device.device_id]) == 0
     capsys.readouterr()
 

@@ -80,6 +80,11 @@ does not distribute generated game data or generated SQLite databases.
 
 ### HTTP API / Web Presentation Layer
 
+- Malformed serve-only numeric settings no longer block operator credential
+  commands such as `device revoke`: `from_env()` now retains their raw forms
+  while falling back safely, and `serve` validates all eight values strictly
+  before logging, credential-store initialization, app construction or socket
+  serving.
 - `TERM_QUERY_MAX_LENGTH` is defined once in `wuwaterm_api` and imported by
   both the JSON routes and the web views (previously 200 vs a local 120).
 - The web surface envelope now matches the mount path exactly or its
