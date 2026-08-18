@@ -46,13 +46,6 @@ NAMED_CONTROL_TYPES = (QLineEdit, QPlainTextEdit, QDoubleSpinBox, QComboBox)
 # (对话框, 控件属性名) -> 为什么这个控件目前允许没有关联标签。
 # 豁免不是「算了」,是一条写下了理由、并且有人能看见的决定。
 EXEMPTIONS: dict[tuple[str, str], str] = {
-    ("first-run", "token_edit"): (
-        "既有缺口,不是改版弄丢的:main 的 first_run_dialog 同样只是把 QLabel "
-        "摆在输入框旁边,从未 setBuddy。已立项 #69,修好后删掉这一条。"
-    ),
-    ("token", "token_edit"): (
-        "同上,main 的 token_dialog 也只是 addWidget(QLabel(...))。已立项 #69。"
-    ),
 }
 
 

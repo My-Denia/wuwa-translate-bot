@@ -50,6 +50,7 @@ class FirstRunDialog(QDialog):
 
         self._field = TokenField(self)
         self.token_edit = self._field.edit
+        field_label.setBuddy(self.token_edit)
         self.token_edit.textChanged.connect(self._on_token_changed)
 
         # A credential store that is momentarily unavailable used to end the

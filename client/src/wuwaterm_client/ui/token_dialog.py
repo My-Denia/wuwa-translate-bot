@@ -79,6 +79,7 @@ class TokenDialog(QDialog):
 
         self._field = TokenField(self)
         self.token_edit = self._field.edit
+        field_label.setBuddy(self.token_edit)
         self.token_edit.textChanged.connect(self._on_token_changed)
 
         # Storing the token is the caller's job and can fail in a way the
