@@ -9,11 +9,12 @@ which of those each of the fifteen codes is; this file only owns the widgets
 those surfaces are drawn on. A code can therefore never be handled here in a
 way that contradicts how the term-lookup area handles the same code.
 
-The second is that the request id is rendered by ONE widget in ONE place,
-whether the request succeeded, failed, or produced no id at all. It is the
-only handle the owner has when asking an operator what happened on the other
-side, and a row that appears for one outcome and not for another is a row
-nobody learns to look at. With no id there is a placeholder, never a gap.
+The second is that the request id is rendered by ONE widget in ONE place for
+every request outcome. It is the only handle the owner has when asking an
+operator what happened on the other side, and a row that appears for one
+outcome and not for another is a row nobody learns to look at. A completed
+request with no id gets a placeholder; a screen where no request happened gets
+no row at all.
 
 The third is ordering. ``api._request`` turns a cancellation into an ordinary
 ``ClientError``, so a request stopped because the server address changed comes
@@ -47,6 +48,7 @@ from .components import (
     Banner,
     FieldError,
     KindBadge,
+    NO_REQUEST,
     ProgressLine,
     StatusStrip,
     mark_field_invalid,
@@ -250,7 +252,10 @@ class TranslateView(QWidget):
         result_row.addWidget(self.miss_badge)
         result_row.addStretch(1)
 
-        request_id_row = QHBoxLayout()
+        self._request_id_row = QWidget(self)
+        request_id_row = QHBoxLayout(self._request_id_row)
+        request_id_row.setContentsMargins(0, 0, 0, 0)
+        request_id_row.setSpacing(8)
         request_id_row.addWidget(request_id_row_label)
         request_id_row.addWidget(self.request_id_label, 1)
         request_id_row.addWidget(self.request_id_copy_button)
@@ -265,7 +270,7 @@ class TranslateView(QWidget):
         layout.addLayout(result_row)
         layout.addWidget(self.result_edit)
         layout.addWidget(self.miss_note)
-        layout.addLayout(request_id_row)
+        layout.addWidget(self._request_id_row)
         layout.addWidget(self.cancel_note)
         layout.addWidget(self.status_label)
 
@@ -273,7 +278,7 @@ class TranslateView(QWidget):
         # state reached afterwards.
         self._apply_endpoint_state()
 
-        self._render_request_id(None)
+        self._render_request_id()
 
     # -- public API --------------------------------------------------------
 
@@ -510,7 +515,7 @@ class TranslateView(QWidget):
         self.miss_note.setVisible(False)
         self.cancel_note.clear()
         self.cancel_note.setVisible(False)
-        self._render_request_id(None)
+        self._render_request_id()
         # The previous translation goes with its badge and its id. Leaving it
         # was worse than leaving nothing: the text stayed while everything
         # that said WHERE it came from and WHICH request produced it was
@@ -519,14 +524,19 @@ class TranslateView(QWidget):
         # to the input now on screen.
         self.result_edit.setPlainText("")
 
-    def _render_request_id(self, request_id: str | None) -> None:
-        """The one row that reports the id, for every outcome alike.
+    def _render_request_id(self, request_id: str | None = NO_REQUEST) -> None:
+        """Report an id for request outcomes, and draw nothing before one.
 
-        With no id it shows a placeholder rather than collapsing: a row that
-        comes and goes changes the height of everything under it and teaches
-        the eye to stop looking there.
+        ``NO_REQUEST`` means no call happened, while explicit ``None`` means a
+        call completed without an id. The latter keeps the stable row and its
+        placeholder; the former must not invite an operator query about a
+        request this client never made.
         """
-        self._request_id = request_id
+        applicable = request_id is not NO_REQUEST
+        self._request_id = request_id if applicable else None
+        self._request_id_row.setVisible(applicable)
+        if not applicable:
+            return
         shown = request_id if request_id else strings.REQUEST_ID_PLACEHOLDER
         self.request_id_label.set_full_text(shown)
         self.request_id_copy_button.setEnabled(request_id is not None)

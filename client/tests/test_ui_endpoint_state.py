@@ -33,10 +33,11 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QWidget  # noqa: E402
 
 from wuwaterm_client import strings  # noqa: E402
 from wuwaterm_client.config import ClientConfig  # noqa: E402
+from wuwaterm_client.errors import ERROR_OFFLINE, ClientError  # noqa: E402
 from wuwaterm_client.ui import main_window as main_window_module  # noqa: E402
 from wuwaterm_client.ui.main_window import MainWindow, endpoint_status_text  # noqa: E402
 
@@ -47,6 +48,25 @@ CONFIGURED = "https://api.example.invalid/wuwaterm-api"
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def _visible_texts(window: MainWindow) -> list[str]:
+    """Read what the rendered window says without naming any one control."""
+    texts: list[str] = []
+    for widget in window.findChildren(QWidget):
+        if not widget.isVisibleTo(window):
+            continue
+        for attribute in ("text", "toPlainText", "currentText", "placeholderText"):
+            reader = getattr(widget, attribute, None)
+            if not callable(reader):
+                continue
+            try:
+                value = reader()
+            except TypeError:
+                continue
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+    return texts
 
 
 def _assert_the_three_areas_are_reachable(window: MainWindow) -> None:
@@ -131,6 +151,52 @@ def test_the_window_says_so_when_nothing_is_configured(qapp, monkeypatch) -> Non
     # three areas have to stay reachable rather than be blocked behind a
     # broken client.
     _assert_the_three_areas_are_reachable(window)
+
+
+def test_unconfigured_window_has_no_request_id_text_in_any_area(
+    qapp, monkeypatch
+) -> None:
+    """No-request screens must not display a request handle or placeholder."""
+    monkeypatch.setattr(main_window_module, "has_token", lambda: True)
+    window = MainWindow(ClientConfig())
+    window.show()
+
+    violations: dict[str, list[str]] = {}
+    for name, page in (
+        ("terms", main_window_module.PAGE_TERMS),
+        ("translate", main_window_module.PAGE_TRANSLATE),
+        ("status", main_window_module.PAGE_STATUS),
+    ):
+        window.show_page(page)
+        qapp.processEvents()
+        bad = [
+            text
+            for text in _visible_texts(window)
+            if strings.REQUEST_ID_ROW_LABEL in text
+            or text == strings.REQUEST_ID_PLACEHOLDER
+        ]
+        if bad:
+            violations[name] = bad
+
+    window.hide()
+    assert not violations, f"未配置页面显示了从未发生过的请求 ID:{violations}"
+
+
+def test_request_without_id_keeps_request_id_text_visible(
+    qapp, monkeypatch
+) -> None:
+    """Explicitly missing IDs still belong to a request and keep their row."""
+    monkeypatch.setattr(main_window_module, "has_token", lambda: True)
+    window = MainWindow(ClientConfig(base_url=CONFIGURED))
+    window.show_page(main_window_module.PAGE_TRANSLATE)
+    window.show()
+    window.translate_view._show_error(ClientError(ERROR_OFFLINE))
+    qapp.processEvents()
+
+    visible = _visible_texts(window)
+    window.hide()
+    assert strings.REQUEST_ID_ROW_LABEL in visible
+    assert strings.REQUEST_ID_PLACEHOLDER in visible
 
 
 def test_setting_an_address_updates_what_the_window_shows(
