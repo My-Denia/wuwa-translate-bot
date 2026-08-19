@@ -20,8 +20,8 @@ jobs:
         # behind an upper bound the package does not need.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
@@ -36,8 +36,8 @@ jobs:
     name: uv lock drift check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       # Pin uv to the same version the deploy images use (deploy/Dockerfile).
@@ -48,8 +48,8 @@ jobs:
     name: wheel/sdist build, audit, install
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -U pip build twine
@@ -77,8 +77,8 @@ jobs:
     name: desktop client build (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # build.ps1 deliberately refuses to fall back to a system interpreter,
@@ -101,7 +101,7 @@ jobs:
             echo "$dirt" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: WuwaTerm-windows
           path: client/dist/WuwaTerm/
@@ -111,7 +111,7 @@ jobs:
     name: docker runtime/builder boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Syntax-check deploy shell scripts
         run: |
           for f in deploy/*.sh; do sh -n "$f"; done
