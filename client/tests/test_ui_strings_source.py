@@ -491,7 +491,11 @@ def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
     covers CJK punctuation whose names carry none of those words.
 
     A sweep of the whole code space costs a fraction of a second, and it is the
-    only form of this check that cannot be one block behind.
+    only form of this check that cannot be one block behind. It is deliberately
+    tied to the interpreter's character database rather than to a number: the
+    list is complete under the two databases it has been run against, and a
+    future one that adds a CJK block should turn this red rather than let the
+    list go quietly stale.
     """
     uncovered = [
         cp
