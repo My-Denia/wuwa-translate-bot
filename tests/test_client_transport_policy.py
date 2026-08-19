@@ -72,6 +72,13 @@ SCANNED_FILES = (
     # deployment runbook it has no legitimate need to name the administration
     # channel at all.
     ROOT / "docs" / "web-presentation-layer.md",
+    # The generic self-hosting guide. It is the natural place a forwarding
+    # recipe appears: it tells a stranger how to publish an API that binds
+    # loopback, which is exactly the question whose wrong answer is "open a
+    # tunnel to the host". It gets the STRICT rule for the same reason the
+    # web layer's guide does - a document written for someone who does not
+    # administer this host has no business naming the administration channel.
+    ROOT / "docs" / "self-hosting.md",
     *sorted((ROOT / "deploy").glob("*.yml")),
     *sorted((ROOT / "deploy").glob("*.yaml")),
     # The deployment scripts. A helper that grew a forwarded port would
@@ -364,6 +371,11 @@ def test_the_scan_actually_covers_the_files_it_claims_to() -> None:
         "src/wuwaterm_api/web/render.py",
         "src/wuwaterm_api/web/session.py",
         "docs/web-presentation-layer.md",
+        # The generic self-hosting guide, named here and not only in
+        # SCANNED_FILES: that tuple filters on `is_file()`, so a renamed or
+        # deleted guide would leave the scan quietly one file smaller and
+        # still green. This assertion is what makes that a failure.
+        "docs/self-hosting.md",
     ):
         assert required in scanned, required
     # ...and nothing from a virtual environment or a build output, which are

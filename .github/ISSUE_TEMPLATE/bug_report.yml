@@ -1,0 +1,118 @@
+name: Bug report
+description: Something behaves wrongly — a wrong result, a wrong response, a crash, or a surface that misbehaves.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        This is a single-maintainer hobby project and replies are best-effort.
+        A report with the fields below filled in can be acted on; one without
+        them usually cannot.
+
+        **Do not report a vulnerability here.** Use the private path described
+        in [SECURITY.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/SECURITY.md).
+
+        **Redact before you paste.** Remove tokens, API keys, device
+        credentials, real Telegram ids and `.env` contents from everything you
+        include.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag you are running, or the commit if you are on `main`.
+      placeholder: "v0.3.0, or commit 0f48e39"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      description: Where the wrong behaviour appears. Pick the one closest to it.
+      options:
+        - Telegram bot
+        - HTTP API (/v1)
+        - Private web presentation layer
+        - Windows desktop client
+        - Data build (dictionary from upstream game data)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and how it is installed.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Python: 3.12.7
+        Install: source (uv sync --locked --extra dev)  /  containers (deploy/docker-compose.yml)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: In order, small enough for somebody else to follow.
+      placeholder: |
+        1. Start the API with ...
+        2. Send ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What you thought would happen, and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened instead. Include the exact text or response where you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and error output
+      description: >-
+        The part that matters, not the whole file. Include the request id if
+        one was shown. Write `none` if there is nothing to attach.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Configuration that differs from the defaults, a workaround you found, a guess at the cause.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I have removed Telegram bot tokens, OpenAI-compatible API keys,
+            device credentials, real Telegram chat or user ids, and `.env`
+            contents from everything pasted above.
+          required: true
+        - label: I searched the open and closed issues and this is not one of them.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

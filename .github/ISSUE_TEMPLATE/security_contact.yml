@@ -1,0 +1,52 @@
+name: Security contact request
+description: Ask the maintainer to open a private channel for a security report. NO details here.
+title: "[security contact] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This form is not where a vulnerability is reported.** It exists for
+        one case: the private path did not work for you.
+
+        The private path is
+        [Report a vulnerability](https://github.com/My-Denia/wuwa-translate-bot/security/advisories/new)
+        on the repository's Security tab, and it is enabled. Use it if you can.
+        Everything you write there is visible to the maintainer only.
+
+        This issue will be **public the moment you submit it**. So it asks for
+        nothing about the finding: not the surface, not the version, not the
+        impact, not a proof of concept, not a log line, not a screenshot. The
+        maintainer will reply here with a way to continue privately, and the
+        details go there.
+
+        See [SECURITY.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/SECURITY.md)
+        for what is in scope and what to expect.
+
+  - type: checkboxes
+    id: no-details
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: >-
+            I have put NO details of the finding in this issue - no
+            description of the flaw, no steps, no proof of concept, no logs,
+            no tokens, API keys, device credentials, real Telegram ids or
+            .env contents - and I understand this issue is public.
+          required: true
+        - label: >-
+            I tried the private reporting form first, or it is not available
+            to me.
+          required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why the private form did not work (optional)
+      description: >-
+        Only what stopped you from using it - an error message, a missing
+        button, an account restriction. Nothing about the finding itself.
+      placeholder: "The Report a vulnerability button is not shown for my account."
+    validations:
+      required: false

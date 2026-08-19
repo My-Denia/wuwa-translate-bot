@@ -1,0 +1,118 @@
+name: Feature request
+description: Propose something the project does not do yet.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem before the solution. A request that names
+        the problem can be solved in a way nobody had thought of; one that names
+        only a solution can only be accepted or refused.
+
+        Two things to know before you write:
+
+        - **This project has explicit non-goals.** Four product decisions are
+          settled and enforced by a gate, so a change that crosses one cannot be
+          merged: no callback-URL registration for Telegram, no inline-query
+          surface, no synonym layer over the dictionary, and no free-text
+          listener beyond the single linked-channel one. See
+          [CONTRIBUTING.md](https://github.com/My-Denia/wuwa-translate-bot/blob/main/CONTRIBUTING.md#non-goals).
+        - **There is one maintainer, working on this in spare time.** Most
+          requests will not be built soon, and some will be declined so the
+          project stays small enough to maintain. A clear "no" is a better
+          answer than silence, and it is the answer you may get.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag you are on, or the commit if you are on `main`.
+      placeholder: "v0.3.0, or commit 0f48e39"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      description: Where this would live.
+      options:
+        - Telegram bot
+        - HTTP API (/v1)
+        - Private web presentation layer
+        - Windows desktop client
+        - Data build (dictionary from upstream game data)
+        - Documentation
+        - More than one of these
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what stops you? Concrete beats general.
+      placeholder: "When I ..., I have to ..., because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-not-existing
+    attributes:
+      label: Why the existing surfaces do not solve it
+      description: >-
+        Say what you tried across the bot, the API, the private web layer, the
+        desktop client and the documented workflows, and where each one fell
+        short. This is the field that decides most requests.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+      description: The behaviour, not the implementation. Note anything it must not break.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including doing nothing, or solving it outside this project.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Would you be willing to implement it
+      description: Not required, and not a condition of the request being read.
+      options:
+        - "Yes, if the direction is agreed first"
+        - "Maybe, with guidance"
+        - "No"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I have read the non-goals and this request does not cross one of
+            them.
+          required: true
+        - label: >-
+            I understand this is a single-maintainer hobby project with no
+            promised turnaround, and that the request may be declined.
+          required: true
+        - label: >-
+            I have removed Telegram bot tokens, OpenAI-compatible API keys,
+            device credentials, real Telegram chat or user ids, and `.env`
+            contents from everything pasted above.
+          required: true
+        - label: I searched the open and closed issues and this is not one of them.
+          required: true

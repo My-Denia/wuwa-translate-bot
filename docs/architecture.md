@@ -12,7 +12,7 @@ Operational detail lives in sibling guides. Decision rationale lives in
 ## System context
 
 ```
-Telegram users / groups / linked discussion groups        owner's PC
+Telegram users / groups / linked discussion groups        owner's PC and browser
                   |                                      |
                   | Bot API (long polling)               | https, cert verified
                   v                                      v
@@ -25,6 +25,7 @@ Telegram users / groups / linked discussion groups        owner's PC
                   |                    +---------------------------------+
                   |                    | wuwaterm-api (Compose service)  |
                   |                    |  presentation: wuwaterm_api/    |
+                  |                    |  + web/ sub-app, OFF by default |
                   |                    +-----------------+---------------+
                   |                                      |
                   v                                      v
@@ -45,18 +46,45 @@ Telegram users / groups / linked discussion groups        owner's PC
       +----------------------------------------------------------------+
 ```
 
-Two presentation adapters, one application layer, one more consumer:
+Three presentation adapters, one application layer, one more consumer:
 
 | Surface | What it is | Where |
 |---------|------------|-------|
 | Telegram bot | Presentation adapter: commands, chat authorization, chat wording, markup | `src/wuwaterm/bot.py`, `channel.py` |
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
+| Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
 | Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
 
 The desktop client is deliberately outside the service: it renders answers the
 API produced, and every rule the API applies is applied whether the caller is
 that client or `curl`. See [ADR 0009](adr/0009-http-api-adapter.md) and
 [ADR 0011](adr/0011-pc-client-stack.md).
+
+The private web layer is inside the service, and inside the API's own process:
+it is mounted as a sub-application at `/wuwaterm-web`, and only when
+`WUWATERM_API_WEB_ENABLED` is set — the default is off
+(`src/wuwaterm_api/settings.py`, `DEFAULT_WEB_ENABLED = False`), and with the
+switch off there is no route, no middleware and no sub-application. It is
+owner-private: the reverse proxy authenticates the request and injects the edge
+marker `X-Wuwaterm-Edge`, and the layer refuses anything arriving without that
+marker, so reaching the loopback port directly gets nothing. It appears in no
+published contract — the mount and the bare-mount guard are plain routes, not
+API routes, so `docs/api/openapi.json` lists exactly the paths it listed before
+the layer existed. Details in [web-presentation-layer.md](web-presentation-layer.md);
+the decision, its cost and what it does not cover are in
+[ADR 0014](adr/0014-private-web-presentation-layer.md).
+
+How that layer reaches the pipeline is worth being exact about, because it is
+the opposite of how the desktop client does: **not over HTTP**. It imports
+`translate_request_async` and `lookup_exact_terms` from `wuwaterm.application`
+and calls them in process, and `create_web_app` hands it the parent's `State`
+OBJECT — the same rate limiter, the same model-call budget, the same credential
+pool instance, not copies (`src/wuwaterm_api/web/app.py`). So it is a second
+caller of the application layer rather than a second consumer of the published
+contract, and the API's aggregate budgets are unchanged by it. It is not an
+exemption either: a browser request is still resolved to a device principal and
+still passes the same scope check, per-device rate limit and revocation
+re-checks the `/v1` routes apply.
 
 ### Users and actors
 
@@ -67,6 +95,7 @@ that client or `curl`. See [ADR 0009](adr/0009-http-api-adapter.md) and
 | Group members | `/tr` only when public mode is on for that chat | `settings.py` public map; `docs/telegram-behavior.md` |
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
 | API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
+| Owner at a browser | The private web layer's two views (lookup, sentence translation), only when it is switched on and only through the proxy | `src/wuwaterm_api/web/app.py`, [ADR 0014](adr/0014-private-web-presentation-layer.md) |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
 ### External systems
@@ -75,7 +104,8 @@ that client or `curl`. See [ADR 0009](adr/0009-http-api-adapter.md) and
 |--------|-----------|---------|
 | Telegram Bot API | Outbound long polling + send/edit/delete | Chat presentation only |
 | OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation after term lock |
-| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | The only intended API caller today |
+| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | The only intended caller of the published `/v1` contract |
+| Owner's browser | **Inbound** over HTTPS to `/wuwaterm-web` through the same ingress, when that layer is switched on | Renders the private web layer's pages; it never calls `/v1` |
 | GitHub game-data repos | Builder sparse checkout only | Source for `terms.db` (`data_source.py`, `constants.py` pins) |
 | Local Docker Compose host | Runtime (two serving containers) + optional builder jobs | Supported single-host topology |
 
@@ -138,6 +168,15 @@ it was, and removing a chat from the allowlist leaves every device exactly as
 it was. Details in [ADR 0010](adr/0010-device-principal-authentication.md);
 the reason the network layer is not a third control is in
 [ADR 0012](adr/0012-client-transport-selection.md).
+
+When the private web layer is switched on, a third secret has to be safeguarded
+and rotated — the proxy's own credential for `/wuwaterm-web`, and the edge
+marker it injects — and it is deliberately **not** a third control in the table
+above. Neither confers a principal: together they decide whether a request
+reaches the mount at all. What the layer then acts as is an ordinary device
+from the store in the right-hand column, so `wuwaterm-api device revoke` turns
+that surface off without touching the edge, the desktop client or any chat
+([ADR 0014](adr/0014-private-web-presentation-layer.md)).
 
 ## Cost topology: budgets are per process, and the worst case is their sum
 
@@ -215,7 +254,7 @@ Intended layers (modular monolith — [ADR 0002](adr/0002-modular-monolith.md)):
 
 ```
 cli (bootstrap)                    wuwaterm_api (separate top-level package)
-  |-> bot / channel                  |-> app / auth / errors / settings / cli
+  |-> bot / channel                  |-> app / auth / errors / settings / cli / web
   |     |-> application  <-----------'        (allowlisted imports only)
   |     |     |-> lookup / sentence / normalize / translation_policy   domain
   |     |-> settings / channel_reply_* / channel_runtime         local infra
@@ -265,11 +304,12 @@ Observed edges (static imports among shipped modules):
 - `bot` → `application` (shared pipeline + rate limiter); `application` imports
   no presentation module and no Telegram SDK, enforced by the boundary guard.
 - `wuwaterm_api` → `wuwaterm.application` (pipeline, translator factory,
-  lookup entry points, error codes) from `app.py` and `errors.py`, and
-  `wuwaterm.logging_utils` (`redact_id`) from `app.py`. Those two modules are
-  the whole of what the package imports from `wuwaterm` today; the guard
-  permits two more (`models`, `translation_policy`) and nothing beyond the
-  four.
+  lookup entry points, error codes) from `app.py`, `errors.py`, `web/app.py`
+  and `web/render.py`; `wuwaterm.logging_utils` (`redact_id`) from `app.py`;
+  and `wuwaterm.translation_policy` (`LLM_INPUT_CHAR_LIMIT`) from `web/app.py`,
+  which imports the shared input ceiling rather than restating it. Those three
+  modules are the whole of what the package imports from `wuwaterm` today; the
+  guard permits one more (`models`) and nothing beyond the four.
 - `sentence` → `lookup`, `normalize`, `telegram_html`, `httpx`.
 - `lookup` → `db` (read helpers), `models`, `normalize`, `constants`.
 - `db.insert_records` lazily imports `build_pinyin` (builder-only dependency).
@@ -464,7 +504,7 @@ likely product/ops changes:
 | Private overlay network instead of the public route | Evidence of unwanted traffic on the route; a decision that the surface should not be public; a second machine that also needs access ([ADR 0012](adr/0012-client-transport-selection.md)) |
 | Multi-user / a principals table | A second human user, or per-user quotas. Today the device id IS the principal id |
 | Shared cross-process LLM budget | A second client machine, an observed breach of the model account's limits, or more than one instance of either surface — see [cost topology](#cost-topology-budgets-are-per-process-and-the-worst-case-is-their-sum) |
-| Web admin | Operators need bulk allowlist/audit without Telegram commands; multi-owner RBAC |
+| Web admin console | Operators need bulk allowlist/audit without Telegram commands; multi-owner RBAC. The private web layer that now exists is **not** this and does not satisfy this row: it is single-owner, it has two views — dictionary lookup and sentence translation — and it holds no administration capability at all, so it cannot authorize a chat, issue or list a device, or read an audit trail |
 | Multi-instance / external state | Sustained load exceeds one process **and** the delivery model is redesigned; shared durable admission for channels |
 | Postgres / Redis / queue | State or job volume exceeds single-host JSON/SQLite operational comfort; multi-host deploy becomes a requirement |
 | Public or third-party API clients | Anyone but the owner needs access, which changes rate limits, abuse handling and the identity model together |
@@ -477,6 +517,7 @@ Until those triggers are real, adding the machinery would be ceremony.
 |-----------|-------------|
 | Single VPS, Compose, bot long polling | Chat delivery endpoints, multi-replica polling, HA |
 | One API container bound to loopback, published by a path route on the operator's existing HTTPS ingress | The API binding a public interface, a second open port, or answering `/v1` without a device credential |
+| The private web layer mounted inside that same API process, off unless switched on, published by a second path route behind the proxy's own authentication and the injected edge marker | A separate web process or container for it; the mount answering anything that did not arrive through the edge; any administration capability on that surface |
 | Single bot token, one active runtime | Multi-token shard, active-active |
 | `data/terms.db` RO in both serving containers + `state/`, `state-api/` RW to their own owners | Runtime writing game TextMaps or self-promoting DB; either surface writing the other's state |
 | One owner, devices registered by the operator | Multi-tenant accounts, self-service registration, public sign-up |
@@ -486,6 +527,7 @@ Until those triggers are real, adding the machinery would be ceremony.
 ## Related documents
 
 - [Deployment](deployment.md)
+- [The private web presentation layer](web-presentation-layer.md)
 - [Telegram Behavior](telegram-behavior.md)
 - [Privacy And LLM](privacy-and-llm.md)
 - [Data Refresh](data-refresh.md)

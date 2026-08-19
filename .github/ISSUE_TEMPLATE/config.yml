@@ -1,0 +1,20 @@
+# Blank issues are off on purpose. Every form here carries a REQUIRED
+# acknowledgement that tokens, API keys, device credentials, real Telegram ids
+# and .env contents have been removed from anything pasted; a blank issue is a
+# path around that checkbox, and the thing it guards against — a credential
+# published in a public issue — cannot be taken back once it happens. The
+# contact links below stay, so a security report and a support question each
+# still have somewhere to go that is not a form.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/My-Denia/wuwa-translate-bot/security/policy
+    about: >-
+      Never open a public issue for a vulnerability. Use GitHub private
+      vulnerability reporting, as the security policy describes.
+  - name: Support and scope
+    url: https://github.com/My-Denia/wuwa-translate-bot/blob/main/SUPPORT.md
+    about: >-
+      Where to ask, what to include, and what this single-maintainer hobby
+      project does not cover. There is no hosted service and no private support
+      channel.

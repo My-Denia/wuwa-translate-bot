@@ -2,19 +2,47 @@
 
 # WuWa Term Bot
 
-自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。系统由一个 protocol-neutral 应用层同时服务两个 presentation adapter——Telegram bot 与版本化的 HTTP API——另有一个消费该 API 的 Windows 桌面客户端。
+自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。系统由一个 protocol-neutral 应用层同时服务两个 presentation adapter——Telegram bot 与版本化的 HTTP API——外加一个跑在 API 进程内、默认关闭的 owner 私有 web 表示层，以及一个消费该 API 的 Windows 桌面客户端。
 
 服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
+
+术语词典在本地构建，不随发布物分发；上游游戏数据的许可边界见[数据来源与许可边界](#数据来源与许可边界)。
+
+## 从这里开始
+
+- **桌面用户**：从 [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases) 下载 Windows 客户端 zip（自下一个版本 v0.4.0 起提供），用法见[桌面客户端](client/README.md)。
+- **Telegram 群管理员**：命令、授权与频道自动翻译见 [Telegram 行为](docs/telegram-behavior.md)。
+- **自建部署者**：从零把服务跑起来见[自建部署指南](docs/self-hosting.md)。
+- **贡献者**：先读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地校验只有一个入口 `python scripts/validate.py`。
+- **owner 生产运维**：这台机器上的事务式更新流程见[部署](docs/deployment.md)。
+
+平台与版本的支持范围见[支持矩阵](docs/support-matrix.md)。
 
 ## 架构概述
 
 - **应用层**：`src/wuwaterm/application.py` 唯一一次持有 dictionary-first 翻译流水线。它是 protocol-neutral 的——不导入任何表示层模块，也不导入聊天 SDK（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
 - **两个 presentation adapter**：Telegram bot（`src/wuwaterm/bot.py`、`channel.py`）负责命令、会话授权、聊天措辞与富文本标记；版本化的 HTTP API（`src/wuwaterm_api/`）负责版本化路由、设备认证、统一错误信封与纯文本响应。两个对外入口均由这同一条流水线提供服务（[架构文档](docs/architecture.md)）。
+- **第三个表示层 owner 私有 web**：`src/wuwaterm_api/web/` 是一个供 owner 从手机使用的移动端网页界面，跑在 API 进程内部而不是独立服务。它由 `WUWATERM_API_WEB_ENABLED` 控制，**默认关闭**：开关关闭时既没有路由，也没有子应用，已发布的 API 契约里同样没有它的任何条目（[web 表示层](docs/web-presentation-layer.md)、[ADR 0014](docs/adr/0014-private-web-presentation-layer.md)）。
 - **device-principal 设备主体认证**：所有 `/v1` 路由都要求设备凭据。凭据可单独吊销，不涉及 Telegram bot 自身的访问控制；凭据存储中只保存加盐 scrypt 校验值（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
 - **Windows 桌面客户端**：`client/` 下的客户端有意不作为 adapter，而是 API 已发布契约的消费方，自身不含任何翻译逻辑。它经由 HTTPS 访问服务（[ADR 0011](docs/adr/0011-pc-client-stack.md)、[ADR 0012](docs/adr/0012-client-transport-selection.md)）。
 - **已发布契约**：API 契约快照提交在 [`docs/api/openapi.json`](docs/api/openapi.json)，由 `scripts/check_api_contract.py` 做漂移门禁。
 
-0.3.0 的发布说明将这一步描述为「API-first release: the Telegram-only bot becomes a multi-adapter system」（[更新日志](CHANGELOG.md)）。以上各点的决策依据见 [ADR 索引](docs/adr/README.md)；模块、请求流与信任边界的维护者地图见 [架构文档](docs/architecture.md)。
+合起来是：两个 presentation adapter，加上一个跑在 API 进程内、默认关闭的 owner 私有表示层，加上一个 API 消费方（桌面客户端）。0.3.0 的发布说明将这一步描述为「API-first release: the Telegram-only bot becomes a multi-adapter system」（[更新日志](CHANGELOG.md)）。以上各点的决策依据见 [ADR 索引](docs/adr/README.md)；模块、请求流与信任边界的维护者地图见 [架构文档](docs/architecture.md)。
+
+## 下载与分发
+
+目前已发布的最新版本是 v0.3.0，其发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面描述的是自**下一个版本 v0.4.0** 起的分发形态，该版本尚未发布。与之对应的[发布检查单](docs/release-checklist.md)目前仍只允许上面那三样发布物；它的资产策略与发布流水线一起更新，那是紧随其后的那次改动，不是这次。
+
+- **GitHub Releases**：自 v0.4.0 起，每个发布带 wheel、sdist、Windows 客户端 zip（`WuwaTerm-<version>-windows-x64.zip`）、`SHA256SUMS` 与 `release-manifest.json`。
+- **Windows 客户端**：便携式压缩包，解压即用，**未做代码签名**，因此 Windows SmartScreen 会弹出警告，需要用户自己点开「更多信息 → 仍要运行」才能启动。
+- **容器镜像**：自 v0.4.0 起提供 `ghcr.io/my-denia/wuwaterm`（运行时）与 `ghcr.io/my-denia/wuwaterm-builder`（构建器）。请先验证镜像拉取是否成功；若被拒绝，请从源码构建（见[自建部署指南](docs/self-hosting.md)）。
+
+```bash
+docker pull ghcr.io/my-denia/wuwaterm:v0.4.0
+docker pull ghcr.io/my-denia/wuwaterm-builder:v0.4.0
+```
+
+镜像省下的只是本地构建镜像这一步。自建部署者仍然需要一份处于发布 tag 上的源码检出：Compose 文件、脚本与数据构建流程都在源码里，术语数据库永远是本地构建的产物，不随任何发布物分发。
 
 ## 快速开始
 
@@ -82,13 +110,10 @@ Telegram 命令示例：
 
 未给出方向参数时，默认仍为自动判定。要对某条消息作出回复式翻译，发送 `/tr --to en`、`/tr -to en`、`/sentence --to zh` 或 `/sent --to zh`，bot 会按指定方向翻译被回复的文本。就校验而言：非法的 --to 取值只返回用法说明，不调用 LLM；词典精确命中同样不调用 LLM。对于关联频道的贴文，频道自动翻译始终为自动判定方向，不接受命令方向参数。
 
-运行标准校验集：
+运行标准校验集。CI 的服务端测试矩阵跑的就是这个文件，所以本地绿与矩阵那几个 job 绿是同一个判断。但它不等于整个 pull request：lock 漂移检查、wheel/sdist 构建与打包审计、Windows 客户端构建、Docker 运行时/构建器边界这四个 job 都在这条命令之外，另行运行（见[校验](docs/validation.md)）：
 
 ```bash
-.venv/bin/python scripts/check_repo_hygiene.py
-.venv/bin/python scripts/check_non_goals.py
-.venv/bin/python scripts/check_architecture_boundaries.py
-.venv/bin/python -m pytest
+.venv/bin/python scripts/validate.py
 ```
 
 ## 数据来源与许可边界
@@ -111,6 +136,8 @@ Telegram 命令示例：
 
 ## 指南
 
+- [自建部署](docs/self-hosting.md)：陌生人从零自建这套服务的通用路径——容器或源码、数据构建、设备凭据、反向代理、升级、备份与回滚。
+- [支持矩阵](docs/support-matrix.md)：服务端与客户端的 Python 版本、操作系统、兼容性契约与「支持」在这里的含义。
 - [架构](docs/architecture.md)：模块、请求流、信任边界、单实例拓扑与 ADR 的维护者地图。
 - [更新日志](CHANGELOG.md)：按发布版本记录的源码变更。
 - [部署](docs/deployment.md)：VPS 上的 Docker Compose 服务、`.env` 处理、数据刷新命令与冒烟检查。
@@ -119,6 +146,7 @@ Telegram 命令示例：
 - [HTTP API 契约](docs/api/openapi.json)：版本化 `/v1` 路由已提交的契约快照。
 - [桌面客户端](client/README.md)：HTTP API 的 Windows 客户端，含技术栈、设置、凭据处理与构建方式。
 - [隐私与 LLM](docs/privacy-and-llm.md)：dictionary-first 隐私边界、LLM 配置、提示注入防护、占位符完整性、fail-closed 设置与密钥处理。
+- [web 表示层](docs/web-presentation-layer.md)：跑在 API 进程内、默认关闭的 owner 私有网页界面，含开关、路由与边界。
 - [校验](docs/validation.md)：离线校验命令、线上冒烟的注意事项与 Windows 参考命令。
 - [发布检查单](docs/release-checklist.md)：发布元数据、校验、隐私说明、分发边界与发布说明模板。
 
@@ -140,17 +168,22 @@ WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
 
 ## 校验入口
 
-完整的本地校验流程：
+完整的本地校验只有一个入口。步骤依次为 `hygiene`、`non-goals`、`architecture`、`api-contract`、`ruff`、`pytest`，遇到第一个失败的步骤就停下并指名道姓：
+
+```bash
+.venv/bin/python scripts/validate.py
+.venv/bin/python scripts/validate.py --list
+.venv/bin/python scripts/validate.py --quick
+.venv/bin/python scripts/validate.py --client
+```
+
+候选数据库的校验**不在**这个入口里，这是有意的：它们需要一份构建出来的 `data/terms.candidate.db`，而这份文件只在数据刷新流程中存在，因此属于那条流程而不是每次提交。详见[校验](docs/validation.md)。
 
 ```bash
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
 .venv/bin/python scripts/verify_seed_terms.py data/terms.candidate.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
 .venv/bin/python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
 .venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
-.venv/bin/python scripts/check_repo_hygiene.py
-.venv/bin/python scripts/check_non_goals.py
-.venv/bin/python scripts/check_architecture_boundaries.py
-.venv/bin/python -m pytest
 ```
 
 上面的 `goal-runs/` 路径是本地工作产物，已被 Git 忽略；这些文件由运行校验的机器上的脚本创建或读取。
@@ -160,6 +193,8 @@ WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
 ## 维护
 
 这是个人业余项目，按尽力而为的方式维护。不保证会回应 issue 或 pull request。
+
+提问、报告问题与提交改动的去处，以及能期待什么、不能期待什么，写在[支持说明](SUPPORT.md)里；安全问题的报告方式见[安全策略](SECURITY.md)；改动的提交流程见 [CONTRIBUTING.md](CONTRIBUTING.md)；被测试覆盖的平台与版本范围见[支持矩阵](docs/support-matrix.md)。
 
 ## 许可
 
