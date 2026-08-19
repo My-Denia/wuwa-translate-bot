@@ -26,16 +26,22 @@ SOURCE_PROFILES = {
     "arikatsu": SourceProfile(
         name="arikatsu",
         repo_url="https://github.com/Arikatsu/WutheringWaves_Data.git",
-        pinned_commit="dae29691c04ef0f48d0810b5d244fb0b37288c60",
+        pinned_commit="6ce8d5eda49f2930da84d8846c144432142c7465",
         layout="arikatsu_textmaps",
         sparse_paths=("README.md", "Textmaps", "BinData"),
         textmap_root="Textmaps",
         textmap_record_kind="id_content_arrays",
         version_file="README.md",
-        expected_game_version="3.5.0",
-        expected_resource_version="3.5.5",
-        expected_changelist="8059200",
-        representative_exact_hits=(("穗穗", "Suisui"),),
+        expected_game_version="3.6.0",
+        expected_resource_version="3.6.4",
+        expected_changelist="8464573",
+        # Measured against the built 3.6 candidate, not copied from upstream
+        # text: 景燃 is new at 3.6.0 and is the only zh for "Jingran" and the
+        # only en for 景燃 in both directions. The 3.5 pair 穗穗 -> Suisui was
+        # retired here because 3.6 adds a second speaker row
+        # 穗穗（通讯中） -> Suisui, so the reverse direction is no longer
+        # single-valued and the check would fail on a correct build.
+        representative_exact_hits=(("景燃", "Jingran"),),
     ),
     "dimbreath_legacy": SourceProfile(
         name="dimbreath_legacy",

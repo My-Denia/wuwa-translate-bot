@@ -36,9 +36,9 @@ def local_source(monkeypatch, tmp_path):
     _git("init", "-b", "main", cwd=source)
     (source / "README.md").write_text(
         "# Data\n\n"
-        "> Game Version: 3.5.0\n"
-        "> Resource Version: 3.5.5\n"
-        "> Changelist: 8059200\n",
+        "> Game Version: 3.6.0\n"
+        "> Resource Version: 3.6.4\n"
+        "> Changelist: 8464573\n",
         encoding="utf-8",
     )
     (source / "BinData").mkdir()
@@ -69,19 +69,19 @@ def local_source(monkeypatch, tmp_path):
 def test_parse_source_version_requires_all_exact_fields(tmp_path):
     version = tmp_path / "README.md"
     version.write_text(
-        "> Game Version: 3.5.0\n"
-        "> Resource Version: 3.5.5\n"
-        "> Changelist: 8059200\n",
+        "> Game Version: 3.6.0\n"
+        "> Resource Version: 3.6.4\n"
+        "> Changelist: 8464573\n",
         encoding="utf-8",
     )
 
     assert parse_source_version(version) == {
-        "game_version": "3.5.0",
-        "resource_version": "3.5.5",
-        "changelist": "8059200",
+        "game_version": "3.6.0",
+        "resource_version": "3.6.4",
+        "changelist": "8464573",
     }
 
-    version.write_text("> Game Version: 3.5.0\n", encoding="utf-8")
+    version.write_text("> Game Version: 3.6.0\n", encoding="utf-8")
     with pytest.raises(DataSourceError, match="missing version fields"):
         parse_source_version(version)
 
@@ -89,16 +89,16 @@ def test_parse_source_version_requires_all_exact_fields(tmp_path):
 def test_parse_source_version_accepts_upstream_trailing_html_breaks(tmp_path):
     version = tmp_path / "README.md"
     version.write_text(
-        "> Game Version: 3.5.0</br>\n"
-        "> Resource Version: 3.5.5<br />\n"
-        "> Changelist: 8059200\n",
+        "> Game Version: 3.6.0</br>\n"
+        "> Resource Version: 3.6.4<br />\n"
+        "> Changelist: 8464573\n",
         encoding="utf-8",
     )
 
     assert parse_source_version(version) == {
-        "game_version": "3.5.0",
-        "resource_version": "3.5.5",
-        "changelist": "8059200",
+        "game_version": "3.6.0",
+        "resource_version": "3.6.4",
+        "changelist": "8464573",
     }
 
 
@@ -111,9 +111,9 @@ def test_refresh_data_measures_checkout_and_includes_version_file(local_source, 
     assert (checkout / "README.md").is_file()
     assert provenance.repo_url == str(source)
     assert provenance.commit == profile.pinned_commit
-    assert provenance.game_version == "3.5.0"
-    assert provenance.resource_version == "3.5.5"
-    assert provenance.changelist == "8059200"
+    assert provenance.game_version == "3.6.0"
+    assert provenance.resource_version == "3.6.4"
+    assert provenance.changelist == "8464573"
 
 
 def test_refresh_data_honors_explicit_repo_url_override(local_source, tmp_path):
@@ -180,10 +180,10 @@ def test_builder_stamps_observed_checkout_provenance(
             TermRecord(
                 category="resonator",
                 source_file="fixture.json",
-                source_id="1110",
-                text_key="RoleInfo_1110_Name",
-                zh="穗穗",
-                en="Suisui",
+                source_id="1212",
+                text_key="RoleInfo_1212_Name",
+                zh="景燃",
+                en="Jingran",
             )
         ],
     )
@@ -196,9 +196,9 @@ def test_builder_stamps_observed_checkout_provenance(
     assert metadata["source_repo_url"] == str(source)
     assert metadata["source_commit"] == profile.pinned_commit
     assert metadata["wutheringdata_commit"] == profile.pinned_commit
-    assert metadata["source_game_version"] == "3.5.0"
-    assert metadata["source_resource_version"] == "3.5.5"
-    assert metadata["source_changelist"] == "8059200"
+    assert metadata["source_game_version"] == "3.6.0"
+    assert metadata["source_resource_version"] == "3.6.4"
+    assert metadata["source_changelist"] == "8464573"
 
 
 def test_inspect_data_source_rejects_wrong_remote(local_source, tmp_path):
@@ -214,7 +214,7 @@ def test_inspect_data_source_rejects_dirty_or_wrong_version(local_source, tmp_pa
     _source, _profile = local_source
     checkout = refresh_data(tmp_path / "checkout", profile_name="arikatsu")
     readme = checkout / "README.md"
-    readme.write_text(readme.read_text().replace("3.5.5", "3.5.4"), encoding="utf-8")
+    readme.write_text(readme.read_text().replace("3.6.4", "3.6.3"), encoding="utf-8")
 
     with pytest.raises(DataSourceError, match="modifications or untracked files"):
         inspect_data_source(checkout, "arikatsu")

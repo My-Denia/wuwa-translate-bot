@@ -96,8 +96,8 @@ Telegram 命令示例：
 主数据源：
 
 - `https://github.com/Arikatsu/WutheringWaves_Data`
-- 钉住提交：`dae29691c04ef0f48d0810b5d244fb0b37288c60`
-- 钉住版本：`GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
+- 钉住提交：`6ce8d5eda49f2930da84d8846c144432142c7465`
+- 钉住版本：`GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
 
 主数据源不可用时可手动尝试的备用镜像：
 

@@ -5,8 +5,8 @@
 Primary source:
 
 - `https://github.com/Arikatsu/WutheringWaves_Data`
-- pinned commit: `dae29691c04ef0f48d0810b5d244fb0b37288c60`
-- pinned version: `GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
+- pinned commit: `6ce8d5eda49f2930da84d8846c144432142c7465`
+- pinned version: `GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
 
 Fallback mirror to try manually if the primary source is unavailable:
 
@@ -72,7 +72,7 @@ clean tracked state, and all three version fields in the root README match the
 active source profile. The builder writes those observed values into DB
 metadata. The verifier opens the candidate read-only and checks integrity,
 exact tables/columns/indexes, schema and source metadata, every required
-category, and the 3.5 representative exact pair `穗穗 -> Suisui` in both
+category, and the 3.6 representative exact pair `景燃 -> Jingran` in both
 directions. It must pass before any production promotion. Generated candidates
 remain ignored and are not distributed.
 
@@ -85,7 +85,12 @@ remain ignored and are not distributed.
 
 ## Refresh Checks
 
-For 3.5, `穗穗 -> Suisui` is the required representative new-term check.
+For 3.6, `景燃 -> Jingran` is the required representative new-term check. It
+replaced the 3.5 pair `穗穗 -> Suisui`, which 3.6 makes unusable for this check:
+the new data adds a second speaker row `穗穗（通讯中） -> Suisui`, so the reverse
+direction is no longer single-valued. A representative pair must stay
+single-valued in both directions in the built database; pick the replacement by
+measuring the candidate, not by reading upstream release notes.
 Offline candidate verification proves the source and DB content; it does not
 prove that a VPS is running that DB. After an owner-authorized deployment, the
 immutable deployment manifest records the DB hash and provenance. A live

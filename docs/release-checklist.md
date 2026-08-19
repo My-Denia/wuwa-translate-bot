@@ -17,11 +17,11 @@ attached.
   recorded in `CHANGELOG.md`)
 - Supported source profile: `arikatsu`
 - Supported game data version:
-  `GameVer 3.5.0 | ResVer 3.5.5 | Changelist 8059200`
+  `GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
 - Pinned source repository:
   `https://github.com/Arikatsu/WutheringWaves_Data`
 - Pinned source commit:
-  `dae29691c04ef0f48d0810b5d244fb0b37288c60`
+  `6ce8d5eda49f2930da84d8846c144432142c7465`
 - Fallback source profile: `dimbreath_legacy`
 - Fallback pinned commit:
   `e9234ffe094b2d944d16b222d31102e8ab32d954`
@@ -182,10 +182,10 @@ gh release delete "$NEXT_VERSION" --cleanup-tag
 
 - Source profile: arikatsu
 - Source repository: https://github.com/Arikatsu/WutheringWaves_Data
-- Pinned source commit: dae29691c04ef0f48d0810b5d244fb0b37288c60
-- GameVer: 3.5.0
-- ResVer: 3.5.5
-- Changelist: 8059200
+- Pinned source commit: 6ce8d5eda49f2930da84d8846c144432142c7465
+- GameVer: 3.6.0
+- ResVer: 3.6.4
+- Changelist: 8464573
 
 ### Validation
 

@@ -37,8 +37,8 @@ def verified_db(tmp_path):
             source_file=f"{category}.json",
             source_id=str(index),
             text_key=f"{category}_{index}",
-            zh="穗穗" if category == "resonator" else f"测试{index}",
-            en="Suisui" if category == "resonator" else f"Test {index}",
+            zh="景燃" if category == "resonator" else f"测试{index}",
+            en="Jingran" if category == "resonator" else f"Test {index}",
         )
         for index, category in enumerate(
             (
@@ -87,8 +87,8 @@ def test_strong_verifier_accepts_complete_candidate_read_only(verified_db):
     result = _verify(verified_db)
 
     assert result.returncode == 0, result.stderr
-    assert "source_commit\tdae29691c04ef0f48d0810b5d244fb0b37288c60" in result.stdout
-    assert "source_changelist\t8059200" in result.stdout
+    assert "source_commit\t6ce8d5eda49f2930da84d8846c144432142c7465" in result.stdout
+    assert "source_changelist\t8464573" in result.stdout
     assert hashlib.sha256(verified_db.read_bytes()).hexdigest() == before
 
 
@@ -131,7 +131,18 @@ def test_database_creation_requires_measured_provenance(tmp_path):
         ("schema", "CREATE TABLE unexpected(value TEXT)"),
         ("index", "DROP INDEX idx_terms_zh_norm"),
         ("category", "DELETE FROM terms WHERE category = 'item'"),
-        ("exact", "UPDATE terms SET en = 'Wrong' WHERE zh = '穗穗'"),
+        ("exact", "UPDATE terms SET en = 'Wrong' WHERE zh = '景燃'"),
+        # A second zh row carrying the same en breaks the reverse direction of
+        # the representative pair while the forward direction still looks fine.
+        # This is exactly how the retired 3.5 pair 穗穗 -> Suisui failed on the
+        # 3.6 data, so the verifier has to reject it.
+        (
+            "exact_reverse",
+            "INSERT INTO terms (category, source_file, source_id, text_key, zh, en, "
+            "zh_norm, en_norm, pinyin, pinyin_abbrev, priority) VALUES "
+            "('speaker', 'speaker.json', '9001', 'Speaker_9001_Name', "
+            "'通讯中的景燃', 'Jingran', '通讯中的景燃', 'jingran', '', '', 80)",
+        ),
     ],
 )
 def test_strong_verifier_rejects_invalid_candidate(

@@ -5,6 +5,27 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Game Data
+
+- data: pin Arikatsu 3.6.0 — the active source profile moves to Wuthering
+  Waves 3.6.0 / resource 3.6.4 / changelist 8464573 at exact upstream commit
+  `6ce8d5eda49f2930da84d8846c144432142c7465` (previously 3.5.0 / 3.5.5 /
+  8059200 at `dae29691c04ef0f48d0810b5d244fb0b37288c60`). The candidate built
+  from that checkout carries 10951 extracted records, up from 10691, with 260
+  added terms, 0 removed and 6 changed zh/en pairs; the offline gates
+  (`verify_db.py`, `verify_seed_terms.py`, `verify_exact_hits.py`,
+  `verify_idempotent_build.py`) all pass on it and `diff_terms_db.py` reports
+  no removed term.
+- The required representative exact pair is now `景燃 -> Jingran`, a resonator
+  that is new at 3.6 and single-valued in both directions in the built
+  database. The 3.5 pair `穗穗 -> Suisui` was retired because 3.6 adds a second
+  speaker row `穗穗（通讯中） -> Suisui`, which makes the reverse direction
+  ambiguous and would fail the check on a correct build. The verifier's tests
+  gained a case for that failure shape (a second zh row carrying the same en).
+- No production data is shipped by this change: deployments pick the new pin
+  up through `deploy/vps-update.sh`, which refreshes the checkout and rebuilds
+  and re-verifies the candidate on the target host.
+
 ### Channel Adapter
 
 - Capacity-driven channel skips (`queue_full`, `llm_budget`) now DM the bot
