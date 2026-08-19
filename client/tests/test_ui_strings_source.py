@@ -105,6 +105,10 @@ CJK_RANGES = (
     (0x3200, 0x32FF),    # Enclosed CJK letters and months
     (0x3300, 0x33FF),    # CJK compatibility
     (0x3400, 0x4DBF),    # CJK unified ideographs extension A
+    # Yijing hexagram symbols sit between extension A and the unified block;
+    # their names carry no CJK token, so the sweep below cannot see them and
+    # the row is here by reading (review finding on PR 93).
+    (0x4DC0, 0x4DFF),    # Yijing hexagram symbols
     (0x4E00, 0x9FFF),    # CJK unified ideographs
     (0xA960, 0xA97F),    # Hangul Jamo extended-A
     (0xAC00, 0xD7AF),    # Hangul syllables
