@@ -29,13 +29,27 @@ on:
       - pyproject.toml
 
 # The workflow default is read-only. Exactly two jobs widen it, each by one
-# scope: `images` takes packages:write, `draft-release` takes contents:write.
-# See the comment on draft-release for why the draft step is a separate job.
+# scope: `push-images` takes packages:write and `draft-release` takes
+# contents:write. BOTH are gated on a workflow_dispatch with dry_run=false, so
+# neither is reachable from the pull_request trigger this workflow also has -
+# which matters because this file is inside its own path filter, and a job that
+# holds a write scope on a pull_request run holds it for whatever that pull
+# request changed the job into.
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name }}-${{ github.ref }}-${{ github.event.inputs.target_commit || 'pr' }}
+  # Every dispatch shares ONE group, whatever commit it targets. Keying on
+  # target_commit put two dispatches at different commits in different groups -
+  # and two commits can declare the same version (a retry with a corrected sha
+  # is the obvious case), so both would pass the tag-absence preflight and then
+  # race for the same image tags, leaving whichever finished last in place while
+  # the other run's manifest recorded the digests it had pushed. Pull requests
+  # keep a per-ref group so one pull request never queues behind another.
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch'
+    && 'dispatch' || format('pr-{0}', github.ref) }}
+  # Never cancel a dispatch: it may be halfway through pushing images.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -322,18 +336,21 @@ jobs:
           path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
           if-no-files-found: error
 
+  # Builds both targets and pushes NOTHING, so it needs no registry permission
+  # and is safe to reach from a pull_request. The push lives in push-images
+  # below. Splitting them is not tidiness: this workflow is inside its own
+  # pull_request path filter, so anyone who can open a branch pull request here
+  # can change this file and have it run - and if this job held
+  # `packages: write`, that modified copy could push images under the project's
+  # namespace no matter what the dry-run switch says, because the switch only
+  # guards the steps that are checked in.
   images:
     name: container images (runtime + builder)
     needs: preflight
     runs-on: ubuntu-latest
-    # The only job in this workflow that may write packages. A dry run still
-    # builds both targets - it just never logs in and never pushes.
     permissions:
       contents: read
-      packages: write
     outputs:
-      runtime_digest: ${{ steps.build.outputs.runtime_digest }}
-      builder_digest: ${{ steps.build.outputs.builder_digest }}
       runtime_tags: ${{ steps.build.outputs.runtime_tags }}
       builder_tags: ${{ steps.build.outputs.builder_tags }}
     steps:
@@ -341,21 +358,13 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       - uses: docker/setup-buildx-action@v3
-      - name: Log in to the container registry
-        if: needs.preflight.outputs.dry_run == 'false'
-        env:
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
       - name: Build both image targets
         id: build
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
           BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
-          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          DRY_RUN: "true"
         run: |
           set -euo pipefail
           major_minor="${VERSION%.*}"
@@ -363,13 +372,9 @@ jobs:
           tag_values=("v$VERSION" "$major_minor" "sha-$short")
           tag_list="$(IFS=,; echo "${tag_values[*]}")"
 
-          # A dry run loads the images into the local daemon instead of pushing
-          # them, so the build is really executed either way.
-          if [ "$DRY_RUN" = "false" ]; then
-            output_flag=--push
-          else
-            output_flag=--load
-          fi
+          # Loaded into the local daemon, never pushed: this job proves both
+          # targets build from this commit and produces no registry effect.
+          output_flag=--load
 
           # The OCI labels are set on the build command, never written into
           # deploy/Dockerfile: the runtime stage may not contain a github.com
@@ -401,25 +406,7 @@ jobs:
           build_one runtime ghcr.io/my-denia/wuwaterm "$RUNNER_TEMP/runtime-meta.json"
           build_one builder ghcr.io/my-denia/wuwaterm-builder "$RUNNER_TEMP/builder-meta.json"
 
-          # Nothing was pushed in a dry run, so there is no published digest to
-          # report. An empty string here becomes JSON null in the manifest.
-          if [ "$DRY_RUN" = "false" ]; then
-            runtime_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/runtime-meta.json")"
-            builder_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/builder-meta.json")"
-            for d in "$runtime_digest" "$builder_digest"; do
-              if [ -z "$d" ] || [ "$d" = "null" ]; then
-                echo "a push produced no image digest; stop" >&2
-                exit 1
-              fi
-            done
-          else
-            runtime_digest=""
-            builder_digest=""
-          fi
-
           {
-            echo "runtime_digest=$runtime_digest"
-            echo "builder_digest=$builder_digest"
             echo "runtime_tags=$tag_list"
             echo "builder_tags=$tag_list"
           } >> "$GITHUB_OUTPUT"
@@ -427,15 +414,116 @@ jobs:
           {
             echo "### Images"
             echo ""
-            echo "- pushed: $([ "$DRY_RUN" = "false" ] && echo yes || echo "no (dry run)")"
+            echo "- built and loaded locally; this job pushes nothing"
+            echo "- tags that a publishing run would push: $tag_list"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The push, and the only job that may write packages. Unreachable from a
+  # pull_request by its own condition, and placed AFTER the package, client and
+  # image jobs so a release tag is never pushed for a commit whose wheel, sdist
+  # or client build had already failed.
+  #
+  # What this still does not solve, deliberately: a draft that is later
+  # discarded leaves these tags on the registry. The approved design accepts
+  # that and records it - the retry of the same version overwrites them - and
+  # docs/release-checklist.md says so. Promoting staging tags to release tags
+  # after publication would remove the window at the cost of a second registry
+  # mutation outside this workflow, which is a bigger change than the window is
+  # worth.
+  push-images:
+    name: push the container images
+    needs: [preflight, python-package, client, images]
+    if: github.event_name == 'workflow_dispatch' && needs.preflight.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      runtime_digest: ${{ steps.push.outputs.runtime_digest }}
+      builder_digest: ${{ steps.push.outputs.builder_digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to the container registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Build and push both image targets
+        id: push
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
+        run: |
+          set -euo pipefail
+          major_minor="${VERSION%.*}"
+          short="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-7)"
+          tag_values=("v$VERSION" "$major_minor" "sha-$short")
+          tag_list="$(IFS=,; echo "${tag_values[*]}")"
+
+          # Same labels, same build arg, same commit as the build job above.
+          # The labels are set here and never in deploy/Dockerfile: the runtime
+          # stage may not contain a github.com string, because
+          # tests/test_deploy_scripts.py forbids the substring "git" there.
+          push_one() {
+            target="$1"
+            image="$2"
+            metafile="$3"
+            tag_args=()
+            for t in "${tag_values[@]}"; do
+              tag_args+=(--tag "$image:$t")
+            done
+            docker buildx build \
+              --file deploy/Dockerfile \
+              --target "$target" \
+              --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.source=https://github.com/My-Denia/wuwa-translate-bot" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.created=$BUILT_UTC" \
+              "${tag_args[@]}" \
+              --metadata-file "$metafile" \
+              --push \
+              .
+          }
+
+          push_one runtime ghcr.io/my-denia/wuwaterm "$RUNNER_TEMP/runtime-meta.json"
+          push_one builder ghcr.io/my-denia/wuwaterm-builder "$RUNNER_TEMP/builder-meta.json"
+
+          runtime_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/runtime-meta.json")"
+          builder_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/builder-meta.json")"
+          for d in "$runtime_digest" "$builder_digest"; do
+            if [ -z "$d" ] || [ "$d" = "null" ]; then
+              echo "a push produced no image digest; stop" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "runtime_digest=$runtime_digest"
+            echo "builder_digest=$builder_digest"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Images pushed"
+            echo ""
             echo "- tags: $tag_list"
-            echo "- ghcr.io/my-denia/wuwaterm digest: ${runtime_digest:-none}"
-            echo "- ghcr.io/my-denia/wuwaterm-builder digest: ${builder_digest:-none}"
+            echo "- ghcr.io/my-denia/wuwaterm digest: $runtime_digest"
+            echo "- ghcr.io/my-denia/wuwaterm-builder digest: $builder_digest"
           } >> "$GITHUB_STEP_SUMMARY"
 
   assemble:
     name: checksums and release manifest
-    needs: [preflight, python-package, client, images]
+    needs: [preflight, python-package, client, images, push-images]
+    # push-images is SKIPPED in every dry run, and a skipped need would
+    # otherwise skip this job too. Success of everything that did run is still
+    # required: failure() covers any failed ancestor.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -469,8 +557,11 @@ jobs:
           SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
           BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
-          RUNTIME_DIGEST: ${{ needs.images.outputs.runtime_digest }}
-          BUILDER_DIGEST: ${{ needs.images.outputs.builder_digest }}
+          # Digests come from the PUSH job, which is skipped in a dry run: its
+          # outputs are then empty and the manifest records null, which is the
+          # honest answer for an image that was built and not published.
+          RUNTIME_DIGEST: ${{ needs.push-images.outputs.runtime_digest }}
+          BUILDER_DIGEST: ${{ needs.push-images.outputs.builder_digest }}
           RUNTIME_TAGS: ${{ needs.images.outputs.runtime_tags }}
           BUILDER_TAGS: ${{ needs.images.outputs.builder_tags }}
           DATA_PROFILE: ${{ needs.preflight.outputs.data_profile }}
@@ -583,6 +674,16 @@ jobs:
         with:
           name: release-assets
           path: staging
+      - name: The manifest must describe a real publication
+        run: |
+          set -euo pipefail
+          # Fail closed before the release exists rather than after: a manifest
+          # still marked dry_run, or with a null digest, means the push job did
+          # not do what this job is about to claim it did.
+          test "$(jq -r .dry_run staging/release-manifest.json)" = "false"
+          test "$(jq -r .images.runtime.digest staging/release-manifest.json)" != "null"
+          test "$(jq -r .images.builder.digest staging/release-manifest.json)" != "null"
+          (cd staging && sha256sum -c SHA256SUMS)
       - name: Generate the release notes
         env:
           TAG: ${{ needs.preflight.outputs.tag }}

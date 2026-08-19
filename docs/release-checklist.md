@@ -131,7 +131,11 @@ the exact commit you are about to release.
    image push, no release. Read its `release-assets` artifact before doing the
    real run.
 3. **The real run** creates a **draft**. It is the only mode that logs in to
-   the registry, pushes images, or touches releases:
+   the registry, pushes images, or touches releases, and the two jobs that can
+   do so are unreachable from any other trigger. The push runs only after the
+   wheel, the sdist, the client build and both image builds have already
+   succeeded, so a release tag is never pushed for a commit whose package or
+   client had failed:
 
    ```bash
    NEXT_VERSION=vX.Y.Z
@@ -222,7 +226,21 @@ source".
 
 ## Publish
 
+**Repeat the tag check here, in the same block as the publish command.** The
+one in the draft readback above finished before the registry probes, and those
+take minutes. GitHub ignores `target_commitish` once the tag exists, so a tag
+created by anyone in that gap would silently retarget the release at publish
+time — and the check is only worth anything if nothing can happen between it
+and the command it guards:
+
 ```bash
+NEXT_VERSION=vX.Y.Z
+set -euo pipefail
+
+tag_lookup_status=0
+git ls-remote --exit-code --tags origin "refs/tags/$NEXT_VERSION" >/dev/null || tag_lookup_status=$?
+test "$tag_lookup_status" -eq 2  # absent, and a lookup ERROR also stops here
+
 gh release edit "$NEXT_VERSION" --draft=false
 ```
 

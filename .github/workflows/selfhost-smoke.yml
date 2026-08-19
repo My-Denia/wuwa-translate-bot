@@ -69,8 +69,14 @@ jobs:
         run: |
           set -euo pipefail
           started="$(date +%s)"
+          # The commit that was actually TESTED, resolved from the working tree
+          # after checkout. GITHUB_SHA is the ref the workflow was started from
+          # and a dispatch with a different `ref` input does not change it, so a
+          # report built from GITHUB_SHA would attribute this result to a commit
+          # nothing here ever ran.
           {
             echo "SMOKE_T0=${started}"
+            echo "SMOKE_COMMIT=$(git rev-parse HEAD)"
             echo "SMOKE_ROWS=${RUNNER_TEMP}/smoke-rows.md"
             echo "SMOKE_REPORT=${RUNNER_TEMP}/selfhost-smoke-report.md"
             echo "SMOKE_SECRET_FILE=${RUNNER_TEMP}/device-secret"
@@ -485,7 +491,8 @@ jobs:
           {
             echo "# Self-host smoke - container path of docs/self-hosting.md"
             echo
-            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- commit tested (git rev-parse HEAD after checkout): \`${SMOKE_COMMIT:-unresolved}\`"
+            echo "- workflow ref sha (GITHUB_SHA, not necessarily the tested commit): \`${GITHUB_SHA}\`"
             echo "- dispatch ref input: \`${SMOKE_REF:-none, this was a pull_request event}\`"
             echo "- event: \`${GITHUB_EVENT_NAME}\`"
             echo "- runner: \`ubuntu-latest\`"

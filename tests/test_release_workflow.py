@@ -123,6 +123,47 @@ def test_release_workflow_keeps_write_permissions_where_the_design_put_them():
     assert sum("contents: write" in line for line in code) == 1
 
 
+def test_no_write_scope_is_reachable_from_a_pull_request():
+    """The workflow is inside its own pull_request path filter.
+
+    So a branch pull request can rewrite this file and have it run. Any job
+    that holds a write scope on that run holds it for whatever the pull request
+    turned the job into - the dry-run switch only guards the steps that are
+    checked in. Both widened jobs therefore carry a condition that a
+    pull_request run cannot satisfy, and this test reads the condition rather
+    than trusting the comment above it.
+    """
+    text = _workflow_text()
+    lines = text.splitlines()
+    widened: dict[str, str] = {}
+    current = None
+    for index, line in enumerate(lines):
+        if re.match(r"^  [a-z0-9-]+:$", line):
+            current = line.strip().rstrip(":")
+        if line.lstrip().startswith("#"):
+            continue
+        if "packages: write" in line or "contents: write" in line:
+            # `permissions:` is nested under the job, so the scope belongs to
+            # whichever job header was seen last.
+            assert current is not None, f"a write scope outside any job at line {index + 1}"
+            widened[current] = line.strip()
+
+    assert set(widened) == {"push-images", "draft-release"}, widened
+
+    for job in widened:
+        start = lines.index(f"  {job}:")
+        block = []
+        for line in lines[start + 1 :]:
+            if re.match(r"^  [a-z0-9-]+:$", line):
+                break
+            block.append(line)
+        condition = [line for line in block if line.strip().startswith("if:")]
+        assert condition, f"{job} holds a write scope with no condition at all"
+        text_of = " ".join(condition)
+        assert "workflow_dispatch" in text_of, f"{job}: {text_of}"
+        assert "dry_run" in text_of and "'false'" in text_of, f"{job}: {text_of}"
+
+
 def test_note_template_headings_match_the_notes_the_workflow_writes():
     generated = NOTES_SECTION.findall(_workflow_text())
     documented = [
