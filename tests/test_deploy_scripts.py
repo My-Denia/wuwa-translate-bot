@@ -476,8 +476,8 @@ def _deployment_db(path: Path, suffix: str) -> None:
             source_file=f"{category}.json",
             source_id=f"{index}-{suffix}",
             text_key=f"{category}_{index}_{suffix}",
-            zh="穗穗" if category == "resonator" else f"测试{index}{suffix}",
-            en="Suisui" if category == "resonator" else f"Test {index} {suffix}",
+            zh="景燃" if category == "resonator" else f"测试{index}{suffix}",
+            en="Jingran" if category == "resonator" else f"Test {index} {suffix}",
         )
         for index, category in enumerate(
             (
@@ -1046,7 +1046,7 @@ def test_vps_update_success_publishes_verified_immutable_binding(deploy_harness)
     assert payload["image"]["id"] == NEW_IMAGE
     assert payload["database"]["sha256"] == new_hash
     assert payload["database"]["provenance"]["source_commit"] == (
-        "dae29691c04ef0f48d0810b5d244fb0b37288c60"
+        "6ce8d5eda49f2930da84d8846c144432142c7465"
     )
     assert manifest_path.stat().st_mode & 0o222 == 0
 
