@@ -8,23 +8,42 @@
 
 界面语言是中文,且只有中文。
 
+## 版本与接口兼容
+
+当前版本 **0.2.0**。它有自己的版本号,与服务端的版本号分开走。
+
+这个客户端说的是 HTTP 接口的 **`v1`** 版本 —— 也就是 `/v1/*` 这组路径,以及
+`GET /v1/meta` 回复里的 `api_version` 字段 —— 由 wuwaterm 0.3.0 及以后的服务端提供。
+
+两边对不对得上,由「服务状态」区那一次「刷新」顺带查出来:那次请求本来就要发,客户端
+读回其中的 `api_version`,发现不是自己支持的版本时,就在同一块界面上给出提示,并写明
+服务端报的是哪一版、这个客户端支持的是哪一版。版本、数据档位、术语条数等信息照常显示 ——
+你需要看见那个对不上的版本号,把它藏起来毫无意义。程序也照常可用:**这是一条警告,不是
+拒绝**,字段可能对不上比连话都不说要好办得多。
+
+这项检查没有为自己多发一次请求:没有启动时的探测,没有定时轮询,也没有额外的请求头。
+**你不开口,它就不会发出任何请求** —— 未配置状态下一个字节都不会出去,这一点由测试钉住
+(`client/tests/test_api_version_compat.py`)。
+
 ## 获取与运行
 
 从 v0.4.0 起,[GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
-会附带一个便携版压缩包 `WuwaTerm-<版本>-windows-x64.zip`,以及一份 `SHA256SUMS`。
+会附带一个便携版压缩包 `WuwaTerm-0.2.0-windows-x64.zip`(命名规律是
+`WuwaTerm-<客户端版本>-windows-x64.zip`),以及一份 `SHA256SUMS`。
 在此之前(含当前最新的 v0.3.0)发布页只提供服务端的 wheel 与 sdist,没有客户端产物,
 要用就只能按下文「构建」自行构建。
 
-1. 下载 `WuwaTerm-<版本>-windows-x64.zip` 与同一次发布的 `SHA256SUMS`。
+1. 下载 `WuwaTerm-0.2.0-windows-x64.zip` 与同一次发布的 `SHA256SUMS`。
 2. 核对校验和,再解压:
 
 ```
-Get-FileHash .\WuwaTerm-<版本>-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\WuwaTerm-0.2.0-windows-x64.zip -Algorithm SHA256
 ```
 
    把输出的哈希与 `SHA256SUMS` 中该文件那一行比对,不一致就不要解压。
 
-3. 解压到任意目录 —— 它是便携版,不写注册表,也没有安装程序;整个目录就是这个程序。
+3. 解压到任意目录 —— 压缩包里就一个 `WuwaTerm` 目录,不会把几百个文件铺到当前位置。
+   它是便携版,不写注册表,也没有安装程序;整个目录就是这个程序。
    但删掉这个目录并不等于删干净:设置文件留在 `%APPDATA%\WuwaTerm\config.json`,
    设备令牌留在 Windows 凭据管理器里。要彻底移除,先在程序里「设置 → 遗忘令牌」
    (或从凭据管理器删除 WuwaTerm 条目),再删掉那个设置文件,最后删目录。
@@ -50,7 +69,8 @@ Get-FileHash .\WuwaTerm-<版本>-windows-x64.zip -Algorithm SHA256
   也可强制指定。
 - 查询官方词典术语(`GET /v1/terms`),按「搜索」或回车发起。
 - 展示服务状态:版本、数据剖面、数据提交号、术语条数,以及是否配置了翻译模型
-  (`GET /v1/meta`)。
+  (`GET /v1/meta`);同一份回复里的 `api_version` 会与本客户端支持的接口版本核对一次,
+  对不上就在这一区给出提示。
 - 在 Windows 凭据管理器中保存**一个**设备令牌(经 `keyring`)。该令牌不会写进配置
   文件,这个程序也从不以明文把它写到磁盘上的任何地方。
 
@@ -264,14 +284,22 @@ Windows 凭据,找到 WuwaTerm 条目并删除。
 ## 构建
 
 ```
-py "-V:Astral\CPython3.12.13" -m venv client\.venv
+py -3.12 -m venv client\.venv
 client\.venv\Scripts\python.exe -m pip install -e "client[dev,build]"
 client\build.ps1
 ```
 
-这是一次 one-folder 的 PyInstaller 构建,产物是 `client\dist\WuwaTerm\WuwaTerm.exe`。
-不做代码签名。样式表等运行时资源必须列在 `client\WuwaTerm.spec` 的 `RESOURCE_FILES` 里
-才会进入产物;构建脚本会在结束前断言产物中确实存在样式表,`client/tests/test_theme_resources.py`
+`py -3.12` 只是取一个已注册的 3.12,谁家发行的都行;`py -3.13` 一样可以,机器上没有这个
+启动器时,`python3.12 -m venv client\.venv` 或者直接写解释器的完整路径,效果相同。这里
+划下的是版本这条线,不是供应商 —— 只要满足 `requires-python`(3.12 及以上)就够了。
+
+这是一次 one-folder 的 PyInstaller 构建,产物是 `client\dist\WuwaTerm\WuwaTerm.exe`;
+自检通过之后,脚本会把这个目录打成 `client\dist\WuwaTerm-<客户端版本>-windows-x64.zip`,
+也就是发布页上的那个文件名,版本号从构建出来的包自己那里读,不写死在脚本里。
+`client\dist\` 不进版本库。不做代码签名。
+
+样式表等运行时资源必须列在 `client\WuwaTerm.spec` 的 `RESOURCE_FILES` 里才会进入产物;
+构建脚本会在结束前断言产物中确实存在样式表,`client/tests/test_theme_resources.py`
 则在测试阶段断言 spec 覆盖了 `resources/` 下的每一个文件。
 
 ## 运行测试

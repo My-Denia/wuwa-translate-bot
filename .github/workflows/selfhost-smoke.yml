@@ -1,0 +1,551 @@
+name: Self-host smoke
+
+# A clean room for the CONTAINER path of docs/self-hosting.md.
+#
+# The runner has never seen this project, has no database, no credential store
+# and no model endpoint. It runs the commands that document gives a stranger,
+# in the order that document gives them: configure, pre-create the bind mounts,
+# build the images including the profiled builder, refresh the pinned upstream
+# data, build and verify the candidate database, promote it as an ordinary
+# user, start the API alone, issue the first device credential, do the first
+# exact lookup and the first sentence translation, back the credential store up
+# and restore it.
+#
+# A step that cannot be run as the document writes it is a defect IN THE
+# DOCUMENT and has to be fixed there. Nothing here may quietly work around one
+# - that would make this job green and the document still wrong, which is the
+# one outcome a clean room exists to prevent.
+#
+# The model endpoint is the single thing the runner cannot bring: it is a
+# 40-line echo server started in the job, so the translation path is exercised
+# end to end without any external account. It answers POST /chat/completions
+# with the user message it was given, which keeps every term placeholder
+# present exactly once and therefore restores cleanly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit or ref to check out (a release tag, a branch or a sha)"
+        required: false
+        default: main
+        type: string
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "docs/self-hosting.md"
+      - ".github/workflows/selfhost-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  container-path:
+    name: docs/self-hosting.md container path
+    runs-on: ubuntu-latest
+    # The data refresh clones about 1 GB sparsely from the upstream data
+    # repository, and both image targets are built from scratch on a cold
+    # runner. This is a slow job by construction, not a hung one.
+    timeout-minutes: 60
+    env:
+      # Workflow expressions are passed as environment values and never
+      # interpolated into shell text.
+      SMOKE_REF: ${{ inputs.ref }}
+      # Not 8788: that port belongs to the API this job is testing.
+      SMOKE_MOCK_PORT: "8799"
+      SMOKE_API_PORT: "8788"
+      # The lookup term is NOT pinned here. This workflow can be dispatched at
+      # any ref, including an older release tag, and a term hard-coded to the
+      # current data pin would make the exact-lookup step fail on a ref whose
+      # database is correct - 景燃 exists only from 3.6 onward. The pair is read
+      # out of the CHECKED-OUT source profile instead, below.
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v6
+        with:
+          # Empty on a pull_request, where checkout uses the event's own ref.
+          ref: ${{ inputs.ref }}
+
+      - name: Start the clock
+        run: |
+          set -euo pipefail
+          started="$(date +%s)"
+          # The commit that was actually TESTED, resolved from the working tree
+          # after checkout. GITHUB_SHA is the ref the workflow was started from
+          # and a dispatch with a different `ref` input does not change it, so a
+          # report built from GITHUB_SHA would attribute this result to a commit
+          # nothing here ever ran.
+          {
+            echo "SMOKE_T0=${started}"
+            echo "SMOKE_COMMIT=$(git rev-parse HEAD)"
+            echo "SMOKE_ROWS=${RUNNER_TEMP}/smoke-rows.md"
+            echo "SMOKE_REPORT=${RUNNER_TEMP}/selfhost-smoke-report.md"
+            echo "SMOKE_SECRET_FILE=${RUNNER_TEMP}/device-secret"
+            echo "SMOKE_TOKEN_FILE=${RUNNER_TEMP}/device-token"
+            echo "SMOKE_MOCK_LOG=${RUNNER_TEMP}/mock-openai.log"
+            echo "SMOKE_MOCK_PID=${RUNNER_TEMP}/mock-openai.pid"
+          } >> "$GITHUB_ENV"
+          : > "${RUNNER_TEMP}/smoke-rows.md"
+          docker compose version
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Take the lookup pair from the checked-out source profile
+        run: |
+          set -euo pipefail
+          # Imported from the ref under test, never hard-coded: the pair that
+          # verify_db.py requires at THIS commit is the pair guaranteed to be in
+          # the database this job is about to build. A dispatch at an older tag
+          # gets that tag's pair, and a future pin that retires this one is
+          # followed automatically instead of turning the smoke red on a correct
+          # build.
+          python3 - >> "$GITHUB_ENV" <<'PY'
+          import sys
+
+          sys.path.insert(0, "src")
+          from wuwaterm.constants import SOURCE_PROFILES
+
+          profile = SOURCE_PROFILES["arikatsu"]
+          pairs = profile.representative_exact_hits
+          if not pairs:
+              raise SystemExit(
+                  "the arikatsu profile declares no representative exact hit; "
+                  "this smoke has nothing guaranteed to look up"
+              )
+          zh, en = pairs[0]
+          print(f"SMOKE_TERM_ZH={zh}")
+          print(f"SMOKE_TERM_EN={en}")
+          print(f"SMOKE_SENTENCE_ZH={zh}在这场战斗中的表现非常出色")
+          PY
+          grep '^SMOKE_TERM_\|^SMOKE_SENTENCE_' "$GITHUB_ENV"
+
+      - name: Configure - cp deploy/env.example .env
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          cp deploy/env.example .env
+          chmod 600 .env
+          stat -c '%a %n' .env
+          printf '| configure .env | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Start the mock OpenAI-compatible endpoint
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          cat > "${RUNNER_TEMP}/mock_openai.py" <<'PY'
+          """Smallest endpoint that satisfies the client in src/wuwaterm/sentence.py.
+
+          POST /chat/completions -> the LAST user message, echoed back verbatim as
+          the assistant content. Echoing is not laziness: the pipeline locks every
+          known term behind an opaque placeholder and refuses a reply in which any
+          placeholder does not appear exactly once, so an echo is the only reply
+          that is correct by construction for every input. Standard library only.
+          """
+
+          import json
+          import os
+          import socketserver
+          from http.server import BaseHTTPRequestHandler
+
+          PORT = int(os.environ["SMOKE_MOCK_PORT"])
+
+
+          class Handler(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+
+              def do_POST(self):
+                  if self.path.rstrip("/") != "/chat/completions":
+                      self.send_error(404, "no such route")
+                      return
+                  length = int(self.headers.get("Content-Length") or 0)
+                  raw = self.rfile.read(length)
+                  try:
+                      payload = json.loads(raw.decode("utf-8"))
+                      content = ""
+                      for message in payload["messages"]:
+                          if message.get("role") == "user":
+                              content = message.get("content") or ""
+                  except (ValueError, KeyError, TypeError, AttributeError):
+                      self.send_error(400, "not a chat completion request")
+                      return
+                  body = json.dumps(
+                      {"choices": [{"message": {"role": "assistant", "content": content}}]}
+                  ).encode("utf-8")
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def do_GET(self):
+                  # Only the readiness probe arrives here; a 404 still proves the
+                  # socket is answering.
+                  self.send_error(404, "no such route")
+
+              def log_message(self, fmt, *args):
+                  print("mock: " + (fmt % args), flush=True)
+
+
+          class Server(socketserver.ThreadingTCPServer):
+              allow_reuse_address = True
+              daemon_threads = True
+
+
+          with Server(("127.0.0.1", PORT), Handler) as httpd:
+              print("mock listening on 127.0.0.1:%d" % PORT, flush=True)
+              httpd.serve_forever()
+          PY
+          nohup python3 "${RUNNER_TEMP}/mock_openai.py" > "$SMOKE_MOCK_LOG" 2>&1 &
+          echo "$!" > "$SMOKE_MOCK_PID"
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:${SMOKE_MOCK_PORT}/" 2>/dev/null; then
+              ready="yes"
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "the mock endpoint never answered on 127.0.0.1:${SMOKE_MOCK_PORT}" >&2
+            cat "$SMOKE_MOCK_LOG" >&2 || true
+            exit 1
+          fi
+          cat "$SMOKE_MOCK_LOG"
+          printf '| mock endpoint ready | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Point .env at the mock endpoint
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          python3 - <<'PY'
+          """Replace the three empty model assignments in place; never duplicate."""
+
+          import os
+          import pathlib
+
+          values = {
+              "WUWATERM_OPENAI_BASE_URL": "http://127.0.0.1:%s" % os.environ["SMOKE_MOCK_PORT"],
+              "WUWATERM_OPENAI_API_KEY": "smoke-not-a-real-key",
+              "WUWATERM_OPENAI_MODEL": "smoke-echo",
+          }
+          path = pathlib.Path(".env")
+          seen = set()
+          out = []
+          for line in path.read_text(encoding="utf-8").splitlines():
+              key = line.split("=", 1)[0] if "=" in line else ""
+              if key in values:
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  out.append("%s=%s" % (key, values[key]))
+              else:
+                  out.append(line)
+          for key, value in values.items():
+              if key not in seen:
+                  out.append("%s=%s" % (key, value))
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
+          PY
+          grep -n '^WUWATERM_OPENAI_' .env
+          test "$(grep -c '^WUWATERM_OPENAI_' .env)" -eq 3
+          printf '| .env points at the mock | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Pre-create the bind-mounted directories
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          mkdir -p data state state-api
+          chmod 700 state-api
+          stat -c '%a %U %n' data state state-api
+          printf '| pre-create bind mounts | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Build the images, builder included
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml --profile builder build
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | sort
+          printf '| build images | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Refresh the pinned upstream data
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
+          du -sh data/wutheringdata || true
+          printf '| refresh-data | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Build the candidate database
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder build-db --atomic
+          test -s data/terms.candidate.db
+          printf '| build-db --atomic | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Verify the candidate database
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
+          printf '| verify-db | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Promote the candidate as the runner user
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          # No sudo, deliberately. The document claims that pre-creating data/
+          # before any Compose command keeps this rename possible for the
+          # ordinary user. If this fails, that claim is wrong and the document
+          # is what has to change.
+          ls -ld data
+          stat -c '%U %a %n' data data/terms.candidate.db
+          mv data/terms.candidate.db data/terms.db
+          test -s data/terms.db
+          printf '| promote terms.db (no sudo) | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Start the API service alone
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
+          ready=""
+          for _ in $(seq 1 60); do
+            code="$(curl -sS -o "${RUNNER_TEMP}/readyz.json" -w '%{http_code}' \
+              --max-time 5 "http://127.0.0.1:${SMOKE_API_PORT}/readyz" || true)"
+            if [ "$code" = "200" ]; then
+              ready="yes"
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo "the API never answered 200 on /readyz" >&2
+            docker compose -f deploy/docker-compose.yml logs --no-color wuwaterm-api >&2
+            exit 1
+          fi
+          cat "${RUNNER_TEMP}/readyz.json"
+          echo
+          printf '| API up and ready | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Issue the first device credential
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          secret="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+          echo "::add-mask::${secret}"
+          umask 077
+          printf '%s\n' "$secret" > "$SMOKE_SECRET_FILE"
+          issued="$(docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api device issue --name "smoke" < "$SMOKE_SECRET_FILE")"
+          printf '%s\n' "$issued"
+          device_id="$(printf '%s\n' "$issued" | sed -n 's/^device_id: //p')"
+          test -n "$device_id"
+          token="wtd1.${device_id}.${secret}"
+          echo "::add-mask::${token}"
+          printf '%s' "$token" > "$SMOKE_TOKEN_FILE"
+          printf '| device issue | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: First exact lookup
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          token="$(cat "$SMOKE_TOKEN_FILE")"
+          code="$(curl -sS -o "${RUNNER_TEMP}/terms.json" -w '%{http_code}' \
+            --max-time 30 --get --data-urlencode "q=${SMOKE_TERM_ZH}" \
+            -H "Authorization: Bearer ${token}" \
+            "http://127.0.0.1:${SMOKE_API_PORT}/v1/terms" || true)"
+          echo "status=${code}"
+          cat "${RUNNER_TEMP}/terms.json"
+          echo
+          test "$code" = "200"
+          grep -qE '"reason": ?"exact"' "${RUNNER_TEMP}/terms.json"
+          grep -qF "$SMOKE_TERM_EN" "${RUNNER_TEMP}/terms.json"
+          printf '| first exact lookup | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: First sentence translation
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          token="$(cat "$SMOKE_TOKEN_FILE")"
+          python3 - > "${RUNNER_TEMP}/translation-request.json" <<'PY'
+          import json
+          import os
+
+          print(json.dumps({"text": os.environ["SMOKE_SENTENCE_ZH"], "to": "en"}))
+          PY
+          code="$(curl -sS -o "${RUNNER_TEMP}/translation.json" -w '%{http_code}' \
+            --max-time 60 -X POST \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@${RUNNER_TEMP}/translation-request.json" \
+            "http://127.0.0.1:${SMOKE_API_PORT}/v1/translations" || true)"
+          echo "status=${code}"
+          cat "${RUNNER_TEMP}/translation.json"
+          echo
+          # llm_unavailable here is a FAILURE, never a skip: the point of the
+          # mock endpoint is that this path is proven rather than assumed.
+          if ! grep -qE '"kind": ?"llm"' "${RUNNER_TEMP}/translation.json"; then
+            echo "the translation did not reach the model" >&2
+            echo "--- mock endpoint log ---" >&2
+            cat "$SMOKE_MOCK_LOG" >&2 || true
+            echo "--- api log ---" >&2
+            docker compose -f deploy/docker-compose.yml logs --no-color wuwaterm-api >&2
+            exit 1
+          fi
+          test "$code" = "200"
+          printf '| first sentence translation | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Back the credential store up
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          if ! command -v sqlite3 > /dev/null; then
+            echo "sqlite3 is not on this runner; installing it (the document says it is not a dependency of this project)"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends sqlite3
+          fi
+          sqlite3 --version
+          before="$(docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api device list | grep -c 'scopes=' || true)"
+          echo "devices before the backup: ${before}"
+          test "$before" -ge 1
+          echo "SMOKE_DEVICES_BEFORE=${before}" >> "$GITHUB_ENV"
+          # Measurement, not an assertion: does the document's sudo really earn
+          # its place on the container path? The API process runs as root in the
+          # shipped image, so the store should NOT be readable as the runner.
+          unpriv=0
+          sqlite3 state-api/devices.db ".backup '${RUNNER_TEMP}/unprivileged-probe.db'" \
+            > "${RUNNER_TEMP}/unprivileged-probe.log" 2>&1 || unpriv=$?
+          echo "unprivileged .backup exit status: ${unpriv}"
+          cat "${RUNNER_TEMP}/unprivileged-probe.log"
+          echo "SMOKE_UNPRIV_BACKUP=${unpriv}" >> "$GITHUB_ENV"
+          # The document's own commands, with the privileges its container-path
+          # note calls for.
+          mkdir -p backup
+          chmod 700 backup
+          ( umask 077 && sudo sqlite3 state-api/devices.db ".backup 'backup/devices.db'" )
+          sudo chmod 600 backup/devices.db
+          sudo ls -l backup/devices.db
+          test -s backup/devices.db
+          mode="$(stat -c '%a' backup/devices.db)"
+          echo "backup mode: ${mode}"
+          test "$mode" = "600"
+          printf '| online backup of the credential store | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Restore the credential store and re-count the devices
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml stop wuwaterm-api
+          # The stale write-ahead log and shared-memory files belong to the
+          # database being replaced; leaving them beside a restored file is how
+          # a restore silently resurrects the state it was meant to undo.
+          sudo rm -f state-api/devices.db-wal state-api/devices.db-shm
+          sudo cp backup/devices.db state-api/devices.db
+          sudo chmod 600 state-api/devices.db
+          docker compose -f deploy/docker-compose.yml start wuwaterm-api
+          ready=""
+          for _ in $(seq 1 60); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+              "http://127.0.0.1:${SMOKE_API_PORT}/readyz" || true)"
+            if [ "$code" = "200" ]; then
+              ready="yes"
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo "the API never came back after the restore" >&2
+            docker compose -f deploy/docker-compose.yml logs --no-color wuwaterm-api >&2
+            exit 1
+          fi
+          after="$(docker compose -f deploy/docker-compose.yml run --rm -T wuwaterm-api device list | grep -c 'scopes=' || true)"
+          echo "devices after the restore: ${after} (before: ${SMOKE_DEVICES_BEFORE})"
+          # A business count, not an integrity check: an integrity check passes
+          # on a database that is intact and stale.
+          test "$after" = "$SMOKE_DEVICES_BEFORE"
+          printf '| restore and re-count devices | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Stop the services
+        run: |
+          set -euo pipefail
+          smoke_start="$(date +%s)"
+          docker compose -f deploy/docker-compose.yml down
+          printf '| compose down | %s | ok |\n' \
+            "$(( $(date +%s) - smoke_start ))" >> "$SMOKE_ROWS"
+
+      - name: Compose logs on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          docker compose -f deploy/docker-compose.yml ps --all || true
+          docker compose -f deploy/docker-compose.yml logs --no-color || true
+          echo "--- mock endpoint log ---"
+          cat "${SMOKE_MOCK_LOG:-/dev/null}" || true
+          printf '| A STEP ABOVE FAILED | - | failed |\n' \
+            >> "${SMOKE_ROWS:-/dev/null}" || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          set -uo pipefail
+          docker compose -f deploy/docker-compose.yml down --remove-orphans || true
+          if [ -f "${SMOKE_MOCK_PID:-/nonexistent}" ]; then
+            kill "$(cat "$SMOKE_MOCK_PID")" || true
+          fi
+          rm -f "${SMOKE_SECRET_FILE:-}" "${SMOKE_TOKEN_FILE:-}" || true
+
+      - name: Assemble the report
+        if: always()
+        run: |
+          set -uo pipefail
+          report="${SMOKE_REPORT:-${RUNNER_TEMP}/selfhost-smoke-report.md}"
+          rows="${SMOKE_ROWS:-${RUNNER_TEMP}/smoke-rows.md}"
+          started="${SMOKE_T0:-0}"
+          total="unknown"
+          if [ "$started" != "0" ]; then
+            total="$(( $(date +%s) - started ))"
+          fi
+          {
+            echo "# Self-host smoke - container path of docs/self-hosting.md"
+            echo
+            echo "- commit tested (git rev-parse HEAD after checkout): \`${SMOKE_COMMIT:-unresolved}\`"
+            echo "- workflow ref sha (GITHUB_SHA, not necessarily the tested commit): \`${GITHUB_SHA}\`"
+            echo "- dispatch ref input: \`${SMOKE_REF:-none, this was a pull_request event}\`"
+            echo "- event: \`${GITHUB_EVENT_NAME}\`"
+            echo "- runner: \`ubuntu-latest\`"
+            echo "- finished: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`"
+            echo "- total seconds: \`${total}\`"
+            echo "- unprivileged \`.backup\` of the credential store exited: \`${SMOKE_UNPRIV_BACKUP:-not reached}\` (non-zero is what the document's container-path \`sudo\` note predicts)"
+            echo
+            echo "A step with no row below did not complete: the rows are written"
+            echo "by the steps themselves, so this table cannot claim a step that"
+            echo "never ran."
+            echo
+            echo "| step | seconds | outcome |"
+            echo "| --- | --- | --- |"
+            cat "$rows" 2>/dev/null || echo "| no rows recorded | - | failed |"
+          } > "$report"
+          cat "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selfhost-smoke-report
+          path: ${{ runner.temp }}/selfhost-smoke-report.md
+          if-no-files-found: error

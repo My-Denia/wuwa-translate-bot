@@ -33,6 +33,25 @@ TokenProvider = Callable[[], "str | None"]
 
 _BEARER_PREFIX = "Bearer "
 
+# The HTTP API versions this client release speaks.
+#
+# The contract, stated once and in full: client 0.2.x speaks HTTP API `v1` -
+# the `/v1/*` paths every method below calls, and the `api_version` field of
+# `GET /v1/meta` - as served by wuwaterm >= 0.3.0. The constant lives in this
+# module because this module is the one that owns the protocol: it builds the
+# paths and it parses the replies, so a version the client no longer speaks
+# would be a change HERE, not in a view.
+#
+# It is checked on the `/v1/meta` reply the status view ALREADY fetches when
+# the owner presses 刷新. Nothing about this check sends a request - not at
+# startup, not on a timer, not anywhere else. The unconfigured client still
+# sends nothing at all, which is a tested invariant of this application
+# (issues #68 / #80) and not something a compatibility check may spend.
+#
+# A mismatch is a WARNING, never a refusal: see
+# StatusView._apply_api_version, reached from _show_meta.
+SUPPORTED_API_VERSIONS: tuple[str, ...] = ("v1",)
+
 
 def default_token_provider() -> str | None:
     return read_token()

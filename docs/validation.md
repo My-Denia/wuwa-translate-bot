@@ -30,6 +30,20 @@ Docker respectively. If a change touches the lock file, the packaging metadata,
 job list is in [the gate table below](#gates-for-the-http-api-and-the-desktop-client)
 and in `.github/workflows/ci.yml`.
 
+Two further workflows run on a pull request, but only when it touches what they
+cover. `.github/workflows/release.yml` runs in dry-run mode when the pull
+request changes that workflow, `deploy/**`, `client/**` or `pyproject.toml`: it
+builds the wheel, the sdist, the Windows client zip, both container images, the
+checksums and the release manifest, and publishes nothing.
+`.github/workflows/selfhost-smoke.yml` runs when the pull request changes
+`deploy/**` or [Self-Hosting](self-hosting.md): it follows that guide's
+container path end to end on a clean runner — image build, data refresh,
+database build and verification, an API-only start, a device credential, one
+exact lookup, one sentence translation against a mock model endpoint, and a
+credential-store backup and restore. It is the only gate in this repository
+that runs the documented install instead of reading it, which is exactly the
+class of defect the text gates cannot see.
+
 `README.md` and `README.en.md` used to carry their own command block, and it
 was **not** equivalent: it predated both the linter and the API-contract gate,
 so following it could leave a contributor green locally and red on the pull

@@ -451,7 +451,99 @@ def test_compose_uses_readonly_data_for_runtime_and_writable_data_for_builder():
     builder_section = text.split("  wuwaterm-builder:", 1)[1]
     assert "env_file:" not in builder_section
     assert "${WUWATERM_RUNTIME_IMAGE:-wuwaterm-runtime:local}" in text
+    # The builder reference is an expression whose default is the local tag,
+    # and the bare default is a SUBSTRING of that expression: asserting the
+    # substring alone would keep passing if the expression were dropped again.
+    assert "${WUWATERM_BUILDER_IMAGE:-wuwaterm-builder:local}" in builder_section
+    # Still profiled, so a bare `build` or `up` cannot start the data-build
+    # toolchain by accident.
+    assert 'profiles: ["builder"]' in builder_section
     assert "SOURCE_COMMIT: ${SOURCE_COMMIT:-unknown}" in text
+
+
+def test_compose_builder_image_defaults_to_the_local_tag():
+    """The builder reference is overridable; its DEFAULT must not move.
+
+    deploy/vps-update.sh never sets WUWATERM_BUILDER_IMAGE and rebuilds the
+    local tag from the verified checkout before every data command, so a
+    default that resolved to anything else would silently change the code that
+    refreshes, builds and verifies the production database.
+    """
+    text = (ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    builder_section = text.split("  wuwaterm-builder:", 1)[1]
+
+    image_lines = [
+        line.strip()
+        for line in builder_section.splitlines()
+        if line.strip().startswith("image:")
+    ]
+    assert image_lines == ["image: ${WUWATERM_BUILDER_IMAGE:-wuwaterm-builder:local}"]
+
+    expression = image_lines[0].split("image:", 1)[1].strip()
+    assert expression.startswith("${") and expression.endswith("}")
+    variable, separator, default = expression[2:-1].partition(":-")
+    assert variable == "WUWATERM_BUILDER_IMAGE"
+    assert separator == ":-"
+    assert default == "wuwaterm-builder:local"
+
+    # ...and nothing in the repository sets the variable, so the default is
+    # what the production updater and a fresh self-hosted install both get.
+    for relative in ("deploy/env.example", ".env.example", "deploy/vps-update.sh"):
+        assert "WUWATERM_BUILDER_IMAGE" not in (ROOT / relative).read_text(
+            encoding="utf-8"
+        )
+
+
+def test_ghcr_overlay_declares_image_references_only():
+    """The overlay may only redirect images.
+
+    It is passed after the base file, so anything else it declared would
+    silently override a reviewed decision in that file - the loopback bind, the
+    read-only data mount, the blanked secrets - from a file that reads like a
+    list of image names.
+    """
+    path = ROOT / "deploy" / "docker-compose.ghcr.yml"
+    body_lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert body_lines[0] == "services:"
+
+    services: list[str] = []
+    images: list[str] = []
+    for line in body_lines[1:]:
+        if line.startswith("    image: "):
+            images.append(line.removeprefix("    image: "))
+        elif line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            services.append(line.strip().rstrip(":"))
+        else:
+            raise AssertionError(f"unexpected key in the overlay: {line!r}")
+
+    assert services == ["wuwaterm", "wuwaterm-api", "wuwaterm-builder"]
+    assert len(images) == 3
+    # Comments are excluded on purpose: the header explains that the overlay
+    # does not remove the base file's build sections, and that sentence must
+    # not be what this assertion reads.
+    body = "\n".join(body_lines)
+    for forbidden in (
+        "build:",
+        "command:",
+        "volumes:",
+        "environment:",
+        "env_file:",
+        "profiles:",
+        "network_mode:",
+    ):
+        assert forbidden not in body
+
+    assert any(image.startswith("ghcr.io/my-denia/wuwaterm:") for image in images)
+    assert any(
+        image.startswith("ghcr.io/my-denia/wuwaterm-builder:") for image in images
+    )
+    # One knob, and it is required: an unset tag stops Compose instead of
+    # resolving to something arbitrary.
+    assert all("${WUWATERM_IMAGE_TAG:?" in image for image in images)
 
 
 NEW_COMMIT = "2" * 40

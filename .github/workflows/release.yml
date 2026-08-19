@@ -1,0 +1,873 @@
+name: Release
+
+# Release mechanics, deliberately without a tag trigger: the tag is created by
+# GitHub when a human publishes the draft, so a draft that is discarded leaves
+# no tag behind. This workflow never publishes.
+#
+# A pull_request run is ALWAYS a dry run: it builds everything, pushes nothing,
+# creates nothing, and its manifest records `"dry_run": true` with null digests.
+on:
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: >-
+          Full 40-character commit sha on main to release from. It is verified
+          to be an ancestor of origin/main before anything is pushed.
+        required: true
+        type: string
+      dry_run:
+        description: >-
+          Build and check everything, but push no image and create no draft.
+        required: false
+        default: true
+        type: boolean
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - deploy/**
+      - client/**
+      - pyproject.toml
+
+# The workflow default is read-only. Exactly two jobs widen it, each by one
+# scope: `push-images` takes packages:write and `draft-release` takes
+# contents:write. BOTH are gated on a workflow_dispatch with dry_run=false, so
+# neither is reachable from the pull_request trigger this workflow also has -
+# which matters because this file is inside its own path filter, and a job that
+# holds a write scope on a pull_request run holds it for whatever that pull
+# request changed the job into.
+permissions:
+  contents: read
+
+concurrency:
+  # Every dispatch shares ONE group, whatever commit it targets. Keying on
+  # target_commit put two dispatches at different commits in different groups -
+  # and two commits can declare the same version (a retry with a corrected sha
+  # is the obvious case), so both would pass the tag-absence preflight and then
+  # race for the same image tags, leaving whichever finished last in place while
+  # the other run's manifest recorded the digests it had pushed. Pull requests
+  # keep a per-ref group so one pull request never queues behind another.
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch'
+    && 'dispatch' || format('pr-{0}', github.ref) }}
+  # Never cancel a dispatch: it may be halfway through pushing images.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  preflight:
+    name: preflight (versions, data pin, tag absence)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      tag: ${{ steps.versions.outputs.tag }}
+      client_version: ${{ steps.versions.outputs.client_version }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+      source_commit: ${{ steps.commit.outputs.source_commit }}
+      built_utc: ${{ steps.mode.outputs.built_utc }}
+      data_profile: ${{ steps.datapin.outputs.data_profile }}
+      data_repo: ${{ steps.datapin.outputs.data_repo }}
+      data_commit: ${{ steps.datapin.outputs.data_commit }}
+      game_version: ${{ steps.datapin.outputs.game_version }}
+      resource_version: ${{ steps.datapin.outputs.resource_version }}
+      changelist: ${{ steps.datapin.outputs.changelist }}
+    steps:
+      # A dispatch builds the requested commit; a pull_request builds the ref
+      # the event already checked out. Every other job repeats this same
+      # expression rather than checking out a resolved sha, because on a
+      # pull_request the ref is a merge ref that checkout resolves itself.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Decide dry-run mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # Fail safe: only an explicit `false` on a workflow_dispatch turns
+          # the pushing/publishing behaviour on. Everything else is a dry run.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_DRY_RUN" = "false" ]; then
+            dry_run=false
+          else
+            dry_run=true
+          fi
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+          # One timestamp for the image labels and the manifest, so they agree.
+          echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT_NAME dry_run=$dry_run"
+
+      - name: Resolve the source commit
+        id: commit
+        run: |
+          set -euo pipefail
+          echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Read and format-check the declared versions
+        id: versions
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          client_version="$(python3 -c 'import tomllib; print(tomllib.load(open("client/pyproject.toml", "rb"))["project"]["version"])')"
+          for v in "$version" "$client_version"; do
+            if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "declared version '$v' is not X.Y.Z" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "client_version=$client_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "server $version / client $client_version"
+
+      - name: Read the data pin from the source profile
+        id: datapin
+        run: |
+          set -euo pipefail
+          # Imported, not pattern-matched: the release states the pin the code
+          # would actually build from.
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import sys
+
+          sys.path.insert(0, "src")
+          from wuwaterm.constants import SOURCE_PROFILES
+
+          p = SOURCE_PROFILES["arikatsu"]
+          print(f"data_profile={p.name}")
+          print(f"data_repo={p.repo_url}")
+          print(f"data_commit={p.pinned_commit}")
+          print(f"game_version={p.expected_game_version}")
+          print(f"resource_version={p.expected_resource_version}")
+          print(f"changelist={p.expected_changelist}")
+          PY
+
+      - name: Tag absence check
+        env:
+          TAG: ${{ steps.versions.outputs.tag }}
+          DRY_RUN: ${{ steps.mode.outputs.dry_run }}
+        run: |
+          set -uo pipefail
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 || status=$?
+          case "$status" in
+            0) verdict="PRESENT - a ref for this tag already exists";;
+            2) verdict="absent - this is the pass state";;
+            *) verdict="LOOKUP ERROR - the remote lookup itself failed";;
+          esac
+          echo "refs/tags/$TAG: $verdict (git ls-remote status $status)"
+          {
+            echo "### Tag preflight"
+            echo ""
+            echo "- ref: refs/tags/$TAG"
+            echo "- git ls-remote --exit-code status: $status"
+            echo "- verdict: $verdict"
+            echo "- enforced: $([ "$DRY_RUN" = "false" ] && echo yes || echo "no (dry run - reported only)")"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Fail-closed only when something is actually going to be pushed. A
+          # dry run reports the state and never blocks: the pipeline must be
+          # testable on a PR while the current version is already released.
+          if [ "$DRY_RUN" = "false" ] && [ "$status" -ne 2 ]; then
+            echo "tag preflight failed; stop" >&2
+            exit 1
+          fi
+
+      - name: The target must be an ancestor of origin/main
+        if: steps.mode.outputs.dry_run == 'false'
+        env:
+          TARGET: ${{ inputs.target_commit }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TARGET" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "target_commit '$TARGET' is not a full 40-character sha" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$TARGET" origin/main
+          echo "$TARGET is an ancestor of origin/main"
+
+      - name: Preflight summary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ steps.mode.outputs.dry_run }}
+          TAG: ${{ steps.versions.outputs.tag }}
+          VERSION: ${{ steps.versions.outputs.version }}
+          CLIENT_VERSION: ${{ steps.versions.outputs.client_version }}
+          SOURCE_COMMIT: ${{ steps.commit.outputs.source_commit }}
+          BUILT_UTC: ${{ steps.mode.outputs.built_utc }}
+          DATA_PROFILE: ${{ steps.datapin.outputs.data_profile }}
+          DATA_REPO: ${{ steps.datapin.outputs.data_repo }}
+          DATA_COMMIT: ${{ steps.datapin.outputs.data_commit }}
+          GAME_VERSION: ${{ steps.datapin.outputs.game_version }}
+          RESOURCE_VERSION: ${{ steps.datapin.outputs.resource_version }}
+          CHANGELIST: ${{ steps.datapin.outputs.changelist }}
+        run: |
+          set -euo pipefail
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### Preflight
+
+          | field | value |
+          | --- | --- |
+          | event | $EVENT_NAME |
+          | dry run | $DRY_RUN |
+          | tag (created only when a human publishes the draft) | $TAG |
+          | server version | $VERSION |
+          | client version | $CLIENT_VERSION |
+          | source commit | $SOURCE_COMMIT |
+          | built (UTC) | $BUILT_UTC |
+          | data profile | $DATA_PROFILE |
+          | data repository | $DATA_REPO |
+          | data commit | $DATA_COMMIT |
+          | GameVer | $GAME_VERSION |
+          | ResVer | $RESOURCE_VERSION |
+          | Changelist | $CHANGELIST |
+          EOF
+          cat "$GITHUB_STEP_SUMMARY"
+
+  python-package:
+    name: wheel/sdist build, audit, install
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -U pip build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - run: python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz
+      - name: Install wheel into a clean venv and smoke it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-wheel"
+          "$RUNNER_TEMP/venv-wheel/bin/pip" install --no-cache-dir dist/*.whl
+          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-wheel/bin/python" -c "import wuwaterm_api"
+          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-wheel/bin/wuwaterm-api" --help
+      - name: Install sdist into a clean venv and smoke it
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-sdist"
+          "$RUNNER_TEMP/venv-sdist/bin/pip" install --no-cache-dir dist/*.tar.gz
+          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm"
+          "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
+          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
+          "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-package
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  client:
+    name: desktop client zip (windows)
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # build.ps1 refuses to fall back to a system interpreter, so the same
+      # client-local virtual environment an operator would create is created
+      # here and the build runs through the same script.
+      - run: python -m venv client/.venv
+      - run: client/.venv/Scripts/python.exe -m pip install -U pip
+      - run: client/.venv/Scripts/python.exe -m pip install -e "client[dev,build]"
+      - name: Client test suite
+        working-directory: client
+        run: .venv/Scripts/python.exe -m pytest
+      - name: One-folder PyInstaller build
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File client/build.ps1
+      - name: The built artifact passes its own start-up self-check
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Start-Process -Wait -PassThru, not the call operator: WuwaTerm.exe
+          # is built for the WINDOWS subsystem (console=False in the spec), so
+          # PowerShell does not wait for it and leaves $LASTEXITCODE unset. The
+          # first version of this step used `&` and failed with an empty exit
+          # code on an artifact that had just passed the identical check inside
+          # build.ps1 - which is how build.ps1 already does it, and why.
+          $check = Start-Process -FilePath "client/dist/WuwaTerm/WuwaTerm.exe" `
+            -ArgumentList "--self-check" -Wait -PassThru
+          if ($check.ExitCode -ne 0) {
+            throw "the built artifact failed its start-up self-check (exit $($check.ExitCode))"
+          }
+          Write-Host "self-check exit code: $($check.ExitCode)"
+      - name: Package the one-folder build as the release zip
+        shell: pwsh
+        env:
+          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $folder = "client/dist/WuwaTerm"
+          $zip = "client/dist/WuwaTerm-${env:CLIENT_VERSION}-windows-x64.zip"
+          # build.ps1 may already produce this zip itself. Use the script's own
+          # output when it is there, and produce it here when it is not, so
+          # neither arrangement breaks this job.
+          if (Test-Path -LiteralPath $zip) {
+            Write-Host "using the zip build.ps1 produced: $zip"
+          } else {
+            Write-Host "build.ps1 produced no zip; packaging $folder"
+            Compress-Archive -Path $folder -DestinationPath $zip
+          }
+          $item = Get-Item -LiteralPath $zip
+          if ($item.Length -le 0) {
+            throw "the release zip is empty: $zip"
+          }
+          Write-Host "release zip: $($item.FullName) ($($item.Length) bytes)"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: client-zip
+          path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
+          if-no-files-found: error
+
+  # Builds both targets and pushes NOTHING, so it needs no registry permission
+  # and is safe to reach from a pull_request. The push lives in push-images
+  # below. Splitting them is not tidiness: this workflow is inside its own
+  # pull_request path filter, so anyone who can open a branch pull request here
+  # can change this file and have it run - and if this job held
+  # `packages: write`, that modified copy could push images under the project's
+  # namespace no matter what the dry-run switch says, because the switch only
+  # guards the steps that are checked in.
+  images:
+    name: container images (runtime + builder)
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      runtime_tags: ${{ steps.build.outputs.runtime_tags }}
+      builder_tags: ${{ steps.build.outputs.builder_tags }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build both image targets
+        id: build
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
+          DRY_RUN: "true"
+        run: |
+          set -euo pipefail
+          major_minor="${VERSION%.*}"
+          short="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-7)"
+          tag_values=("v$VERSION" "$major_minor" "sha-$short")
+          tag_list="$(IFS=,; echo "${tag_values[*]}")"
+
+          # Loaded into the local daemon, never pushed: this job proves both
+          # targets build from this commit and produces no registry effect.
+          output_flag=--load
+
+          # The OCI labels are set on the build command, never written into
+          # deploy/Dockerfile: the runtime stage may not contain a github.com
+          # string (tests/test_deploy_scripts.py forbids the substring "git"
+          # there). The Dockerfile keeps its own revision label from the
+          # SOURCE_COMMIT build arg; the value passed here is the same commit.
+          build_one() {
+            target="$1"
+            image="$2"
+            metafile="$3"
+            tag_args=()
+            for t in "${tag_values[@]}"; do
+              tag_args+=(--tag "$image:$t")
+            done
+            docker buildx build \
+              --file deploy/Dockerfile \
+              --target "$target" \
+              --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.source=https://github.com/My-Denia/wuwa-translate-bot" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.created=$BUILT_UTC" \
+              "${tag_args[@]}" \
+              --metadata-file "$metafile" \
+              "$output_flag" \
+              .
+          }
+
+          build_one runtime ghcr.io/my-denia/wuwaterm "$RUNNER_TEMP/runtime-meta.json"
+          build_one builder ghcr.io/my-denia/wuwaterm-builder "$RUNNER_TEMP/builder-meta.json"
+
+          {
+            echo "runtime_tags=$tag_list"
+            echo "builder_tags=$tag_list"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Images"
+            echo ""
+            echo "- built and loaded locally; this job pushes nothing"
+            echo "- tags that a publishing run would push: $tag_list"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The push, and the only job that may write packages. Unreachable from a
+  # pull_request by its own condition, and placed AFTER the package, client and
+  # image jobs so a release tag is never pushed for a commit whose wheel, sdist
+  # or client build had already failed.
+  #
+  # What this still does not solve, deliberately: a draft that is later
+  # discarded leaves these tags on the registry. The approved design accepts
+  # that and records it - the retry of the same version overwrites them - and
+  # docs/release-checklist.md says so. Promoting staging tags to release tags
+  # after publication would remove the window at the cost of a second registry
+  # mutation outside this workflow, which is a bigger change than the window is
+  # worth.
+  push-images:
+    name: push the container images
+    needs: [preflight, python-package, client, images]
+    if: github.event_name == 'workflow_dispatch' && needs.preflight.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      runtime_digest: ${{ steps.push.outputs.runtime_digest }}
+      builder_digest: ${{ steps.push.outputs.builder_digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: docker/setup-buildx-action@v3
+      - name: The tag must still be absent, checked here and not only in preflight
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -uo pipefail
+          # Preflight's check ran before the package and Windows-client builds,
+          # which take minutes. If the git tag appeared in that gap, this
+          # version is already published somewhere and pushing these
+          # release-semantic image tags would overwrite a published release's
+          # images with a different build - a registry mutation no later gate
+          # in this workflow can undo. So the check is repeated immediately
+          # before the push, fail-closed, with a lookup error treated as a stop.
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 || status=$?
+          echo "refs/tags/$TAG: git ls-remote --exit-code status $status (2 = absent = pass)"
+          if [ "$status" -ne 2 ]; then
+            echo "the tag is present or the lookup failed; refusing to push images" >&2
+            exit 1
+          fi
+      - name: Log in to the container registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Build and push both image targets
+        id: push
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
+        run: |
+          set -euo pipefail
+          major_minor="${VERSION%.*}"
+          short="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-7)"
+          tag_values=("v$VERSION" "$major_minor" "sha-$short")
+          tag_list="$(IFS=,; echo "${tag_values[*]}")"
+
+          # Same labels, same build arg, same commit as the build job above.
+          # The labels are set here and never in deploy/Dockerfile: the runtime
+          # stage may not contain a github.com string, because
+          # tests/test_deploy_scripts.py forbids the substring "git" there.
+          push_one() {
+            target="$1"
+            image="$2"
+            metafile="$3"
+            tag_args=()
+            for t in "${tag_values[@]}"; do
+              tag_args+=(--tag "$image:$t")
+            done
+            docker buildx build \
+              --file deploy/Dockerfile \
+              --target "$target" \
+              --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.source=https://github.com/My-Denia/wuwa-translate-bot" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+              --label "org.opencontainers.image.created=$BUILT_UTC" \
+              "${tag_args[@]}" \
+              --metadata-file "$metafile" \
+              --push \
+              .
+          }
+
+          push_one runtime ghcr.io/my-denia/wuwaterm "$RUNNER_TEMP/runtime-meta.json"
+          push_one builder ghcr.io/my-denia/wuwaterm-builder "$RUNNER_TEMP/builder-meta.json"
+
+          runtime_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/runtime-meta.json")"
+          builder_digest="$(jq -r '.["containerimage.digest"]' "$RUNNER_TEMP/builder-meta.json")"
+          for d in "$runtime_digest" "$builder_digest"; do
+            if [ -z "$d" ] || [ "$d" = "null" ]; then
+              echo "a push produced no image digest; stop" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "runtime_digest=$runtime_digest"
+            echo "builder_digest=$builder_digest"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Images pushed"
+            echo ""
+            echo "- tags: $tag_list"
+            echo "- ghcr.io/my-denia/wuwaterm digest: $runtime_digest"
+            echo "- ghcr.io/my-denia/wuwaterm-builder digest: $builder_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  assemble:
+    name: checksums and release manifest
+    needs: [preflight, python-package, client, images, push-images]
+    # push-images is SKIPPED in every dry run, and a skipped need would
+    # otherwise skip this job too. Success of everything that did run is still
+    # required: failure() covers any failed ancestor.
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: python-package
+          path: staging
+      - uses: actions/download-artifact@v6
+        with:
+          name: client-zip
+          path: staging
+      - name: Checksums over the three downloadable build outputs
+        working-directory: staging
+        run: |
+          set -euo pipefail
+          ls -l
+          # Bare filenames only, so `sha256sum -c SHA256SUMS` works from the
+          # directory the assets are downloaded into.
+          sha256sum *.whl *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Write release-manifest.json
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CLIENT_VERSION: ${{ needs.preflight.outputs.client_version }}
+          SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          # Digests come from the PUSH job, which is skipped in a dry run: its
+          # outputs are then empty and the manifest records null, which is the
+          # honest answer for an image that was built and not published.
+          RUNTIME_DIGEST: ${{ needs.push-images.outputs.runtime_digest }}
+          BUILDER_DIGEST: ${{ needs.push-images.outputs.builder_digest }}
+          RUNTIME_TAGS: ${{ needs.images.outputs.runtime_tags }}
+          BUILDER_TAGS: ${{ needs.images.outputs.builder_tags }}
+          DATA_PROFILE: ${{ needs.preflight.outputs.data_profile }}
+          DATA_REPO: ${{ needs.preflight.outputs.data_repo }}
+          DATA_COMMIT: ${{ needs.preflight.outputs.data_commit }}
+          GAME_VERSION: ${{ needs.preflight.outputs.game_version }}
+          RESOURCE_VERSION: ${{ needs.preflight.outputs.resource_version }}
+          CHANGELIST: ${{ needs.preflight.outputs.changelist }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+
+          def digest(value):
+              # An unpushed image has no published digest: null, never "".
+              value = (value or "").strip()
+              return value or None
+
+
+          def tags(value):
+              return [t for t in (value or "").split(",") if t]
+
+
+          manifest = {
+              "tag": os.environ["TAG"],
+              "version": os.environ["VERSION"],
+              "client_version": os.environ["CLIENT_VERSION"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "built_utc": os.environ["BUILT_UTC"],
+              "dry_run": os.environ["DRY_RUN"] == "true",
+              "images": {
+                  "runtime": {
+                      "name": "ghcr.io/my-denia/wuwaterm",
+                      "tags": tags(os.environ.get("RUNTIME_TAGS")),
+                      "digest": digest(os.environ.get("RUNTIME_DIGEST")),
+                  },
+                  "builder": {
+                      "name": "ghcr.io/my-denia/wuwaterm-builder",
+                      "tags": tags(os.environ.get("BUILDER_TAGS")),
+                      "digest": digest(os.environ.get("BUILDER_DIGEST")),
+                  },
+              },
+              "data": {
+                  "profile": os.environ["DATA_PROFILE"],
+                  "repo": os.environ["DATA_REPO"],
+                  "commit": os.environ["DATA_COMMIT"],
+                  "game_version": os.environ["GAME_VERSION"],
+                  "resource_version": os.environ["RESOURCE_VERSION"],
+                  "changelist": os.environ["CHANGELIST"],
+              },
+          }
+          text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+          Path("staging/release-manifest.json").write_text(text, encoding="utf-8")
+          print(text)
+          PY
+      - name: The staged set is exactly the five release assets and verifies
+        working-directory: staging
+        run: |
+          set -euo pipefail
+          count="$(ls -1 | wc -l)"
+          ls -1
+          if [ "$count" -ne 5 ]; then
+            echo "expected exactly 5 staged assets, found $count" >&2
+            exit 1
+          fi
+          sha256sum -c SHA256SUMS
+      - name: Publish the manifest and checksums to the run summary
+        working-directory: staging
+        run: |
+          set -euo pipefail
+          {
+            echo '### Release assets'
+            echo ''
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo ''
+            echo '### release-manifest.json'
+            echo ''
+            echo '```json'
+            cat release-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-assets
+          path: staging/
+          if-no-files-found: error
+
+  # A separate job on purpose: GitHub Actions `permissions:` cannot be made
+  # conditional on a workflow input expression, and the release design requires
+  # `contents: write` on the draft job only. Folding this back into `assemble`
+  # would hand contents:write to every dry run, including pull_request runs.
+  # Do not "simplify" it back.
+  draft-release:
+    name: create the draft release
+    needs: [preflight, assemble]
+    if: github.event_name == 'workflow_dispatch' && needs.preflight.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_commit }}
+      - uses: actions/download-artifact@v6
+        with:
+          name: release-assets
+          path: staging
+      - name: The manifest must describe a real publication
+        run: |
+          set -euo pipefail
+          # Fail closed before the release exists rather than after: a manifest
+          # still marked dry_run, or with a null digest, means the push job did
+          # not do what this job is about to claim it did.
+          test "$(jq -r .dry_run staging/release-manifest.json)" = "false"
+          test "$(jq -r .images.runtime.digest staging/release-manifest.json)" != "null"
+          test "$(jq -r .images.builder.digest staging/release-manifest.json)" != "null"
+          (cd staging && sha256sum -c SHA256SUMS)
+      - name: Generate the release notes
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          staging = Path("staging")
+          manifest = json.loads((staging / "release-manifest.json").read_text(encoding="utf-8"))
+          data = manifest["data"]
+          images = manifest["images"]
+
+          # The notes carry the project's own changelog entry. If the section
+          # is missing, the release stops here rather than shipping a draft
+          # with invented notes.
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          # The heading tail is [^\n]*, not .*: DOTALL is needed for the body
+          # and would otherwise let the heading swallow the whole file and
+          # leave the body empty.
+          pattern = re.compile(
+              r"^## " + re.escape(version) + r"(?:[ \t][^\n]*)?\n(.*?)(?=^## |\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          found = pattern.search(changelog)
+          if found is None:
+              raise SystemExit(f"CHANGELOG.md has no '## {version}' section; stop")
+          body = found.group(1).strip()
+          if not body:
+              raise SystemExit(f"the '## {version}' section of CHANGELOG.md is empty; stop")
+
+          assets = sorted(p.name for p in staging.iterdir() if p.is_file())
+          if len(assets) != 5:
+              raise SystemExit(f"expected 5 release assets, found {len(assets)}: {assets}")
+
+          def image_line(key):
+              image = images[key]
+              tags = ", ".join(f"`{image['name']}:{t}`" for t in image["tags"])
+              return f"- {tags} (digest `{image['digest']}`)"
+
+          lines = [
+              f"## {version}",
+              "",
+              body,
+              "",
+              "### Supported Game Data",
+              "",
+              f"- Source profile: {data['profile']}",
+              f"- Source repository: {data['repo']}",
+              f"- Pinned source commit: {data['commit']}",
+              f"- GameVer: {data['game_version']}",
+              f"- ResVer: {data['resource_version']}",
+              f"- Changelist: {data['changelist']}",
+              "",
+              "### Validation",
+              "",
+              "Every asset in this release was built and checked by the release",
+              "workflow from the exact commit named below:",
+              "",
+              f"- source commit: `{manifest['source_commit']}`",
+              "- `python -m build`, `python -m twine check --strict dist/*`",
+              "- `python scripts/check_package_artifacts.py dist/*.whl dist/*.tar.gz`",
+              "- clean-venv install, import and CLI smoke for both the wheel and the sdist",
+              "- desktop client test suite on Windows, then the packaged executable's",
+              "  own `--self-check` start-up rehearsal",
+              "- `sha256sum -c SHA256SUMS` over the downloadable build outputs",
+              "",
+              "### Privacy And LLM",
+              "",
+              "Exact database hits do not call the LLM. Free-text sentence translation",
+              "can call an OpenAI-compatible endpoint only when the operator configures",
+              "one. Do not include tokens, API keys, chat IDs, owner IDs, `.env` files,",
+              "runtime settings, deployment logs, or host names, addresses and paths",
+              "that identify a deployment in release materials.",
+              "",
+              "### Assets",
+              "",
+              "This release attaches five files:",
+              "",
+          ]
+          lines += [f"- `{name}`" for name in assets]
+          lines += [
+              "",
+              "Verify the downloads with `sha256sum -c SHA256SUMS`.",
+              "`release-manifest.json` records the source commit, the client version,",
+              "the data pin and the container image digests this release was built from.",
+              "",
+              "The Windows desktop client in the zip is **UNSIGNED**: no code signing is",
+              "performed on it at any point. Windows SmartScreen will warn about an",
+              "unrecognised publisher; continue through *More info* then *Run anyway* only",
+              "if you trust this download, after checking its checksum.",
+              "",
+              "Container images built from the same commit:",
+              "",
+              image_line("runtime"),
+              image_line("builder"),
+              "",
+              "The runtime image needs a locally built `terms.db`; the builder image is",
+              "what builds it. Verify the image pull works for you before relying on it;",
+              "if it is denied, build the images from a source checkout at this tag.",
+              "",
+              "### Distribution Boundary",
+              "",
+              "This release distributes source code, the Python package artifacts, the",
+              "desktop client binary and container images. It does not distribute",
+              "generated SQLite databases, generated TextMap files, or Wuthering Waves",
+              "game data. The MIT license covers this project's source code only, not",
+              "Wuthering Waves game data or in-game terminology.",
+              "",
+              "### Known Limitations",
+              "",
+              "- Self-hosted bot; no public hosted service is provided.",
+              "- Live Telegram operation requires maintainer-provided credentials and",
+              "  chat configuration.",
+              "- Free-text sentence translation requires an external OpenAI-compatible",
+              "  endpoint.",
+              "- The desktop client is built and tested on Windows x64 only, and it is",
+              "  not code-signed.",
+              "",
+          ]
+          notes = Path(os.environ["RUNNER_TEMP"]) / "RELEASE_NOTES.md"
+          notes.write_text("\n".join(lines), encoding="utf-8")
+          print(notes)
+          print("\n".join(lines))
+          PY
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          TARGET_COMMIT: ${{ inputs.target_commit }}
+        run: |
+          set -euo pipefail
+          # DRAFT only. Publishing (`gh release edit --draft=false`) is the
+          # maintainer's step after the release-checklist readback, and it is
+          # what creates the tag. This workflow never publishes and never tags.
+          gh release create "$TAG" \
+            --draft \
+            --target "$TARGET_COMMIT" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/RELEASE_NOTES.md" \
+            staging/*.whl \
+            staging/*.tar.gz \
+            staging/*.zip \
+            staging/SHA256SUMS \
+            staging/release-manifest.json
+      - name: Read the draft back
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          count="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          gh release view "$TAG" --json isDraft,tagName,targetCommitish,assets
+          if [ "$count" -ne 5 ]; then
+            echo "the draft carries $count assets, expected 5" >&2
+            exit 1
+          fi
+          {
+            echo "### Draft release"
+            echo ""
+            echo "- draft created for $TAG with $count assets"
+            echo "- not published: no tag exists until a maintainer publishes it"
+          } >> "$GITHUB_STEP_SUMMARY"
