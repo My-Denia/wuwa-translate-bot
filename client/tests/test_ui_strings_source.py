@@ -7,13 +7,19 @@ ui/ package sources with ast and applies two rules.
 1. No string literal (including an f-string with literal text) may be passed
    to a known text-setting call. This is the original rule, and it is kept:
    it catches an English literal at a setter, which rule 2 cannot see.
-2. No string literal anywhere in ui/*.py may contain a CJK character - Han,
-   Hiragana, Katakana, Hangul, CJK punctuation or a fullwidth form. Display
-   text is Chinese in this application, so this is the rule that closes the
-   path rule 1 leaves open: a literal assigned to a local first, folded into
-   an f-string, or handed to a setter nobody thought to whitelist
+2. No string literal anywhere in the ui package may contain a CJK character -
+   Han, Hiragana, Katakana, Hangul, CJK punctuation or a fullwidth form.
+   Display text is Chinese in this application, so this is the rule that
+   closes the path rule 1 leaves open: a literal assigned to a local first,
+   folded into an f-string, or handed to a setter nobody thought to whitelist
    (setAccessibleName, addAction, setItemData) is invisible to rule 1 and
    caught here (issue #65).
+
+Both rules read the package RECURSIVELY, and the Han ranges reach above the
+basic multilingual plane. Neither was true in the first version of this file,
+and both gaps are held open by a test that fails without them: a widget moved
+into ui/<subpackage>/ would not have been read at all, and an extension-B
+ideograph would have passed as though it were not a Han character.
 
 What rule 2 deliberately does not flag:
 
@@ -65,25 +71,53 @@ TEXT_SETTER_NAMES = {
 
 # The ranges that make a literal "display text" in this application. Kept as
 # an explicit list rather than a unicodedata script lookup so that reading the
-# test tells you exactly what it forbids.
+# test tells you exactly what it forbids, and written as code points rather
+# than as the characters themselves so the supplementary-plane rows are
+# readable at all.
 CJK_RANGES = (
-    ("ᄀ", "ᇿ"),  # Hangul Jamo
-    ("　", "〿"),  # CJK symbols and punctuation, incl. the ideographic comma
-    ("぀", "ゟ"),  # Hiragana
-    ("゠", "ヿ"),  # Katakana
-    ("㐀", "䶿"),  # CJK unified ideographs extension A
-    ("一", "鿿"),  # CJK unified ideographs
-    ("ꥠ", "꥿"),  # Hangul Jamo extended-A
-    ("가", "힯"),  # Hangul syllables
-    ("豈", "﫿"),  # CJK compatibility ideographs
-    ("＀", "￯"),  # Halfwidth and fullwidth forms
+    (0x1100, 0x11FF),    # Hangul Jamo
+    (0x2E80, 0x2EFF),    # CJK radicals supplement
+    (0x2F00, 0x2FDF),    # Kangxi radicals
+    (0x3000, 0x303F),    # CJK symbols and punctuation, incl. the ideographic comma
+    (0x3040, 0x309F),    # Hiragana
+    (0x30A0, 0x30FF),    # Katakana
+    (0x3100, 0x312F),    # Bopomofo
+    (0x3130, 0x318F),    # Hangul compatibility Jamo
+    (0x31F0, 0x31FF),    # Katakana phonetic extensions
+    (0x3400, 0x4DBF),    # CJK unified ideographs extension A
+    (0x4E00, 0x9FFF),    # CJK unified ideographs
+    (0xA960, 0xA97F),    # Hangul Jamo extended-A
+    (0xAC00, 0xD7AF),    # Hangul syllables
+    (0xD7B0, 0xD7FF),    # Hangul Jamo extended-B
+    (0xF900, 0xFAFF),    # CJK compatibility ideographs
+    (0xFF00, 0xFFEF),    # Halfwidth and fullwidth forms
+    # Supplementary planes. A Han character above the BMP is still a Han
+    # character; leaving these out let a literal such as U+20BB7 sit inline
+    # while the gate stayed green - the exact failure this rule exists to
+    # prevent, one plane up.
+    (0x20000, 0x2A6DF),  # CJK unified ideographs extension B
+    (0x2A700, 0x2EBEF),  # CJK unified ideographs extensions C through F and I
+    (0x2F800, 0x2FA1F),  # CJK compatibility ideographs supplement
+    (0x30000, 0x323AF),  # CJK unified ideographs extensions G and H
 )
 
-CJK_CHARACTER = re.compile("[" + "".join(f"{lo}-{hi}" for lo, hi in CJK_RANGES) + "]")
+CJK_CHARACTER = re.compile(
+    "[" + "".join(f"{chr(lo)}-{chr(hi)}" for lo, hi in CJK_RANGES) + "]"
+)
+
+
+def _python_sources(root: Path) -> list[Path]:
+    """Every python file under ``root``, at any depth.
+
+    Recursive on purpose. A flat glob stops at the top of the package, so a
+    widget moved into a subpackage - ``ui/dialogs/foo.py`` - would leave both
+    rules below with nothing to read, and inline text there would pass CI.
+    """
+    return sorted(root.rglob("*.py"))
 
 
 def _ui_source_files() -> list[Path]:
-    return sorted(UI_DIR.glob("*.py"))
+    return _python_sources(UI_DIR)
 
 
 def _display(path: Path) -> str:
@@ -276,3 +310,64 @@ def test_cjk_rule_flags_a_planted_literal_and_spares_comments_and_docstrings(
         encoding="utf-8",
     )
     assert _cjk_literal_violations_in_file(clean) == []
+
+
+def test_cjk_rule_reaches_above_the_basic_multilingual_plane(tmp_path: Path) -> None:
+    """A Han character outside the BMP is still a Han character.
+
+    The first version of the range list stopped at U+9FFF and friends, so a
+    literal built from an extension-B ideograph passed the gate untouched. The
+    two literals below are the discriminating pair: they are flagged now and
+    were not before, and the ASCII line beside them must stay unflagged so the
+    widened ranges cannot pass by flagging everything.
+    """
+    source = (
+        "def build():\n"
+        "    a = \"\\U00020BB7\"\n"          # extension B
+        "    b = \"\\U0002F81A\"\n"          # compatibility ideographs supplement
+        "    c = \"plain ascii, not display text\"\n"
+        "    return a, b, c\n"
+    )
+    planted = tmp_path / "supplementary.py"
+    planted.write_text(source, encoding="utf-8")
+
+    violations = _cjk_literal_violations_in_file(planted)
+    locations = [message.split(": ", 1)[0] for message in violations]
+    assert locations == ["supplementary.py:2", "supplementary.py:3"], violations
+
+
+def test_source_enumeration_reaches_into_subpackages(tmp_path: Path) -> None:
+    """A widget in ui/<subpackage>/ has to be read like any other.
+
+    A flat glob returns nothing from a subdirectory, which would let both rules
+    pass on a file they never opened. The nested module below is the case, and
+    the assertion is on the returned paths rather than on a count, so an empty
+    result cannot look like success.
+    """
+    root = tmp_path / "ui"
+    (root / "dialogs").mkdir(parents=True)
+    top = root / "top.py"
+    nested = root / "dialogs" / "nested.py"
+    top.write_text("x = 1\n", encoding="utf-8")
+    nested.write_text("y = 2\n", encoding="utf-8")
+
+    found = _python_sources(root)
+    assert found == [nested, top], found
+
+    # And the rule actually runs on the nested file.
+    nested.write_text('label = "\u5237\u65b0"\n', encoding="utf-8")
+    violations = _cjk_literal_violations_in_file(nested)
+    assert len(violations) == 1, violations
+    assert violations[0].startswith("nested.py:1:"), violations[0]
+
+
+def test_the_real_ui_package_is_enumerated_recursively() -> None:
+    """The rules read the actual package, not an empty list.
+
+    Guards the shape of the two tests above against a refactor that silently
+    points them at nothing: the live enumeration must return real files, and
+    every one of them must live under the ui package.
+    """
+    files = _ui_source_files()
+    assert len(files) >= 5, files
+    assert all(UI_DIR in path.parents for path in files), files

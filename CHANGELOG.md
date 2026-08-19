@@ -17,7 +17,11 @@ does not distribute generated game data or generated SQLite databases.
   versions in the status view — moved into `strings.py` as `LIST_SEPARATOR`.
   The gate is proven red on a planted literal and green once it is removed, and
   what it still cannot see (text from Qt, text from the service) is stated in
-  the test's own docstring.
+  the test's own docstring. Review follow-ups on the same change: the ranges
+  reach above the basic multilingual plane, so an extension-B ideograph is a
+  Han character to the gate as well; and both rules enumerate the package
+  recursively, so a widget moved into a subpackage is still read. Each of those
+  two is held open by a test that fails without it.
 
 ## 0.4.0 - 2026-08-19
 

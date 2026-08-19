@@ -2,9 +2,10 @@
 
 The ui/ package and errors.py never define display text inline; they import
 constants from this module. tests/test_ui_strings_source.py statically
-checks two things about ui/*.py: that no literal text reaches a known
-text-setting call, and that no string literal anywhere in those files
-contains a Chinese, Japanese or Korean character. The second one is the
+checks two things about the ui package, subpackages included: that no literal
+text reaches a known text-setting call, and that no string literal anywhere
+in those files contains a Chinese, Japanese or Korean character - including
+one written above the basic multilingual plane. The second one is the
 reason no Chinese can be written directly into the ui layer at all - not
 behind a local variable, not inside an f-string, not through a setter nobody
 thought to whitelist.
@@ -18,9 +19,10 @@ is worth stating exactly, because an earlier version of this paragraph got it
 wrong. It is NOT that a dict here would break the static gate: measured,
 ``test_ui_strings_source.py`` only (a) counts module-level string constants
 against a floor of twenty, (b) forbids string literals at text-setting calls
-in ``ui/*.py``, and (c) forbids any string literal holding a CJK character
-anywhere in ``ui/*.py`` - comments are invisible to it and docstrings are
-excluded on purpose. All three read ``ui/*.py``, not this file: none of them
+in the ui package, and (c) forbids any string literal holding a CJK character
+anywhere in that package, subpackages included and supplementary-plane Han
+included - comments are invisible to it and docstrings are excluded on
+purpose. All three read the ui package, not this file: none of them
 checks that displayed text came from this module, and none of them can see
 text that arrives from Qt or from the service at run time. So values inside a
 dict here are neither more nor less covered than flat ones. The rule is a
