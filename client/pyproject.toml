@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwaterm-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Owner-only Windows desktop client for the wuwaterm HTTP API. Not published to any package index."
 readme = "README.md"
 requires-python = ">=3.12"

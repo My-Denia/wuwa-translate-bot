@@ -141,9 +141,13 @@ does not distribute generated game data or generated SQLite databases.
   admin, self-hoster, contributor, owner operations — and now name all four
   surfaces, the owner-private web layer among them. Their two validation
   command blocks route to `python scripts/validate.py` instead of listing
-  individual gates, which is what makes "green locally" and "green on the pull
-  request" the same claim; the candidate-database checks stay listed
-  separately, because the entry point deliberately does not run them.
+  individual gates, so a contributor runs the same list CI's server matrix
+  runs — that one job, on Linux, and no more. A pull request is also checked by
+  the uv lock-drift job, the packaging audit, the Windows desktop-client build
+  and the Docker runtime/builder boundary job, none of which this entry point
+  runs; a green local run is evidence about the server gates, not a prediction
+  about the pull request. The candidate-database checks stay listed separately,
+  because the entry point deliberately does not run them either.
 - New `docs/self-hosting.md`: the generic path for someone who is not the
   author — requirements, a source checkout at a release tag, configuration,
   the data build on both the container and the source path, starting the
@@ -159,8 +163,11 @@ does not distribute generated game data or generated SQLite databases.
   a report, what is in and out of scope), `CONTRIBUTING.md` (setup, the one
   validation command, what each gate is for, what makes a change easy to
   accept) and `SUPPORT.md` (where to ask, and the boundary of a best-effort
-  hobby project); three GitHub issue forms with a redaction acknowledgement,
-  their `config.yml`, and a pull-request template.
+  hobby project); four GitHub issue forms with a redaction acknowledgement,
+  their `config.yml`, and a pull-request template. The acknowledgement covers
+  host names, addresses and paths that identify a deployment as well as
+  credentials and Telegram identifiers, which is what `SECURITY.md` asks a
+  reporter to remove and what `SUPPORT.md` says the forms cover.
 - `docs/architecture.md` describes the private web layer as the third
   presentation layer inside the API process, including how it reaches the
   pipeline (in process, not over HTTP) and what it deliberately is not; the
@@ -177,6 +184,64 @@ does not distribute generated game data or generated SQLite databases.
   the API process only. `client/README.md` gains the user path: download the
   release zip, check it against `SHA256SUMS`, unpack it anywhere, and what an
   unsigned build looks like on first run.
+
+### Distribution And Release Pipeline
+
+- New `.github/workflows/release.yml` builds every release asset from one
+  reviewed commit: the wheel and the sdist (with `twine check --strict`, the
+  packaging audit and a clean-environment install smoke), the Windows client
+  zip (built on a Windows runner through `client/build.ps1` and started with
+  `--self-check` before it is packaged), a `SHA256SUMS` covering all three, and
+  a `release-manifest.json` recording the tag, both versions, the source
+  commit, the build time, the image tags and digests, and the game-data pin.
+  It has **no tag trigger**: publishing stays a human step, and a draft
+  release still creates no tag, so a discarded draft leaves nothing behind.
+- The workflow runs in two modes. `workflow_dispatch` with
+  `dry_run=false` is the real one and is the only mode that logs in to the
+  container registry, pushes an image, or creates the draft release; every
+  other run — including the `pull_request` run that fires when this workflow,
+  `deploy/**`, `client/**` or `pyproject.toml` changes — is a dry run that
+  builds and checks everything and publishes nothing. Write permissions match:
+  the workflow default is read-only, `packages: write` exists only on the
+  image job, and `contents: write` only on the job that creates the draft.
+- Release-pinned container images: `ghcr.io/my-denia/wuwaterm` (runtime) and
+  `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and
+  `sha-<7>`, carrying the source, version, revision and created OCI labels.
+  Both are published because the runtime image is useless without a terminology
+  database, which is built by the builder image and is never distributed. The
+  images save the local image build and nothing else: the generic path still
+  needs a source checkout at the release tag for the Compose files, the
+  entrypoints, the data build and the verification scripts. Whether an
+  anonymous pull is permitted is a registry-side setting and is stated as
+  something to verify, not as something this project has measured.
+- New `.github/workflows/selfhost-smoke.yml` follows the container path of
+  `docs/self-hosting.md` on a clean runner — build, `refresh-data`,
+  `build-db --atomic`, `verify-db`, promote, start the API alone, issue a
+  device credential, one exact lookup, one sentence translation against a mock
+  model endpoint started in the job, and a credential-store backup and restore
+  — and reports per-step timings. It runs on pull requests that touch
+  `deploy/**` or that guide, and can be dispatched at any ref.
+- `deploy/docker-compose.yml` reads the builder image reference from
+  `WUWATERM_BUILDER_IMAGE`, defaulting to the previous fixed local tag, so a
+  self-hoster can point it at a pulled image; `deploy/vps-update.sh` never sets
+  it and its behaviour is unchanged. `deploy/docker-compose.ghcr.yml` is a thin
+  overlay that sets only the three `image:` fields from `WUWATERM_IMAGE_TAG`.
+- `docs/release-checklist.md` is rewritten around the new asset policy and the
+  new flow: five assets, images on the registry, the client binary stated as
+  unsigned, and a readback performed while the release is still a draft.
+
+### Desktop Client
+
+- The client is **0.2.0**, the first version distributed as a release asset:
+  `WuwaTerm-<version>-windows-x64.zip`, the one-folder build, listed in
+  `SHA256SUMS`. It is **not code-signed** — SmartScreen will warn on first run,
+  and `client/README.md` says so and shows what to do.
+- Compatibility contract: client 0.2.x speaks HTTP API `v1`, served by wuwaterm
+  0.3.0 or newer. The client checks it on the `/v1/meta` reply the status view
+  already fetches when the owner presses 刷新 — **no new request, and none at
+  startup**: an unconfigured client still sends nothing. A server reporting an
+  API version this client does not support gets a warning naming both versions,
+  while the service facts stay on screen and the client keeps working.
 
 ## 0.3.0 - 2026-08-12
 

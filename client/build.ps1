@@ -15,6 +15,12 @@
     artifact it produces is started with --self-check before the build is
     called a success.
 
+    It then packages that folder as client/dist/WuwaTerm-<version>-windows-x64.zip,
+    the release asset name, with <version> read from the built package rather
+    than written here. The zip is produced only after the self-check has
+    passed, so an artifact that cannot start is never packaged. Both outputs
+    stay in client/dist/, which client/.gitignore excludes.
+
     What it does NOT claim: bit-for-bit reproducibility, nor even identical
     inputs between two runs. The client has no lock file - its dependencies
     are ranges (PySide6>=6.7,<7 and pyinstaller>=6.10,<7 among them) - and the
@@ -115,3 +121,47 @@ if ($SelfCheck.ExitCode -ne 0) {
 }
 
 Write-Host "Build succeeded and passed its start-up self-check: $ExePath"
+
+# The release asset, and only now: everything above had to pass first, so a
+# build that cannot start is never packaged and a stale zip beside a failed
+# build is never mistaken for the new one (the previous zip is replaced, not
+# added to).
+#
+# The version is READ, never written here. It comes from the package this
+# build actually froze - `wuwaterm_client.__version__`, in the same venv
+# interpreter PyInstaller used - rather than from a string in this script or
+# a hand-parsed pyproject.toml, so the name on the asset is the version the
+# program reports about itself. client/tests/test_api_version_compat.py pins
+# that constant against `version` in client/pyproject.toml, which is what
+# keeps the declared version and the packaged one from drifting apart.
+#
+# The name is exact and load-bearing: the release workflow uses this file when
+# build.ps1 produced it and builds the same name itself when it did not.
+$Version = (& $VenvPython -c "import wuwaterm_client; print(wuwaterm_client.__version__)")
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Could not read wuwaterm_client.__version__ from $VenvPython."
+    exit 1
+}
+$Version = "$Version".Trim()
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    Write-Error "wuwaterm_client.__version__ is empty; refusing to name an asset after it."
+    exit 1
+}
+
+$ZipPath = Join-Path $ClientRoot "dist\WuwaTerm-$Version-windows-x64.zip"
+if (Test-Path $ZipPath) {
+    Remove-Item -LiteralPath $ZipPath -Force
+}
+# $DistRoot is the FOLDER, with no wildcard, so the archive keeps a single
+# `WuwaTerm\` directory at its root: extracting it anywhere yields one folder
+# holding the whole portable program, which is what client/README.md tells the
+# reader to expect. `dist\WuwaTerm\*` would spray the interpreter, the Qt
+# runtime and several hundred files into whatever directory they extracted to.
+Compress-Archive -Path $DistRoot -DestinationPath $ZipPath -CompressionLevel Optimal
+if (-not (Test-Path $ZipPath)) {
+    Write-Error "Packaging finished but no archive was written to: $ZipPath"
+    exit 1
+}
+
+$ZipBytes = (Get-Item -LiteralPath $ZipPath).Length
+Write-Host "Release asset: $ZipPath ($ZipBytes bytes, $([math]::Round($ZipBytes / 1MB, 1)) MB)"

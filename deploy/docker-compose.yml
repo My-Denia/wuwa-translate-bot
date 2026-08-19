@@ -93,7 +93,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
       target: builder
-    image: wuwaterm-builder:local
+    # Overridable so a self-hoster can point the builder at a pulled image
+    # instead of building it, the way the two serving services already read
+    # WUWATERM_RUNTIME_IMAGE. The DEFAULT is the unchanged local tag, which is
+    # what deploy/vps-update.sh depends on: it never sets this variable and it
+    # rebuilds this exact tag from the verified checkout before every data
+    # command, so production keeps building its own builder from source.
+    image: ${WUWATERM_BUILDER_IMAGE:-wuwaterm-builder:local}
     network_mode: host
     environment:
       WUWATERM_DB_PATH: /app/data/terms.db

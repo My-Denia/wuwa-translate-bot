@@ -1,0 +1,16 @@
+# Image-only overlay for the published images. Pass it AFTER the base file -
+# `-f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml` - so these
+# references win over the locally built tags.
+#
+# It does NOT remove the base file's `build:` sections; an overlay cannot. What
+# keeps Compose from building is not asking it to: `--no-build` on `up`, or
+# simply never running `build`. Profiles are not repeated here either - a key
+# this file omits keeps the base file's value, so wuwaterm-builder stays behind
+# its `builder` profile and still has to be named or profiled to run.
+services:
+  wuwaterm:
+    image: ghcr.io/my-denia/wuwaterm:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}
+  wuwaterm-api:
+    image: ghcr.io/my-denia/wuwaterm:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}
+  wuwaterm-builder:
+    image: ghcr.io/my-denia/wuwaterm-builder:${WUWATERM_IMAGE_TAG:?set WUWATERM_IMAGE_TAG to the release tag you pulled, for example v0.4.0}

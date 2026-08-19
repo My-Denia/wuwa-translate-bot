@@ -470,21 +470,42 @@ WUWATERM_RUNTIME_IMAGE=ghcr.io/my-denia/wuwaterm:v0.4.0
 If you would rather not keep it there, then carry the prefix on *every* Compose
 command that starts, recreates or runs a container — not only the first one.
 
-**The builder image needs an overlay, not a variable.** Only the two serving
-services read their reference from the environment; the builder service pins
-`wuwaterm-builder:local` in the Compose file, so the pulled builder image is
-not used by any command in this document until you override it. Write a small
-overlay of your own beside the Compose file:
+**The builder image has its own variable.** It is
+`WUWATERM_BUILDER_IMAGE`, and it defaults to the locally built
+`wuwaterm-builder:local`, so nothing changes for an installation that builds
+its own images. Put it in `.env` next to the other one when you want the
+pulled builder instead:
 
-```yaml
-services:
-  wuwaterm-builder:
-    image: ghcr.io/my-denia/wuwaterm-builder:v0.4.0
+```bash
+WUWATERM_BUILDER_IMAGE=ghcr.io/my-denia/wuwaterm-builder:v0.4.0
 ```
 
-and pass both files, the base first, on every builder command. A later release
-may ship that overlay as `deploy/docker-compose.ghcr.yml`; until it does, the
-file is yours to write, and pulling the builder image without it buys nothing.
+**Or set both at once with the shipped overlay.**
+`deploy/docker-compose.ghcr.yml` sets nothing but the three `image:` fields,
+from one variable:
+
+```bash
+WUWATERM_IMAGE_TAG=v0.4.0 docker compose \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml \
+  up -d --no-build wuwaterm-api
+```
+
+Pass the base file first; the overlay's values win. It does not remove the
+base file's `build:` sections — an overlay cannot — so what keeps Compose from
+building is not asking it to: `--no-build` on `up`, or simply never running
+`build`. It does not repeat `profiles:` either, so the builder service stays
+behind the `builder` profile and still has to be named or profiled to run:
+
+```bash
+WUWATERM_IMAGE_TAG=v0.4.0 docker compose \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml \
+  run --rm wuwaterm-builder refresh-data
+```
+
+The overlay refuses to expand an unset `WUWATERM_IMAGE_TAG` rather than
+defaulting to something, because a default here would be a silently wrong
+image; and the same warning as above applies to it, so put the tag in `.env`
+if you do not want to carry it on every command.
 
 ## Upgrade
 

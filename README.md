@@ -31,7 +31,7 @@
 
 ## 下载与分发
 
-目前已发布的最新版本是 v0.3.0，其发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面描述的是自**下一个版本 v0.4.0** 起的分发形态，该版本尚未发布。与之对应的[发布检查单](docs/release-checklist.md)目前仍只允许上面那三样发布物；它的资产策略与发布流水线一起更新，那是紧随其后的那次改动，不是这次。
+目前已发布的最新版本是 v0.3.0，其发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面描述的是自**下一个版本 v0.4.0** 起的分发形态，该版本尚未发布。与之对应的[发布检查单](docs/release-checklist.md)和 `.github/workflows/release.yml` 已经按下面这套资产策略写好了；尚未发生的是发布本身。
 
 - **GitHub Releases**：自 v0.4.0 起，每个发布带 wheel、sdist、Windows 客户端 zip（`WuwaTerm-<version>-windows-x64.zip`）、`SHA256SUMS` 与 `release-manifest.json`。
 - **Windows 客户端**：便携式压缩包，解压即用，**未做代码签名**，因此 Windows SmartScreen 会弹出警告，需要用户自己点开「更多信息 → 仍要运行」才能启动。

@@ -111,8 +111,9 @@ body:
           required: true
         - label: >-
             I have removed Telegram bot tokens, OpenAI-compatible API keys,
-            device credentials, real Telegram chat or user ids, and `.env`
-            contents from everything pasted above.
+            device credentials, real Telegram chat or user ids, `.env`
+            contents, and host names, addresses or paths that identify a
+            deployment, from everything pasted above.
           required: true
         - label: I searched the open and closed issues and this is not one of them.
           required: true

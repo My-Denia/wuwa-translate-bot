@@ -135,11 +135,26 @@ machine without the launcher, `python3.12 -m venv client\.venv` or the full
 path to the interpreter works the same way. The version is a requirement; the
 vendor is not.
 
-`client/build.ps1` produces the one-folder PyInstaller artifact. From the
-repository root, `python scripts/validate.py --client` runs the same client
-suite through the entry point. Everything about the client that can be checked
-by reading text — its transport policy, its documentation claims — is in the
-main suite instead, so it runs on every pull request without a Windows runner.
+`client/build.ps1` produces the one-folder PyInstaller artifact, runs its
+start-up self-check, and packages the folder as
+`client/dist/WuwaTerm-<version>-windows-x64.zip` — the same name the release
+carries.
+
+**On Windows, run the client suite directly, as the block above does.** From
+the repository root, `python scripts/validate.py --client` APPENDS the client
+suite to the six server steps rather than replacing them, and the runner stops
+at the first failing step — so on a Windows host the server steps fail for the
+platform reasons [docs/support-matrix.md](docs/support-matrix.md) records, and
+the client suite you were trying to run never starts. Use
+`client\.venv\Scripts\python.exe -m pytest` from `client/`, or, if you want the
+entry point's reporting, `python scripts/validate.py --client --only
+client-tests`, which selects that one step and skips the server ones. On Linux
+or macOS the plain `--client` form runs everything in order and is the simpler
+choice.
+
+Everything about the client that can be checked by reading text — its transport
+policy, its documentation claims — is in the main suite instead, so it runs on
+every pull request without a Windows runner.
 [client/README.md](client/README.md) is the client's own document.
 
 ## What Makes A Pull Request Easy To Accept

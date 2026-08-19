@@ -30,7 +30,8 @@ too. Use the bug-report form and say plainly that it is a question; a question
 answered in public is a question the next person can find.
 
 There is deliberately no blank-issue option. Each form carries a required
-acknowledgement that credentials and real Telegram identifiers have been
+acknowledgement that credentials, real Telegram identifiers and anything that
+identifies your deployment — a host name, an address, a path — have been
 removed from whatever you paste, and an empty issue would be a way past it —
 a token published in a public issue has to be revoked, and cannot be unpublished.
 Fields that do not apply to you can be answered with "not applicable".

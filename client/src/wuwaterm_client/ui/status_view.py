@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import strings
-from ..api import ApiClient, MetaResult
+from ..api import SUPPORTED_API_VERSIONS, ApiClient, MetaResult
 from ..credentials import active_backend_name, has_token
 from ..errors import ClientError
 from . import error_presentation
@@ -86,6 +86,11 @@ class StatusView(QWidget):
         # Set by an address change, so the empty state can say "switched"
         # rather than "nothing fetched yet" - the second reads as data loss.
         self._endpoint_changed = False
+        # Whether the banner currently carries THIS view's api-version
+        # warning. Tracked so an accepted reply takes down that warning and
+        # only that warning: `_show_meta` must not become a second place where
+        # an unrelated message is silently swept off the screen.
+        self._api_version_warned = False
 
         self.service_version_value = QLabel(strings.STATUS_UNKNOWN_VALUE, self)
         self.data_profile_value = QLabel(strings.STATUS_UNKNOWN_VALUE, self)
@@ -216,6 +221,7 @@ class StatusView(QWidget):
             value_label.setText(strings.STATUS_UNKNOWN_VALUE)
         self.status_label.clear()
         self._banner.clear()
+        self._api_version_warned = False
         self._progress.stop()
         self._has_data = False
         self._endpoint_changed = True
@@ -369,3 +375,48 @@ class StatusView(QWidget):
         self.model_configured_value.setText(model_configured)
         self._has_data = True
         self._endpoint_changed = False
+        self._apply_api_version(meta)
+
+    def _apply_api_version(self, meta: MetaResult) -> None:
+        """Say so when the service speaks an API version this client does not.
+
+        A WARNING, deliberately, and never a refusal. The rows above are
+        written first and stay written: the owner needs to SEE the version
+        that is wrong, on the one screen that exists to tell them which
+        service they are talking to, and hiding the facts behind an error
+        would take that away at exactly the moment it is needed. Nothing here
+        disables a request path either - this client keeps working against a
+        service it may not fully agree with, because a field it cannot use is
+        a smaller problem than a client that will not talk at all.
+
+        It costs no request. The reply examined here is the one the refresh
+        above already fetched; the check adds no call, no header and no
+        startup traffic (issues #68 / #80), so an unconfigured client still
+        sends nothing whatsoever.
+
+        Ordering matters and is why the message lands in the banner from
+        HERE: `_run_refresh` clears the banner BEFORE the request, so a
+        message written after the reply survives to be read - and the
+        `finally` below it touches the progress line, the credential rows and
+        the empty state, none of which write the banner.
+        """
+        if meta.api_version in SUPPORTED_API_VERSIONS:
+            # A good refresh after a bad one must not leave the old warning
+            # standing. In the refresh path the pre-request clear has already
+            # done it; `_show_meta` is also reachable directly, and a warning
+            # that outlives the condition it describes is worse than none.
+            if self._api_version_warned:
+                self._banner.clear()
+                self._api_version_warned = False
+            return
+        self._banner.show_message(
+            strings.STATUS_API_VERSION_UNSUPPORTED.format(
+                reported=meta.api_version,
+                supported="、".join(SUPPORTED_API_VERSIONS),
+            ),
+            error_presentation.SEVERITY_WARN,
+            # This IS about a request, and this area has no result block to
+            # hang the id under - the same reason `_show_error` passes it.
+            request_id=meta.request_id,
+        )
+        self._api_version_warned = True

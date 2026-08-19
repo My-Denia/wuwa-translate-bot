@@ -32,8 +32,9 @@ body:
         - label: >-
             I have put NO details of the finding in this issue - no
             description of the flaw, no steps, no proof of concept, no logs,
-            no tokens, API keys, device credentials, real Telegram ids or
-            .env contents - and I understand this issue is public.
+            no tokens, API keys, device credentials, real Telegram ids, .env
+            contents, host names, addresses or paths that identify a
+            deployment - and I understand this issue is public.
           required: true
         - label: >-
             I tried the private reporting form first, or it is not available
