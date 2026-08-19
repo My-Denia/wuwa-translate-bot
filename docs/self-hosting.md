@@ -123,7 +123,7 @@ to reach the process; nothing in this project puts them there.
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Without it the bot cannot start. |
 | `OWNER_USER_ID` | Who may use the bot in a private chat. Empty means private chat rejects everyone, which is the fail-closed default. |
-| `WUWATERM_STATE_DIR` | Where `chat_settings.json` and the channel reply index live. Default `state`. |
+| `WUWATERM_STATE_DIR` | Where `chat_settings.json` and the channel reply index live. The example file sets it to `state`, and that is what the rest of this document assumes. It is **not** what an unset variable does: with nothing set, those two files fall back to sitting beside the database instead, which is the pre-`state/` layout and would put them where the backup section does not look. Leave the example's value in place. |
 
 **For the HTTP API:**
 
@@ -445,10 +445,15 @@ git fetch --tags
 git checkout vX.Y.Z
 ```
 
-Then bring the runtime up to that source. **Container path:**
+Then bring the runtime up to that source. **Container path** — name the builder
+too. It sits behind a Compose profile, so a bare build skips it, and the data
+commands below would then refresh and verify the new release's data with the
+previous release's builder code, which is exactly what a release that moves the
+pin or the schema version breaks:
 
 ```bash
-docker compose -f deploy/docker-compose.yml build
+docker compose -f deploy/docker-compose.yml build wuwaterm wuwaterm-api
+docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-builder
 ```
 
 **Source path** — the dependencies move with a release too, so reinstall them
@@ -500,6 +505,15 @@ is not a dependency of this project and may need installing:
 mkdir -p backup
 sqlite3 state-api/devices.db ".backup 'backup/devices.db'"
 ```
+
+**On the container path that command needs the file's own privileges.** The
+runtime image selects no unprivileged user, so the API process creates
+`devices.db` as root and then restricts it to mode 0600 — pre-creating the
+directory keeps the DIRECTORY yours, but not the database inside it. Run the
+backup with the same privileges the container has (through `sudo`, or from a
+one-shot container of the API service with the state directory mounted), or
+give the store a matching non-root owner. The source path, where the API runs
+as you, needs none of that.
 
 Verify a restored credential store by a business count — `device list` should
 show the devices you expect — rather than by an integrity check alone: an

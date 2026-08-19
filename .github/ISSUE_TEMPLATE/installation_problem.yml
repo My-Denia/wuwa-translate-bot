@@ -16,8 +16,10 @@ body:
         [validation](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/validation.md).
 
         The server suite is supported on Linux and is not supported on a Windows
-        host; the desktop client is Windows and needs Python 3.12 or newer.
-        Please check the support matrix before reporting a host mismatch.
+        host. The desktop client is Windows: the packaged build bundles its own
+        runtime and needs no Python installed at all, and Python 3.12 or newer
+        is required only to BUILD it from source. Please check the support
+        matrix before reporting a host mismatch.
 
         **Redact before you paste.** Tokens, API keys, device credentials, real
         Telegram ids and `.env` contents do not belong in a public issue.
@@ -98,7 +100,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Operating system, Python version, and container versions if you are using them.
+      description: Operating system, Python version if one is involved, and container versions if you are using them.
       placeholder: |
         OS: Ubuntu 24.04 (or Windows 11 for the client)
         Python: 3.12.7
@@ -164,7 +166,7 @@ body:
             device credentials, real Telegram chat or user ids, and `.env`
             contents from everything pasted above.
           required: true
-        - label: I checked the support matrix and my host and Python version are supported.
+        - label: I checked the support matrix for my host, and for my Python version where one is involved (the packaged desktop client needs none).
           required: true
         - label: I searched the open and closed issues and this is not one of them.
           required: true
