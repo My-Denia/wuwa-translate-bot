@@ -120,6 +120,11 @@ CJK_RANGES = (
     (0x1B100, 0x1B12F),  # Kana extended-A
     (0x1B130, 0x1B16F),  # Small Kana extension
     (0x1D360, 0x1D37F),  # Counting rod numerals, incl. the ideographic tally marks
+    # Ideographic symbols and punctuation - U+16FE2 OLD CHINESE HOOK MARK and
+    # its neighbours. The completeness sweep below cannot find this block on
+    # its own, because none of those names carries one of CJK_NAME_TOKENS, so
+    # it is here by reading rather than by measurement.
+    (0x16FE0, 0x16FFF),
     (0x1F200, 0x1F2FF),  # Enclosed ideographic supplement
     (0x20000, 0x2A6DF),  # CJK unified ideographs extension B
     # Extensions C through F run to U+2EBEF; extension I starts one code point
@@ -145,6 +150,16 @@ CJK_NAME_TOKENS = (
     "KANGXI",
     "BOPOMOFO",
 )
+
+# Scripts that use the WORD "ideograph" in their character names without being
+# CJK display text. Insurance, not a live filter: a reviewer raised the case of
+# a future character database naming Tangut ideographs, which would make the
+# sweep demand blocks this application has no reason to carry. Measured on the
+# two databases available here - Unicode 15.0.0 under the client interpreter
+# and 16.0.0 under a newer one - these prefixes match nothing that the sweep
+# would otherwise report, and a test below pins that, so the exclusion cannot
+# quietly start hiding a real gap.
+NON_CJK_NAME_PREFIXES = ("TANGUT", "NUSHU", "KHITAN")
 
 CJK_CHARACTER = re.compile(
     "[" + "".join(f"{chr(lo)}-{chr(hi)}" for lo, hi in CJK_RANGES) + "]"
@@ -483,12 +498,15 @@ def test_the_setter_rule_flags_a_literal_in_a_subpackage_initializer(
 def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
     """The block list must not fall behind the promise stated in prose.
 
-    Three review rounds found this list one block short, each time for a
+    Several review rounds found this list one block short, each time for a
     different block, and each time the rule's own description already claimed
     the missing one. So the list is checked against the character database that
     ships with the interpreter: every code point whose Unicode NAME contains
     one of CJK_NAME_TOKENS must match. Superset, not equality - the list also
-    covers CJK punctuation whose names carry none of those words.
+    covers CJK punctuation whose names carry none of those words, which is why
+    this sweep cannot be the whole story: the block at U+16FE0 (OLD CHINESE
+    HOOK MARK and neighbours) had to be found by reading, because no name in it
+    carries one of the tokens. A sweep closes the large hole, not every hole.
 
     A sweep of the whole code space costs a fraction of a second, and it is the
     only form of this check that cannot be one block behind. It is deliberately
@@ -497,13 +515,7 @@ def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
     future one that adds a CJK block should turn this red rather than let the
     list go quietly stale.
     """
-    uncovered = [
-        cp
-        for cp in range(0x110000)
-        if (name := _unicode_name(cp)) is not None
-        and any(token in name for token in CJK_NAME_TOKENS)
-        and not CJK_CHARACTER.match(chr(cp))
-    ]
+    uncovered = _uncovered_cjk_named_code_points(exclude_non_cjk_scripts=True)
     assert not uncovered, (
         "the block list misses %d code point(s) Unicode names as CJK, "
         "starting at U+%05X %s"
@@ -511,13 +523,47 @@ def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
     )
     # And the sweep must actually have found CJK characters to check, so an
     # empty or broken name lookup cannot pass this test by finding nothing.
-    covered = sum(
+    assert _cjk_named_code_point_count() > 90000, _cjk_named_code_point_count()
+
+
+def test_the_non_cjk_script_exclusion_is_currently_hiding_nothing() -> None:
+    """The insurance above must not be doing any work today.
+
+    NON_CJK_NAME_PREFIXES exists so that a future character database naming,
+    say, Tangut ideographs cannot make the sweep demand blocks this
+    application has no reason to carry. On the database this interpreter
+    ships, it should change nothing at all - and if it ever does start
+    removing entries, that is a fact worth seeing rather than a filter worth
+    trusting silently.
+    """
+    with_exclusion = _uncovered_cjk_named_code_points(exclude_non_cjk_scripts=True)
+    without_exclusion = _uncovered_cjk_named_code_points(exclude_non_cjk_scripts=False)
+    assert with_exclusion == without_exclusion == [], (
+        unicodedata.unidata_version,
+        without_exclusion[:5],
+    )
+
+
+def _uncovered_cjk_named_code_points(*, exclude_non_cjk_scripts: bool) -> list[int]:
+    uncovered = []
+    for cp in range(0x110000):
+        name = _unicode_name(cp)
+        if name is None or not any(token in name for token in CJK_NAME_TOKENS):
+            continue
+        if exclude_non_cjk_scripts and name.startswith(NON_CJK_NAME_PREFIXES):
+            continue
+        if not CJK_CHARACTER.match(chr(cp)):
+            uncovered.append(cp)
+    return uncovered
+
+
+def _cjk_named_code_point_count() -> int:
+    return sum(
         1
         for cp in range(0x110000)
         if (name := _unicode_name(cp)) is not None
         and any(token in name for token in CJK_NAME_TOKENS)
     )
-    assert covered > 90000, covered
 
 
 def _unicode_name(code_point: int) -> str | None:
