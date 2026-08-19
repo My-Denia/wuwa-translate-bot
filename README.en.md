@@ -84,7 +84,9 @@ and trust boundaries is [Architecture](docs/architecture.md).
 The latest published release is v0.3.0, and it carries only a wheel, an sdist
 and `SHA256SUMS` — no client binary and no container image. What follows
 describes distribution from **the next release (v0.4.0)** onward; that release
-does not exist yet.
+does not exist yet. The [release checklist](docs/release-checklist.md) still
+allows only those three assets today; its asset policy moves together with the
+release pipeline, in the change that follows this one rather than in this one.
 
 - **GitHub Releases.** From v0.4.0 onward each release carries the wheel, the
   sdist, the Windows client zip (`WuwaTerm-<version>-windows-x64.zip`),

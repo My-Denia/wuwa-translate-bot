@@ -45,7 +45,7 @@ request without a Windows runner.
 
 | | |
 | --- | --- |
-| Operating system | Windows 10 and Windows 11, x64 |
+| Operating system | Windows 10 and Windows 11, x64 — the **intended targets**, not a measured claim. CI builds and tests the client on GitHub's `windows-latest` runner image, which is not pinned to either desktop release, so a defect specific to one of them would not turn CI red. |
 | Python to build | 3.12 or newer (`client/pyproject.toml` declares `requires-python >=3.12`); the client keeps its own virtual environment, separate from the server's |
 | GUI toolkit | PySide6 (`>=6.7,<7`) |
 | Build | one-folder PyInstaller build from the committed spec, via `client/build.ps1` |
@@ -59,7 +59,8 @@ request without a Windows runner.
 
 | | |
 | --- | --- |
-| Client 0.2.x (upcoming) | speaks HTTP API `v1`, served by wuwaterm **>= 0.3.0** |
+| Client 0.1.x — what the tree carries today (`client/pyproject.toml`, `client/src/wuwaterm_client/__init__.py`), and what the Windows CI job builds and tests | speaks HTTP API `v1`, served by wuwaterm **>= 0.3.0** |
+| Client 0.2.x — the first publicly distributed build, not cut yet | the same contract; the version bump travels with the release change, so until it lands there is no package metadata saying 0.2.0 |
 | How the client learns the server's version | it reads `api_version` from `GET /v1/meta` |
 | Where the contract lives | [`docs/api/openapi.json`](api/openapi.json), committed and drift-gated by `scripts/check_api_contract.py`, so a route, model or error code cannot change without the published contract changing in the same commit |
 

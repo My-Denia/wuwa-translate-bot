@@ -108,8 +108,14 @@ set -a
 set +a
 ```
 
-A process supervisor does the same thing with its own environment-file
-directive; either way, the variables have to reach the process.
+**That line evaluates the file as shell**, which is the catch: a value
+containing a space, a dollar sign, a backtick, a semicolon or a quote is not
+read as data, and a command substitution in it would run. So either quote every
+value in single quotes, or do not load it this way. A process supervisor is the
+better answer for a real installation — systemd's `EnvironmentFile=` and the
+equivalents elsewhere parse the file as data rather than executing it, which is
+also how Compose reads it for the container path. Either way, the variables have
+to reach the process; nothing in this project puts them there.
 
 **For the Telegram bot:**
 
@@ -185,11 +191,18 @@ is running — stop it first, or use the transactional updater described in
 
 ## Start The Service
 
-**Container path** starts whichever services you want:
+**Container path.** Name the service you want. Both are ordinary services in
+the Compose file, so a bare `up -d` starts both — and a bot with no token would
+then fail and be restarted forever by its restart policy on an API-only
+installation:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d wuwaterm-api
+docker compose -f deploy/docker-compose.yml up -d wuwaterm
+docker compose -f deploy/docker-compose.yml up -d wuwaterm wuwaterm-api
 ```
+
+The three lines are alternatives: the API alone, the bot alone, or both.
 
 **Source path**, one process each — and they are two long-running processes,
 not two lines of one script. Start each in its own terminal, or put each under
@@ -398,10 +411,24 @@ file of your own is the equivalent.
 
 ## Upgrade
 
+Move the source first, on either path:
+
 ```bash
 git fetch --tags
 git checkout vX.Y.Z
+```
+
+Then bring the runtime up to that source. **Container path:**
+
+```bash
 docker compose -f deploy/docker-compose.yml build
+```
+
+**Source path** — the dependencies move with a release too, so reinstall them
+into the virtual environment rather than only restarting:
+
+```bash
+.venv/bin/python -m pip install -e ".[api,build]"
 ```
 
 Then rebuild and re-verify the data before restarting, because a release can
@@ -413,9 +440,14 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/data/terms.candidate.db wuwaterm-builder verify-db
 ```
 
+On the source path the same three steps are the source-path build commands from
+[Build The Terminology Database](#build-the-terminology-database).
+
 Stop the services, promote the verified candidate over `data/terms.db`, start
-again, and re-check `/readyz`. Take the backup below first: promotion is the one
-step in this document that overwrites something.
+again — on the source path that means starting the two processes again, in
+their own terminals or under their supervisor — and re-check `/readyz`. Take
+the backup below first: promotion is the one step in this document that
+overwrites something.
 
 An installation old enough to predate the separate `state/` and `state-api/`
 directories needs a one-time state migration rather than a restart; that path,
@@ -452,12 +484,20 @@ their original permissions (`.env` at `600`, `state-api/` at `700`), rebuild
 
 ## Rollback
 
+Stop what is running — `docker compose -f deploy/docker-compose.yml down` on
+the container path, or stop the two processes on the source path — then take
+the source back and rebuild the runtime for the path you are on:
+
 ```bash
-docker compose -f deploy/docker-compose.yml down
 git checkout vPREVIOUS
 docker compose -f deploy/docker-compose.yml build
 ```
 
+```bash
+.venv/bin/python -m pip install -e ".[api,build]"
+```
+
+The first block is the container path, the second the source path.
 Restore `state/` and `state-api/` from the backup taken before the upgrade,
 rebuild and verify the database at that tag's pin, then start and re-check
 `/readyz`. Rolling the source back without rolling the database back is the
@@ -474,7 +514,7 @@ mistake to avoid: the schema version travels with the source.
 | `refresh-data` fails and writes nothing | Same fail-closed check, or no network access to the upstream repository | Read the message: it names which check failed. A partial data directory is not left behind for the build to pick up. |
 | `401` with `unauthorized` from `/v1` | No token, a malformed token, or a revoked device | The header is `Authorization: Bearer wtd1.<device id>.<secret>`. Run `device list` to see whether that device is still active. |
 | `403` with `forbidden` from `/v1` | The device has the wrong scopes | `translate` admits `POST /v1/translations`; `meta` admits `GET /v1/terms` and `GET /v1/meta`. Issue a device with both. |
-| `429` with `rate_limited` | The per-device admission bound, per process | Raise `WUWATERM_API_RATE_LIMIT_PER_MINUTE`, or slow down. |
+| `429` with `rate_limited` | Two different bounds answer with this code. One is the per-device request limiter. The other is credential-verification admission: verification is deliberately expensive, so a bounded number of them may run at once and a request that finds every slot taken is refused **before** it is authenticated | If the completion record for that request carries no device principal, it was refused at verification admission and raising `WUWATERM_API_RATE_LIMIT_PER_MINUTE` will not help — raise `WUWATERM_API_AUTH_MAX_CONCURRENCY`, or reduce how many unauthenticated requests arrive at once. If it does name a device, it is the per-device limiter. |
 | `503` with `llm_unavailable` | No model configured, or the model call failed or timed out | If you configured none, this is the documented behaviour. If you did, check the endpoint, the key and `WUWATERM_API_LLM_TIMEOUT_SECONDS`. |
 | `503` with `llm_budget_exhausted` | The per-minute model call budget for that process | Raise `WUWATERM_API_LLM_CALLS_PER_MINUTE`, or wait. Budgets are per process and are not shared between the bot and the API. |
 | The API will not start: bind error | `WUWATERM_API_BIND` set to something that is not a numeric loopback address | It is refused on purpose. Bind loopback and publish through a TLS terminator. |
