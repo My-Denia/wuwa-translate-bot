@@ -21,11 +21,14 @@ green pull request are the same claim. Before it existed, CI carried one list,
 the README a shorter one, and this page a third, and a gate added to one of
 them was invisible in the others.
 
-One copy of the old list is still out there and is **not** equivalent: the two
-command blocks in `README.md` / `README.en.md` predate both the linter and the
-API-contract gate, so following them can leave a contributor green locally and
-red on the pull request. Use the entry point; routing the READMEs to it is a
-separate change to files this one does not touch.
+`README.md` and `README.en.md` used to carry their own command block, and it
+was **not** equivalent: it predated both the linter and the API-contract gate,
+so following it could leave a contributor green locally and red on the pull
+request. Both READMEs now send a reader to `python scripts/validate.py`
+instead, so there is one list of gates and it lives in the script. What they
+still list separately are the candidate-database checks below, and that is
+deliberate rather than left over: the entry point does not run them, because
+they need a built `data/terms.candidate.db`.
 
 The script uses only the standard library and runs each step with the
 interpreter that runs the script, so there is no POSIX-only path in it:
@@ -94,9 +97,31 @@ handler E2E test. It verifies `getMe`, and when `TELEGRAM_TEST_CHAT_ID` is set
 it sends one diagnostic message without printing the token or chat id. A real
 handler E2E still requires observing the bot's reply from Telegram.
 
-`check_repo_hygiene.py` and `check_non_goals.py` guard against committing
-generated data, TextMap content, SQLite DB files, runtime settings, channel
-reply indexes, tokens, API keys, and real Telegram identifiers.
+`check_repo_hygiene.py` and `check_non_goals.py` are each narrower than their
+names suggest, and **neither is a secret scanner**.
+
+`check_repo_hygiene.py` reads the git index and the working tree and fails on
+four things: a path whose suffix says SQLite (`.db`, `.sqlite`, `.sqlite3`); a
+staged blob or an untracked file whose first sixteen bytes are the SQLite
+header, whatever the file is called; a runtime-state path (`state/`,
+`state-api/`, `chat_settings.json`, `channel_replies.json` and their
+dot-prefixed forms); and a bulk game-text path (`TextMap/`, `Textmaps/`,
+`ConfigDB/`, `BinData/`, `data/`, `wutheringdata`) over 1 MB.
+
+`check_non_goals.py` reads text files and fails on four product markers — the
+chat-side delivery-registration settings, the inline-query handler class, the
+keyword of a synonym layer, and the free-text message-handler class — plus a
+structural pin that `src/wuwaterm/bot.py` registers exactly one message
+listener and that it is the channel auto-forward one.
+
+Neither one looks for tokens, API keys or real Telegram identifiers, and no
+gate in this repository does. What keeps credentials out of commits is
+elsewhere: GitHub secret scanning with push protection, enabled on the
+repository rather than run from `scripts/`; `.gitignore`, which excludes
+`.env`, `state/`, `state-api/` and every `*.db` / `*.sqlite` / `*.sqlite3`;
+and `scripts/check_package_artifacts.py`, which audits what a built
+distribution actually contains.
+
 `check_architecture_boundaries.py` guards forbidden import directions between
 presentation, domain, and builder modules, and enforces the HTTP adapter's
 four-module import allowlist into `wuwaterm` (see

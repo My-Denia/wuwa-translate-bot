@@ -1,5 +1,19 @@
 # Deployment
 
+> **Scope: this is the author's own production runbook.** It describes one
+> specific installation — a transactional updater with rollback, an immutable
+> per-commit deployment manifest and pointer, one particular reverse proxy
+> configuration, and the readback procedure that proves the promotion took.
+> Every path, port and command below is that deployment's, not a general
+> recommendation.
+>
+> **If you are not the author, start with [self-hosting.md](self-hosting.md).**
+> Running your own copy — Docker Compose or plain Python, whichever TLS
+> terminator you already have, and how to upgrade, back up, restore and
+> troubleshoot it — is that document's subject, and none of it requires the
+> machinery described here. This page is kept for the operator of this one
+> server and as a worked example of what a transactional promotion looks like.
+
 ## VPS Docker Compose
 
 The VPS target uses Docker Compose because the current system Python there is

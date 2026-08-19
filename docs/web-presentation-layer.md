@@ -65,8 +65,12 @@ handle /wuwaterm-web/* {
 }
 ```
 
-`caddy validate` has not been run against this block on the target host; it is
-a precondition of the deployment, not something this document can assert.
+`caddy validate` was run against this block on the target host during the
+2026-08-16 deployment, and the read-only readback of 2026-08-19 found the route
+live and the proxy serving it. That is a statement about one host on two dates,
+not a property of the block: applying it anywhere else, or after editing it
+here, still means validating before reloading — which is what the commands
+below do.
 
 `basic_auth` is the private protection layer: an unauthenticated request is
 refused by the proxy and never reaches the application at all. The injected

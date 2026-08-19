@@ -101,6 +101,24 @@ does not distribute generated game data or generated SQLite databases.
 
 ### HTTP API / Web Presentation Layer
 
+- **New: an owner-private web presentation layer.** A mobile-first browser
+  interface for dictionary lookup and sentence translation, mounted inside the
+  API process as a sub-application over the same protocol-neutral pipeline the
+  Telegram bot and the HTTP API already use. It is **off by default**: with
+  `WUWATERM_API_WEB_ENABLED` unset there is no route, no sub-application and no
+  entry in the published API document, and the process behaves exactly as it
+  did before the layer existed. When enabled it requires a device credential
+  held server-side (`WUWATERM_API_WEB_DEVICE_TOKEN`) and a marker the reverse
+  proxy injects on every proxied request (`WUWATERM_API_WEB_EDGE_SECRET`);
+  without that marker it refuses everything, so reaching the loopback port
+  directly does not get past the front door. Session lifetime and the ceiling
+  on live sessions are `WUWATERM_API_WEB_SESSION_TTL_SECONDS` and
+  `WUWATERM_API_WEB_MAX_SESSIONS`. The surface ships no page scripts and the
+  browser holds only an opaque HttpOnly session cookie. Decision and cost:
+  [ADR 0014](docs/adr/0014-private-web-presentation-layer.md); operation:
+  [docs/web-presentation-layer.md](docs/web-presentation-layer.md). The layer
+  landed in an earlier pull request without an entry that introduced it; this
+  is that entry, written where the surface belongs rather than backdated.
 - Malformed serve-only numeric settings no longer block operator credential
   commands such as `device revoke`: `from_env()` now retains their raw forms
   while falling back safely, and `serve` validates all eight values strictly
@@ -116,6 +134,49 @@ does not distribute generated game data or generated SQLite databases.
   on result cards, gold focus rings, and a brand bar across the viewport top.
   All previous functional rules stand: system fonts only, zero scripts, one
   round trip, 16px inputs, `pre-wrap` results.
+
+### Documentation And Project Governance
+
+- Both READMEs open with an audience router — desktop user, Telegram group
+  admin, self-hoster, contributor, owner operations — and now name all four
+  surfaces, the owner-private web layer among them. Their two validation
+  command blocks route to `python scripts/validate.py` instead of listing
+  individual gates, which is what makes "green locally" and "green on the pull
+  request" the same claim; the candidate-database checks stay listed
+  separately, because the entry point deliberately does not run them.
+- New `docs/self-hosting.md`: the generic path for someone who is not the
+  author — requirements, a source checkout at a release tag, configuration,
+  the data build on both the container and the source path, starting the
+  surfaces, issuing the first device credential, a first exact lookup and a
+  first sentence translation over HTTP, publishing over HTTPS through any TLS
+  terminator, upgrade, backup and restore, rollback, and a troubleshooting
+  table. `docs/deployment.md` keeps every word it had and gains a scope banner
+  saying it is the author's own production runbook, not the general path.
+- New `docs/support-matrix.md`: which Python versions are tested where, why the
+  server suite is not supported on a Windows host, what the desktop client
+  needs, and the client-to-API compatibility contract.
+- New `SECURITY.md` (private reporting through GitHub, what never to paste into
+  a report, what is in and out of scope), `CONTRIBUTING.md` (setup, the one
+  validation command, what each gate is for, what makes a change easy to
+  accept) and `SUPPORT.md` (where to ask, and the boundary of a best-effort
+  hobby project); three GitHub issue forms with a redaction acknowledgement,
+  their `config.yml`, and a pull-request template.
+- `docs/architecture.md` describes the private web layer as the third
+  presentation layer inside the API process, including how it reaches the
+  pipeline (in process, not over HTTP) and what it deliberately is not; the
+  ADR index lists 0013 and 0014; ADR 0014 moves from Proposed to Accepted with
+  its basis written out.
+- Two corrections of claims that had drifted from the code: `docs/validation.md`
+  no longer says the hygiene and non-goal gates catch tokens, API keys or
+  Telegram identifiers — it now says what each one actually checks and that no
+  gate in this repository scans for secrets — and
+  `docs/web-presentation-layer.md` no longer says the edge block has never been
+  validated on the target host.
+- `deploy/env.example` and `.env.example` document the five
+  `WUWATERM_API_WEB_*` keys, commented out, with the note that they belong to
+  the API process only. `client/README.md` gains the user path: download the
+  release zip, check it against `SHA256SUMS`, unpack it anywhere, and what an
+  unsigned build looks like on first run.
 
 ## 0.3.0 - 2026-08-12
 

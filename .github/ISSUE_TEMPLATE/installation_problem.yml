@@ -1,0 +1,170 @@
+name: Installation or setup problem
+description: You cannot install it, build the dictionary, start a service, issue a device credential, or get the client to talk to the API.
+title: "[Setup]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when the software will not come up, rather than when it comes
+        up and behaves wrongly — that is the bug report.
+
+        Worth reading first:
+        [self-hosting](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/self-hosting.md),
+        [support matrix](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/support-matrix.md),
+        [deployment](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/deployment.md),
+        [validation](https://github.com/My-Denia/wuwa-translate-bot/blob/main/docs/validation.md).
+
+        The server suite is supported on Linux and is not supported on a Windows
+        host; the desktop client is Windows and needs Python 3.12 or newer.
+        Please check the support matrix before reporting a host mismatch.
+
+        **Redact before you paste.** Tokens, API keys, device credentials, real
+        Telegram ids and `.env` contents do not belong in a public issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag you are installing, or the commit if you are on `main`.
+      placeholder: "v0.3.0, or commit 0f48e39"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where it stops
+      description: The first step that does not complete.
+      options:
+        - Installing dependencies
+        - Building the dictionary from upstream game data
+        - Starting the Telegram bot
+        - Starting the HTTP API
+        - Turning on the private web presentation layer
+        - Issuing or using a device credential
+        - Getting the desktop client to talk to the API
+        - Building the desktop client
+        - Running python scripts/validate.py
+        - Something else
+    validations:
+      required: true
+
+  - type: dropdown
+    id: path
+    attributes:
+      label: Which install path
+      description: How you are running it.
+      options:
+        - Containers (deploy/docker-compose.yml)
+        - From source with uv
+        - From source with a plain virtual environment
+        - Installed the published wheel or sdist
+        - Desktop client only
+    validations:
+      required: true
+
+  - type: dropdown
+    id: guide
+    attributes:
+      label: Which guide you followed
+      description: The document whose steps you were on when it stopped.
+      options:
+        - docs/self-hosting.md
+        - docs/deployment.md
+        - docs/data-refresh.md
+        - docs/validation.md
+        - client/README.md
+        - README.md or README.en.md
+        - No guide, or a guide elsewhere
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface you are trying to bring up
+      options:
+        - Telegram bot
+        - HTTP API (/v1)
+        - Private web presentation layer
+        - Windows desktop client
+        - Data build (dictionary from upstream game data)
+        - All of them
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and container versions if you are using them.
+      placeholder: |
+        OS: Ubuntu 24.04 (or Windows 11 for the client)
+        Python: 3.12.7
+        Docker / Compose version, if containers
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you ran, in order
+      description: The commands, as you ran them, with secrets replaced by placeholders.
+      placeholder: |
+        1. uv venv .venv
+        2. uv sync --locked --extra dev
+        3. python scripts/validate.py
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What the guide said would happen at that step.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened instead — the failure exactly as it appeared.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output and logs
+      description: >-
+        The failing output, trimmed to the part that matters. Write `none` if
+        there is nothing to attach.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: A reverse proxy in front of it, a non-default configuration, an unusual network, something you already tried.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I have removed Telegram bot tokens, OpenAI-compatible API keys,
+            device credentials, real Telegram chat or user ids, and `.env`
+            contents from everything pasted above.
+          required: true
+        - label: I checked the support matrix and my host and Python version are supported.
+          required: true
+        - label: I searched the open and closed issues and this is not one of them.
+          required: true

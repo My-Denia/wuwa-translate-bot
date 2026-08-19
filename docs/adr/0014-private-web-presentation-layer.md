@@ -1,11 +1,28 @@
 # ADR 0014: Private web presentation layer
 
-- Status: **Proposed**. [The ADR index](README.md) admits "Accepted decisions
-  that shape the **running** system" and says hollow or future-only records are
-  intentionally absent, so this record does not belong in that table yet. It
-  becomes Accepted — and is listed there — when the surface exists in the tree
-  with its gates and the owner has signed off on the running result, the same
-  bar [ADR 0013](0013-client-ui-visual-and-layout.md) was held to.
+- Status: **Accepted** (2026-08-19). [The ADR index](README.md) admits
+  "Accepted decisions that shape the **running** system", and this record now
+  describes one, so it belongs in that table and is listed there. The basis, in
+  three parts:
+  1. **The surface exists in the tree, with its gates.**
+     `src/wuwaterm_api/web/__init__.py`, `web/app.py`, `web/render.py` and
+     `web/session.py` hold the sub-application; `src/wuwaterm_api/app.py`
+     mounts it only when the switch is on, and
+     `src/wuwaterm_api/settings.py` defaults that switch off
+     (`DEFAULT_WEB_ENABLED = False`). Its behaviour is covered by
+     `tests/test_api_web.py`, and the whole package is inside the scan of
+     `tests/test_client_transport_policy.py` under that gate's strict rule.
+  2. **It has been deployed and in owner use since 2026-08-16.** The read-only
+     production readback of 2026-08-19 found the edge route for the mount live
+     and configured, the API answering on loopback only, and the API's own
+     request log carrying owner web-layer requests dated 2026-08-16 — served on
+     the authenticated path, and refused `401` without credentials. The edge
+     block itself, with its rollback, is written down in
+     [docs/web-presentation-layer.md](../web-presentation-layer.md), the guide
+     that extends `docs/deployment.md` for this surface.
+  3. **The owner directed the record to describe the running system.** The
+     campaign goal issued 2026-08-19 requires the documentation set and this
+     index to describe what is deployed rather than what was proposed.
 - Date: 2026-08-14
 - Amends the web-UI half of [ADR 0001](0001-telegram-as-presentation-layer.md)
   (the generic-API half was already amended by
@@ -479,9 +496,12 @@ one user.
 
 ## Evidence
 
-At the time of writing the surface is not committed to the tree — an
-implementation is in flight but untracked — so this section is in two parts.
-Mixing them would let a decision read as a description of running code.
+When this record was written (2026-08-14) the surface was not yet committed to
+the tree, so this section was written in two parts: what was already true, and
+what had to become true before the status could move. Mixing them would have
+let a decision read as a description of running code. Both parts are kept as
+they were written; the second one has since been delivered, and where it landed
+is recorded under it.
 
 Already true, and read to write this record:
 
@@ -517,3 +537,16 @@ Required before the status above may move to Accepted:
   injected header, documented in `docs/deployment.md` with its rollback
 - the identity-model note in `docs/architecture.md`, and this file's entry in
   [the ADR index](README.md)
+
+Delivered. The package and its mount are `src/wuwaterm_api/web/` and the mount
+in `src/wuwaterm_api/app.py`, with the switch defaulting off in
+`src/wuwaterm_api/settings.py`; the behavioural items above are covered by
+`tests/test_api_web.py`; the import-boundary guard reaches the new package
+through `scripts/check_architecture_boundaries.py`; the identity-model note and
+the third presentation layer are in [the architecture map](../architecture.md);
+and this record is listed in [the ADR index](README.md). One item landed
+differently from the way it was written: the edge site block, its validation
+command and its rollback are in
+[docs/web-presentation-layer.md](../web-presentation-layer.md) — the guide that
+opens by declaring it extends `docs/deployment.md` — rather than inside
+`docs/deployment.md` itself.
