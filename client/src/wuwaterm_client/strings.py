@@ -2,8 +2,13 @@
 
 The ui/ package and errors.py never define display text inline; they import
 constants from this module. tests/test_ui_strings_source.py statically
-checks that ui/*.py contains no other literal text passed to a text-setting
-call, so this module is the single source of truth for what a user can see.
+checks two things about the ui package, subpackages included: that no literal
+text reaches a known text-setting call, and that no string literal anywhere
+in those files contains a Chinese, Japanese or Korean character - including
+one written above the basic multilingual plane. The second one is the
+reason no Chinese can be written directly into the ui layer at all - not
+behind a local variable, not inside an f-string, not through a setter nobody
+thought to whitelist.
 
 The values are Chinese; the constant NAMES are a contract. Tests and the
 error map identify a message by its name, so a name may never be renamed or
@@ -13,10 +18,15 @@ The module stays a flat list of ``NAME = "text"`` assignments, and the reason
 is worth stating exactly, because an earlier version of this paragraph got it
 wrong. It is NOT that a dict here would break the static gate: measured,
 ``test_ui_strings_source.py`` only (a) counts module-level string constants
-against a floor of twenty, and (b) forbids string literals at text-setting
-calls in ``ui/*.py``. It never checks that displayed text came from this
-module, so values inside a dict here are neither more nor less covered than
-flat ones. The rule is a convention with two other justifications: a reader
+against a floor of twenty, (b) forbids string literals at text-setting calls
+in the ui package, and (c) forbids any string literal holding a CJK character
+anywhere in that package, subpackages included and supplementary-plane Han
+included - comments are invisible to it and docstrings are excluded on
+purpose. All three read the ui package, not this file: none of them
+checks that displayed text came from this module, and none of them can see
+text that arrives from Qt or from the service at run time. So values inside a
+dict here are neither more nor less covered than flat ones. The rule is a
+convention with two other justifications: a reader
 can grep a name and see every word this application can display in one list,
 and every service-value-to-text mapping in this client already lives in the
 view that consumes it (``_KIND_LABELS``, ``_REASON_LABELS``,
@@ -196,6 +206,12 @@ STATUS_API_VERSION_UNSUPPORTED = (
     "下面的服务信息仍然照常显示，但两边不是同一个接口版本时，某些字段或功能可能对不上。"
     "请把客户端或服务端升级到相互匹配的版本。"
 )
+
+# 把若干取值排成一行时用的顿号。它只有一个字,但它是**显示出来的**一个字,而且是
+# 中文标点 —— 换成英文逗号或斜杠,那一句读起来就不是中文了。放在这里的直接理由是
+# ui/ 里不允许出现含中日韩字符的字面量(见本模块开头的第三条),间接理由与其余文案
+# 相同:显示给人看的每一个字都应当在这一个文件里能被找到。
+LIST_SEPARATOR = "、"
 
 # -- Empty states ----------------------------------------------------------
 
