@@ -5,6 +5,20 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Desktop Client
+
+- client: the strings-source gate now forbids a string literal holding any CJK
+  character **anywhere** in `ui/*.py`, not only at a whitelisted text setter
+  (#65). The old rule could not see a Chinese literal that went through a local
+  variable, an f-string, or a setter nobody had listed, and that is exactly the
+  path it left open. The check is AST-based, so comments are outside it by
+  construction and docstrings are excluded deliberately; the one literal the
+  new rule found in the tree — the ideographic comma joining the supported API
+  versions in the status view — moved into `strings.py` as `LIST_SEPARATOR`.
+  The gate is proven red on a planted literal and green once it is removed, and
+  what it still cannot see (text from Qt, text from the service) is stated in
+  the test's own docstring.
+
 ## 0.4.0 - 2026-08-19
 
 Presentation, distribution and data release. A third presentation layer — an

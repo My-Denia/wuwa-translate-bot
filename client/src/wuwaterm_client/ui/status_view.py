@@ -412,7 +412,7 @@ class StatusView(QWidget):
         self._banner.show_message(
             strings.STATUS_API_VERSION_UNSUPPORTED.format(
                 reported=meta.api_version,
-                supported="、".join(SUPPORTED_API_VERSIONS),
+                supported=strings.LIST_SEPARATOR.join(SUPPORTED_API_VERSIONS),
             ),
             error_presentation.SEVERITY_WARN,
             # This IS about a request, and this area has no result block to
