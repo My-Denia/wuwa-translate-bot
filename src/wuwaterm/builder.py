@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import CORE_TERM_KEYS, SourceProfile, get_source_profile
-from .data_source import SourceProvenance, inspect_data_source
+from .data_source import inspect_data_source
 from .db import create_database
 from .models import TermRecord
 from .normalize import clean_source_text
