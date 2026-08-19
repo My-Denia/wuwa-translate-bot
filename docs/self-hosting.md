@@ -644,8 +644,10 @@ close the file itself:
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && sqlite3 -readonly state-api/devices.db ".backup 'backup/devices.db'" ) || echo "backup FAILED - do not keep this file"
-chmod 600 backup/devices.db
+rm -f backup/devices.db.new
+( umask 077 && sqlite3 -readonly state-api/devices.db ".backup 'backup/devices.db.new'" ) \
+  && chmod 600 backup/devices.db.new \
+  && mv backup/devices.db.new backup/devices.db
 ```
 
 **Without the `sqlite3` shell**, the same backup call is in the Python standard
@@ -659,8 +661,10 @@ guarantees: the uv route supplies its own interpreter and a host may have no
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && .venv/bin/python -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
-chmod 600 backup/devices.db
+rm -f backup/devices.db.new
+( umask 077 && .venv/bin/python -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db.new'); src.backup(dst); dst.close(); src.close()" ) \
+  && chmod 600 backup/devices.db.new \
+  && mv backup/devices.db.new backup/devices.db
 ```
 
 **The container path has no interpreter of its own to offer here.** Its
@@ -679,9 +683,15 @@ CREATES a database file it is given and does not find. Aim either command at a
 store that does not exist yet — before the first credential is issued — or at
 the wrong state directory, and without that flag it would succeed, leaving a
 valid-looking backup of an empty database and a loss you would meet during a
-restore. Opened read-only, a missing source is an error at once, which is why
-the shell form also reports its own failure rather than trusting the reader to
-watch the exit status.
+restore. Opened read-only, a missing source is an error at once.
+
+**Both blocks write to a new name and rename only on success, chained with
+`&&`.** That is not tidiness either. A backup that fails must leave the
+PREVIOUS backup untouched and must exit non-zero, so that whatever runs this —
+you, or a scheduler — cannot mistake a stale file for a fresh one. An earlier
+revision of this page reported the failure with a message instead, which turned
+a failed backup into an exit status of zero; a message a human might read is
+not a status a machine can act on.
 
 The Python form was **measured** both ways here, including against a live
 database with an uncheckpointed write-ahead log, where the read-only open still
