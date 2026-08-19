@@ -171,6 +171,17 @@ every pull request without a Windows runner.
 - **Tests that would fail without it.** For a fix, the test should be red on the
   code as it stands and green with the change. A test that passes either way
   documents nothing.
+- **Behaviour, not wiring** ([issue #66](https://github.com/My-Denia/wuwa-translate-bot/issues/66)).
+  When you add an assertion that a signal is connected, a callback was injected
+  or a dependency was passed in, add a second assertion that actually triggers
+  that slot or callback at least once, with its external dependencies (dialogs,
+  network, keyring) replaced by stand-ins, and asserts the observable outcome.
+  A wiring assertion stays green when the slot itself raises on its first line.
+  Two things make such a test red for reasons that are not the code's fault, so
+  write it around them: assert focus as `page.focusWidget() is widget` rather
+  than `widget.hasFocus()`, because the offscreen platform the suites run on
+  never activates a window; and build the case on a **configured** window,
+  because a disabled widget correctly refuses focus.
 - **An entry under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md).** Say what
   changed and why, in the voice of the surrounding entries.
 - **README parity.** `README.md` (Chinese, the front page) and
@@ -229,6 +240,18 @@ Reporting is a contribution. The issue forms ask for the fields that make a
 report actionable — version, surface, environment, steps, expected versus
 actual, and logs with the secrets removed:
 <https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose>
+
+## Code Of Conduct
+
+This project has no code of conduct as of v0.4.0. It is a single-maintainer,
+best-effort hobby project whose community surface is this file plus
+[SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), the issue forms and the
+pull request template; with no community yet and one person to act on a
+report, a conduct document here would be a promise rather than a policy. The
+decision is meant to be revisited the moment there is outside contribution or
+community activity to govern, and at that point the standard
+[Contributor Covenant](https://www.contributor-covenant.org/) is what would be
+adopted rather than something written here from scratch.
 
 ## Licence
 

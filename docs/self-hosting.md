@@ -32,6 +32,14 @@ for you:
 - **Issue your own device credentials.** There is no registration endpoint and
   no sign-up.
 
+**How long this takes.** A first install, from the checkout to the first exact
+lookup, is a few minutes, and most of that is the upstream data fetch rather
+than anything this project does — roughly 1.2 GB over the network against a
+handful of seconds of local work. A clean-room run of this document on a fast
+link spent about a minute and a half of machine time on the whole path; the same
+run took about eight minutes of wall time because the fetch failed twice and was
+re-run. Budget for the link, not for the build.
+
 ## Requirements
 
 Either path works; pick one.
@@ -381,11 +389,26 @@ curl -sS "http://127.0.0.1:8788/v1/terms?q=%E4%BB%8A%E6%B1%90" \
 {
   "query": "今汐",
   "matches": [
-    {"zh": "今汐", "en": "Jinhsi", "category": "resonator", "score": 100.0, "reason": "exact"}
+    {"zh": "今汐", "en": "Jinhsi", "category": "resonator", "score": 100.0, "reason": "exact"},
+    {"zh": "今汐", "en": "Jinhsi", "category": "echo", "score": 100.0, "reason": "exact"},
+    {"zh": "今汐", "en": "Jinhsi", "category": "speaker", "score": 100.0, "reason": "exact"}
   ],
   "request_id": "3f7c1a9e5b2d4c8a9e0f1b2c3d4e5f60"
 }
 ```
+
+**Several matches for one exact term is normal, not a duplicate.** Matches are
+distinct on the triple of Chinese string, English string and category, so one
+query can legitimately return several. The response above is one shape of that:
+this particular term exists as a resonator, an echo and a speaker, and its
+English string happens to be the same in all three. It is not the only shape.
+When the upstream data records more than one official English string for a term,
+those come back as separate matches **inside one category** — at the 3.6 pin,
+`守岸人` returns both `Shorekeeper` and `The Shorekeeper` in `resonator`. A reverse
+(English) query can likewise return several Chinese strings — `Suisui` is both
+`穗穗` and `穗穗（通讯中）`, both `speaker`. So read `zh`, `en` and `category`
+together, and do not treat a second match as a duplicate of the first: on an
+ambiguous term it is the other official answer.
 
 A sentence, which reaches the model only after the known terms in it have been
 locked:
@@ -607,7 +630,7 @@ Three things are worth backing up, and one is not.
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
-| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo`, or a one-shot container with the directory mounted. Pre-creating `state/` keeps the directory yours and not the files in it. |
+| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
 | `data/terms.db` | **Not worth backing up.** It is regenerable from the pinned upstream source with the build commands above, and rebuilding it is the only way to be sure of what is in it. |
 
@@ -623,9 +646,67 @@ close the file itself:
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && sqlite3 state-api/devices.db ".backup 'backup/devices.db'" )
-chmod 600 backup/devices.db
+rm -f backup/devices.db.new
+( umask 077 && sqlite3 -readonly state-api/devices.db ".backup 'backup/devices.db.new'" ) \
+  && chmod 600 backup/devices.db.new \
+  && mv backup/devices.db.new backup/devices.db
 ```
+
+**Without the `sqlite3` shell**, the same backup call is in the Python standard
+library — `sqlite3.Connection.backup` — so no package has to be installed for
+it. **This is the source-path form**, and it uses the environment you built in
+[Get The Source At A Release Tag](#get-the-source-at-a-release-tag) rather than
+a system interpreter, because that environment is the one this document
+guarantees: the uv route supplies its own interpreter and a host may have no
+`python3` at all.
+
+```bash
+mkdir -p backup
+chmod 700 backup
+rm -f backup/devices.db.new
+( umask 077 && .venv/bin/python -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db.new'); src.backup(dst); dst.close(); src.close()" ) \
+  && chmod 600 backup/devices.db.new \
+  && mv backup/devices.db.new backup/devices.db
+```
+
+**The container path offers no interpreter of its own for this.** Its
+requirements promise Docker and Compose and nothing else; the Python that runs
+this service lives inside the image, and the runtime entrypoint accepts only
+`bot`, `api` and `device` — it refuses an arbitrary command by design. A
+one-shot container can still reach that interpreter if you override the
+entrypoint and mount a destination yourself (`docker compose run --rm
+--entrypoint python -v "$PWD/backup:/backup" wuwaterm-api -c ...` with the
+standard-library backup call above), but that is a recipe you own, not one the
+Compose file provides. The path that needs no improvising: stop the API
+(`docker compose -f deploy/docker-compose.yml down`) and copy `state-api/`,
+which is exactly what the table above allows. A stopped database has nothing
+in flight to lose, and that is the whole reason the online form exists in the
+first place.
+
+**Both forms open the source read-only, and that is not decoration.** SQLite
+CREATES a database file it is given and does not find. Aim either command at a
+store that does not exist yet — before the first credential is issued — or at
+the wrong state directory, and without that flag it would succeed, leaving a
+valid-looking backup of an empty database and a loss you would meet during a
+restore. Opened read-only, a missing source is an error at once.
+
+**Both blocks write to a new name and rename only on success, chained with
+`&&`.** That is not tidiness either. A backup that fails must leave the
+PREVIOUS backup untouched and must exit non-zero, so that whatever runs this —
+you, or a scheduler — cannot mistake a stale file for a fresh one. An earlier
+revision of this page reported the failure with a message instead, which turned
+a failed backup into an exit status of zero; a message a human might read is
+not a status a machine can act on.
+
+The Python form was **measured** both ways here, including against a live
+database with an uncheckpointed write-ahead log, where the read-only open still
+returns the newest commit. The `-readonly` flag on the shell form is the same
+protection expressed in that program's own option; this document's clean room
+did not have the `sqlite3` shell installed, so treat that half as reasoned
+rather than measured, and check the exit status the first time you run it.
+
+Both forms take the same online backup and need the same privileges. Use
+whichever is available; do not substitute a plain file copy for either.
 
 The `umask` makes the new file 0600 as it is created; the explicit `chmod`
 after it is there because a shell that inherits a different umask, or a
@@ -636,10 +717,11 @@ that for you. The same applies to whatever you copy `state/` and `.env` into.
 runtime image selects no unprivileged user, so the API process creates
 `devices.db` as root and then restricts it to mode 0600 — pre-creating the
 directory keeps the DIRECTORY yours, but not the database inside it. Run the
-backup with the same privileges the container has (through `sudo`, or from a
-one-shot container of the API service with the state directory mounted), or
-give the store a matching non-root owner. The source path, where the API runs
-as you, needs none of that.
+backup with the same privileges the container has — `sudo` on the host — or
+give the store a matching non-root owner. Reaching for a one-shot container of
+the API service instead does not work: its entrypoint accepts `bot`, `api` and
+`device` and refuses anything else, on purpose. The source path, where the API
+runs as you, needs none of that.
 
 Verify a restored credential store by a business count — `device list` should
 show the devices you expect — rather than by an integrity check alone: an
@@ -647,7 +729,14 @@ integrity check passes on a database that is intact but stale.
 
 To restore: stop the services, put `.env`, `state/` and `state-api/` back with
 their original permissions (`.env` at `600`, `state-api/` at `700`), rebuild
-`data/terms.db` from the pinned source if it is missing, and start again.
+`data/terms.db` from the pinned source if it is missing, and start again. On an
+API-only install there is nothing in `state/` to restore: that directory belongs
+to the bot process, and a bot that never ran wrote nothing into it. On the
+source path it will usually not exist at all; on the container path it exists
+and is **empty**, because the build step above pre-creates it along with the
+other bind mounts. Either way, restore `.env` and `state-api/` and skip it — an
+absent or empty `state/` on an API-only install is the expected state, not a
+missing backup.
 
 ## Rollback
 
