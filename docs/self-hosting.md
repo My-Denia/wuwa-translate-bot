@@ -420,6 +420,19 @@ Name the service here for the same reason as above: without it, an API-only
 installation starts the bot too, and a bot with no token fails and is restarted
 forever. Substitute `wuwaterm` for the bot alone, or list both.
 
+**That variable has to survive the command.** Set only on that one line, it is
+gone from the next one — and every later Compose command, including a restart
+you run months from now, falls back to the local tag and quietly starts a
+different image from the one you meant to deploy. Put it in `.env` instead, so
+Compose reads it every time, and update it deliberately at each upgrade:
+
+```bash
+WUWATERM_RUNTIME_IMAGE=ghcr.io/my-denia/wuwaterm:v0.4.0
+```
+
+If you would rather not keep it there, then carry the prefix on *every* Compose
+command that starts, recreates or runs a container — not only the first one.
+
 **The builder image needs an overlay, not a variable.** Only the two serving
 services read their reference from the environment; the builder service pins
 `wuwaterm-builder:local` in the Compose file, so the pulled builder image is
@@ -493,7 +506,7 @@ Three things are worth backing up, and one is not.
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
-| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. |
+| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo`, or a one-shot container with the directory mounted. Pre-creating `state/` keeps the directory yours and not the files in it. |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
 | `data/terms.db` | **Not worth backing up.** It is regenerable from the pinned upstream source with the build commands above, and rebuilding it is the only way to be sure of what is in it. |
 
@@ -501,10 +514,22 @@ An online backup of the credential store, without stopping anything, using
 SQLite's own backup call — here through the `sqlite3` command-line shell, which
 is not a dependency of this project and may need installing:
 
+A backup of the credential store is as sensitive as the store: it carries the
+same verifiers, and a copy left world-readable in a working directory undoes
+the 0600 the service was careful about. Create the destination closed, and
+close the file itself:
+
 ```bash
 mkdir -p backup
-sqlite3 state-api/devices.db ".backup 'backup/devices.db'"
+chmod 700 backup
+( umask 077 && sqlite3 state-api/devices.db ".backup 'backup/devices.db'" )
+chmod 600 backup/devices.db
 ```
+
+The `umask` makes the new file 0600 as it is created; the explicit `chmod`
+after it is there because a shell that inherits a different umask, or a
+`sqlite3` build that copies the source file's mode, would otherwise decide
+that for you. The same applies to whatever you copy `state/` and `.env` into.
 
 **On the container path that command needs the file's own privileges.** The
 runtime image selects no unprivileged user, so the API process creates

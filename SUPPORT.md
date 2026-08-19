@@ -29,6 +29,12 @@ GitHub Discussions is not enabled on this repository, so a question is an issue
 too. Use the bug-report form and say plainly that it is a question; a question
 answered in public is a question the next person can find.
 
+There is deliberately no blank-issue option. Each form carries a required
+acknowledgement that credentials and real Telegram identifiers have been
+removed from whatever you paste, and an empty issue would be a way past it —
+a token published in a public issue has to be revoked, and cannot be unpublished.
+Fields that do not apply to you can be answered with "not applicable".
+
 Before opening anything, please check the existing open and closed issues. Many
 of the sharp edges are already written down, some with a decision attached.
 

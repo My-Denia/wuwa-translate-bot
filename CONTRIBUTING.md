@@ -123,11 +123,17 @@ dependencies either. No single interpreter can run both suites, which is why
 On Windows:
 
 ```powershell
-py "-V:Astral\CPython3.12.13" -m venv client\.venv
+py -3.12 -m venv client\.venv
 client\.venv\Scripts\python.exe -m pip install -e "client[dev,build]"
 client\.venv\Scripts\python.exe -m pytest
 client\build.ps1
 ```
+
+Any interpreter that satisfies the declared range will do — `py -3.12` picks a
+registered 3.12 whoever shipped it, `py -3.13` is equally fine, and on a
+machine without the launcher, `python3.12 -m venv client\.venv` or the full
+path to the interpreter works the same way. The version is a requirement; the
+vendor is not.
 
 `client/build.ps1` produces the one-folder PyInstaller artifact. From the
 repository root, `python scripts/validate.py --client` runs the same client
