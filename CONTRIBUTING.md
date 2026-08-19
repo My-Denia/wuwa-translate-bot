@@ -171,6 +171,17 @@ every pull request without a Windows runner.
 - **Tests that would fail without it.** For a fix, the test should be red on the
   code as it stands and green with the change. A test that passes either way
   documents nothing.
+- **Behaviour, not wiring** ([issue #66](https://github.com/My-Denia/wuwa-translate-bot/issues/66)).
+  When you add an assertion that a signal is connected, a callback was injected
+  or a dependency was passed in, add a second assertion that actually triggers
+  that slot or callback at least once, with its external dependencies (dialogs,
+  network, keyring) replaced by stand-ins, and asserts the observable outcome.
+  A wiring assertion stays green when the slot itself raises on its first line.
+  Two things make such a test red for reasons that are not the code's fault, so
+  write it around them: assert focus as `page.focusWidget() is widget` rather
+  than `widget.hasFocus()`, because the offscreen platform the suites run on
+  never activates a window; and build the case on a **configured** window,
+  because a disabled widget correctly refuses focus.
 - **An entry under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md).** Say what
   changed and why, in the voice of the surrounding entries.
 - **README parity.** `README.md` (Chinese, the front page) and

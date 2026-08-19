@@ -32,6 +32,14 @@ for you:
 - **Issue your own device credentials.** There is no registration endpoint and
   no sign-up.
 
+**How long this takes.** A first install, from the checkout to the first exact
+lookup, is a few minutes, and most of that is the upstream data fetch rather
+than anything this project does — roughly 1.2 GB over the network against a
+handful of seconds of local work. A clean-room run of this document on a fast
+link spent about a minute and a half of machine time on the whole path; the same
+run took about eight minutes of wall time because the fetch failed twice and was
+re-run. Budget for the link, not for the build.
+
 ## Requirements
 
 Either path works; pick one.
@@ -381,11 +389,19 @@ curl -sS "http://127.0.0.1:8788/v1/terms?q=%E4%BB%8A%E6%B1%90" \
 {
   "query": "今汐",
   "matches": [
-    {"zh": "今汐", "en": "Jinhsi", "category": "resonator", "score": 100.0, "reason": "exact"}
+    {"zh": "今汐", "en": "Jinhsi", "category": "resonator", "score": 100.0, "reason": "exact"},
+    {"zh": "今汐", "en": "Jinhsi", "category": "echo", "score": 100.0, "reason": "exact"},
+    {"zh": "今汐", "en": "Jinhsi", "category": "speaker", "score": 100.0, "reason": "exact"}
   ],
   "request_id": "3f7c1a9e5b2d4c8a9e0f1b2c3d4e5f60"
 }
 ```
+
+**Several matches for one exact term is normal, not a duplicate.** A term that
+the upstream data carries in more than one category — this one is a resonator,
+an echo and a speaker — comes back once per category, and on an exact hit the
+English string is the same in each. Read `category` to tell them apart; a term
+that exists in a single category returns a single match.
 
 A sentence, which reaches the model only after the known terms in it have been
 locked:
@@ -627,6 +643,20 @@ chmod 700 backup
 chmod 600 backup/devices.db
 ```
 
+**Without the `sqlite3` shell**, the same backup call is in the Python standard
+library — `sqlite3.Connection.backup` — so any interpreter that satisfies this
+project's version requirement can take it, with nothing to install:
+
+```bash
+mkdir -p backup
+chmod 700 backup
+( umask 077 && python3 -c "import sqlite3; src=sqlite3.connect('state-api/devices.db'); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
+chmod 600 backup/devices.db
+```
+
+Both forms take the same online backup, and both need the same privileges. Use
+whichever is available; do not substitute a plain file copy for either.
+
 The `umask` makes the new file 0600 as it is created; the explicit `chmod`
 after it is there because a shell that inherits a different umask, or a
 `sqlite3` build that copies the source file's mode, would otherwise decide
@@ -647,7 +677,10 @@ integrity check passes on a database that is intact but stale.
 
 To restore: stop the services, put `.env`, `state/` and `state-api/` back with
 their original permissions (`.env` at `600`, `state-api/` at `700`), rebuild
-`data/terms.db` from the pinned source if it is missing, and start again.
+`data/terms.db` from the pinned source if it is missing, and start again. On an
+API-only install there is no `state/` to restore — that directory belongs to the
+bot process and never exists if you never started the bot. Restore `.env` and
+`state-api/` and skip it; its absence is not a missing backup.
 
 ## Rollback
 
