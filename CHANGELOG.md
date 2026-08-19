@@ -13,7 +13,9 @@ does not distribute generated game data or generated SQLite databases.
   backup when the `sqlite3` shell is absent, a note that an API-only install has
   no bot state directory to restore, an illustrative `/v1/terms` response that
   shows the three matches the example term really returns, and an expected
-  duration for a first install.
+  duration for a first install. CONTRIBUTING also states, in three sentences
+  and no new file, why this project carries no code of conduct at v0.4.0 and
+  what would change that.
 
 ## 0.4.0 - 2026-08-19
 

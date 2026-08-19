@@ -241,6 +241,18 @@ report actionable — version, surface, environment, steps, expected versus
 actual, and logs with the secrets removed:
 <https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose>
 
+## Code Of Conduct
+
+This project has no code of conduct as of v0.4.0. It is a single-maintainer,
+best-effort hobby project whose community surface is this file plus
+[SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), the issue forms and the
+pull request template; with no community yet and one person to act on a
+report, a conduct document here would be a promise rather than a policy. The
+decision is meant to be revisited the moment there is outside contribution or
+community activity to govern, and at that point the standard
+[Contributor Covenant](https://www.contributor-covenant.org/) is what would be
+adopted rather than something written here from scratch.
+
 ## Licence
 
 By contributing you agree that your contribution is licensed under this
