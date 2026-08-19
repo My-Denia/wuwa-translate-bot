@@ -54,9 +54,11 @@ jobs:
       # Not 8788: that port belongs to the API this job is testing.
       SMOKE_MOCK_PORT: "8799"
       SMOKE_API_PORT: "8788"
-      SMOKE_TERM_ZH: "景燃"
-      SMOKE_TERM_EN: "Jingran"
-      SMOKE_SENTENCE_ZH: "景燃在这场战斗中的表现非常出色"
+      # The lookup term is NOT pinned here. This workflow can be dispatched at
+      # any ref, including an older release tag, and a term hard-coded to the
+      # current data pin would make the exact-lookup step fail on a ref whose
+      # database is correct - 景燃 exists only from 3.6 onward. The pair is read
+      # out of the CHECKED-OUT source profile instead, below.
 
     steps:
       - name: Check out the source
@@ -87,6 +89,35 @@ jobs:
           : > "${RUNNER_TEMP}/smoke-rows.md"
           docker compose version
           date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Take the lookup pair from the checked-out source profile
+        run: |
+          set -euo pipefail
+          # Imported from the ref under test, never hard-coded: the pair that
+          # verify_db.py requires at THIS commit is the pair guaranteed to be in
+          # the database this job is about to build. A dispatch at an older tag
+          # gets that tag's pair, and a future pin that retires this one is
+          # followed automatically instead of turning the smoke red on a correct
+          # build.
+          python3 - >> "$GITHUB_ENV" <<'PY'
+          import sys
+
+          sys.path.insert(0, "src")
+          from wuwaterm.constants import SOURCE_PROFILES
+
+          profile = SOURCE_PROFILES["arikatsu"]
+          pairs = profile.representative_exact_hits
+          if not pairs:
+              raise SystemExit(
+                  "the arikatsu profile declares no representative exact hit; "
+                  "this smoke has nothing guaranteed to look up"
+              )
+          zh, en = pairs[0]
+          print(f"SMOKE_TERM_ZH={zh}")
+          print(f"SMOKE_TERM_EN={en}")
+          print(f"SMOKE_SENTENCE_ZH={zh}在这场战斗中的表现非常出色")
+          PY
+          grep '^SMOKE_TERM_\|^SMOKE_SENTENCE_' "$GITHUB_ENV"
 
       - name: Configure - cp deploy/env.example .env
         run: |

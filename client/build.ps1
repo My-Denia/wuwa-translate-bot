@@ -65,6 +65,38 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# The version is read BEFORE anything is built, and the stale archive of that
+# same version is removed BEFORE anything is built, because the guarantee being
+# made is "a failed build leaves no archive that looks like its output". Doing
+# the removal down beside the packaging would only reach it after PyInstaller
+# and the self-check had both passed - so a build that failed at either of
+# those would leave yesterday's zip of the same version sitting in dist\,
+# looking exactly like the thing that just failed to be produced.
+#
+# It is read from the package this environment installs - the same interpreter
+# PyInstaller is about to freeze - rather than from a string in this script or
+# a hand-parsed pyproject.toml, so the name on the asset is the version the
+# program reports about itself. client/tests/test_api_version_compat.py pins
+# that constant against `version` in client/pyproject.toml.
+#
+# The name is exact and load-bearing: the release workflow uses this file when
+# build.ps1 produced it and builds the same name itself when it did not.
+$Version = (& $VenvPython -c "import wuwaterm_client; print(wuwaterm_client.__version__)")
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Could not read wuwaterm_client.__version__ from $VenvPython."
+    exit 1
+}
+$Version = "$Version".Trim()
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    Write-Error "wuwaterm_client.__version__ is empty; refusing to name an asset after it."
+    exit 1
+}
+$ZipPath = Join-Path $ClientRoot "dist\WuwaTerm-$Version-windows-x64.zip"
+if (Test-Path $ZipPath) {
+    Write-Host "Removing the previous archive before building: $ZipPath"
+    Remove-Item -LiteralPath $ZipPath -Force
+}
+
 # The dependency scan walks PATH to resolve the DLLs an extension module
 # needs, so the interpreter's own runtime directory goes first: otherwise any
 # other OpenSSL installed on the build machine wins and the artifact ships a
@@ -123,35 +155,10 @@ if ($SelfCheck.ExitCode -ne 0) {
 Write-Host "Build succeeded and passed its start-up self-check: $ExePath"
 
 # The release asset, and only now: everything above had to pass first, so a
-# build that cannot start is never packaged and a stale zip beside a failed
-# build is never mistaken for the new one (the previous zip is replaced, not
-# added to).
-#
-# The version is READ, never written here. It comes from the package this
-# build actually froze - `wuwaterm_client.__version__`, in the same venv
-# interpreter PyInstaller used - rather than from a string in this script or
-# a hand-parsed pyproject.toml, so the name on the asset is the version the
-# program reports about itself. client/tests/test_api_version_compat.py pins
-# that constant against `version` in client/pyproject.toml, which is what
-# keeps the declared version and the packaged one from drifting apart.
-#
-# The name is exact and load-bearing: the release workflow uses this file when
-# build.ps1 produced it and builds the same name itself when it did not.
-$Version = (& $VenvPython -c "import wuwaterm_client; print(wuwaterm_client.__version__)")
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Could not read wuwaterm_client.__version__ from $VenvPython."
-    exit 1
-}
-$Version = "$Version".Trim()
-if ([string]::IsNullOrWhiteSpace($Version)) {
-    Write-Error "wuwaterm_client.__version__ is empty; refusing to name an asset after it."
-    exit 1
-}
-
-$ZipPath = Join-Path $ClientRoot "dist\WuwaTerm-$Version-windows-x64.zip"
-if (Test-Path $ZipPath) {
-    Remove-Item -LiteralPath $ZipPath -Force
-}
+# build that cannot start is never packaged. `$Version` and `$ZipPath` were
+# resolved at the top and any previous archive of this version was deleted
+# there, before the build, so a failure at ANY stage above leaves no zip at all
+# rather than yesterday's.
 # $DistRoot is the FOLDER, with no wildcard, so the archive keeps a single
 # `WuwaTerm\` directory at its root: extracting it anywhere yields one folder
 # holding the whole portable program, which is what client/README.md tells the

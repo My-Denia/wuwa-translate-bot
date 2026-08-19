@@ -125,9 +125,14 @@ On Windows:
 ```powershell
 py -3.12 -m venv client\.venv
 client\.venv\Scripts\python.exe -m pip install -e "client[dev,build]"
-client\.venv\Scripts\python.exe -m pytest
+Push-Location client; .venv\Scripts\python.exe -m pytest; Pop-Location
 client\build.ps1
 ```
+
+The third line changes directory on purpose. `pytest` reads its configuration
+from the working directory, and the repository root's `testpaths` points at the
+SERVER suite — so running it from the root with the client interpreter collects
+the wrong suite and fails on the first import. Measured, not guessed.
 
 Any interpreter that satisfies the declared range will do — `py -3.12` picks a
 registered 3.12 whoever shipped it, `py -3.13` is equally fine, and on a
@@ -145,10 +150,12 @@ the repository root, `python scripts/validate.py --client` APPENDS the client
 suite to the six server steps rather than replacing them, and the runner stops
 at the first failing step — so on a Windows host the server steps fail for the
 platform reasons [docs/support-matrix.md](docs/support-matrix.md) records, and
-the client suite you were trying to run never starts. Use
-`client\.venv\Scripts\python.exe -m pytest` from `client/`, or, if you want the
-entry point's reporting, `python scripts/validate.py --client --only
-client-tests`, which selects that one step and skips the server ones. On Linux
+the client suite you were trying to run never starts. Run it directly, from
+inside `client/`, as the third line of the block above does:
+`.venv\Scripts\python.exe -m pytest`. If you want the entry point's reporting,
+`python scripts/validate.py --client --only client-tests` selects that one step
+and skips the server ones; run it from the repository root — it changes into
+`client/` itself and finds the client environment itself. On Linux
 or macOS the plain `--client` form runs everything in order and is the simpler
 choice.
 

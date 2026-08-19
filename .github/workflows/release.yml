@@ -446,6 +446,25 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       - uses: docker/setup-buildx-action@v3
+      - name: The tag must still be absent, checked here and not only in preflight
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -uo pipefail
+          # Preflight's check ran before the package and Windows-client builds,
+          # which take minutes. If the git tag appeared in that gap, this
+          # version is already published somewhere and pushing these
+          # release-semantic image tags would overwrite a published release's
+          # images with a different build - a registry mutation no later gate
+          # in this workflow can undo. So the check is repeated immediately
+          # before the push, fail-closed, with a lookup error treated as a stop.
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 || status=$?
+          echo "refs/tags/$TAG: git ls-remote --exit-code status $status (2 = absent = pass)"
+          if [ "$status" -ne 2 ]; then
+            echo "the tag is present or the lookup failed; refusing to push images" >&2
+            exit 1
+          fi
       - name: Log in to the container registry
         env:
           REGISTRY_USER: ${{ github.actor }}
