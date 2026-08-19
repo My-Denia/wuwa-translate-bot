@@ -644,7 +644,7 @@ close the file itself:
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && sqlite3 state-api/devices.db ".backup 'backup/devices.db'" )
+( umask 077 && sqlite3 -readonly state-api/devices.db ".backup 'backup/devices.db'" ) || echo "backup FAILED - do not keep this file"
 chmod 600 backup/devices.db
 ```
 
@@ -674,15 +674,23 @@ which is exactly what the table above allows. A stopped database has nothing
 in flight to lose, and that is the whole reason the online form exists in the
 first place.
 
-The source is opened **read-only, through a URI**, and that is not decoration.
-A plain path hands SQLite a filename it will CREATE if it is missing: point this
-line at a store that does not exist yet, or at the wrong state directory, and it
-exits 0 after writing a valid-looking backup of an empty database — a loss you
-would discover during a restore. The read-only URI fails immediately instead.
-Measured both ways, including against a live database with an uncheckpointed
-write-ahead log, where the read-only open still sees the newest commit.
+**Both forms open the source read-only, and that is not decoration.** SQLite
+CREATES a database file it is given and does not find. Aim either command at a
+store that does not exist yet — before the first credential is issued — or at
+the wrong state directory, and without that flag it would succeed, leaving a
+valid-looking backup of an empty database and a loss you would meet during a
+restore. Opened read-only, a missing source is an error at once, which is why
+the shell form also reports its own failure rather than trusting the reader to
+watch the exit status.
 
-Both forms take the same online backup, and both need the same privileges. Use
+The Python form was **measured** both ways here, including against a live
+database with an uncheckpointed write-ahead log, where the read-only open still
+returns the newest commit. The `-readonly` flag on the shell form is the same
+protection expressed in that program's own option; this document's clean room
+did not have the `sqlite3` shell installed, so treat that half as reasoned
+rather than measured, and check the exit status the first time you run it.
+
+Both forms take the same online backup and need the same privileges. Use
 whichever is available; do not substitute a plain file copy for either.
 
 The `umask` makes the new file 0600 as it is created; the explicit `chmod`
