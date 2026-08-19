@@ -282,10 +282,18 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           $ErrorActionPreference = "Stop"
-          & "client/dist/WuwaTerm/WuwaTerm.exe" --self-check
-          if ($LASTEXITCODE -ne 0) {
-            throw "the built artifact failed its start-up self-check (exit $LASTEXITCODE)"
+          # Start-Process -Wait -PassThru, not the call operator: WuwaTerm.exe
+          # is built for the WINDOWS subsystem (console=False in the spec), so
+          # PowerShell does not wait for it and leaves $LASTEXITCODE unset. The
+          # first version of this step used `&` and failed with an empty exit
+          # code on an artifact that had just passed the identical check inside
+          # build.ps1 - which is how build.ps1 already does it, and why.
+          $check = Start-Process -FilePath "client/dist/WuwaTerm/WuwaTerm.exe" `
+            -ArgumentList "--self-check" -Wait -PassThru
+          if ($check.ExitCode -ne 0) {
+            throw "the built artifact failed its start-up self-check (exit $($check.ExitCode))"
           }
+          Write-Host "self-check exit code: $($check.ExitCode)"
       - name: Package the one-folder build as the release zip
         shell: pwsh
         env:
