@@ -404,9 +404,11 @@ this particular term exists as a resonator, an echo and a speaker, and its
 English string happens to be the same in all three. It is not the only shape.
 When the upstream data records more than one official English string for a term,
 those come back as separate matches **inside one category** — at the 3.6 pin,
-`守岸人` returns both `Shorekeeper` and `The Shorekeeper` in `resonator`. So read
-`category` and `en` together, and do not treat a second match as a duplicate of
-the first: on an ambiguous term it is the other official answer.
+`守岸人` returns both `Shorekeeper` and `The Shorekeeper` in `resonator`. A reverse
+(English) query can likewise return several Chinese strings — `Suisui` is both
+`穗穗` and `穗穗（通讯中）`, both `speaker`. So read `zh`, `en` and `category`
+together, and do not treat a second match as a duplicate of the first: on an
+ambiguous term it is the other official answer.
 
 A sentence, which reaches the model only after the known terms in it have been
 locked:
@@ -667,12 +669,15 @@ rm -f backup/devices.db.new
   && mv backup/devices.db.new backup/devices.db
 ```
 
-**The container path has no interpreter of its own to offer here.** Its
+**The container path offers no interpreter of its own for this.** Its
 requirements promise Docker and Compose and nothing else; the Python that runs
 this service lives inside the image, and the runtime entrypoint accepts only
-`bot`, `api` and `device` — it refuses an arbitrary command by design, and the
-API service mounts no destination for a backup to land in. So on a container
-host that also lacks the `sqlite3` shell, do not improvise: stop the API
+`bot`, `api` and `device` — it refuses an arbitrary command by design. A
+one-shot container can still reach that interpreter if you override the
+entrypoint and mount a destination yourself (`docker compose run --rm
+--entrypoint python -v "$PWD/backup:/backup" wuwaterm-api -c ...` with the
+standard-library backup call above), but that is a recipe you own, not one the
+Compose file provides. The path that needs no improvising: stop the API
 (`docker compose -f deploy/docker-compose.yml down`) and copy `state-api/`,
 which is exactly what the table above allows. A stopped database has nothing
 in flight to lose, and that is the whole reason the online form exists in the
