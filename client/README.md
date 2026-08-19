@@ -30,7 +30,7 @@
 从 v0.4.0 起,[GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
 会附带一个便携版压缩包 `WuwaTerm-0.2.0-windows-x64.zip`(命名规律是
 `WuwaTerm-<客户端版本>-windows-x64.zip`),以及一份 `SHA256SUMS`。
-在此之前(含当前最新的 v0.3.0)发布页只提供服务端的 wheel 与 sdist,没有客户端产物,
+在此之前(v0.3.0 及更早)发布页只提供服务端的 wheel 与 sdist,没有客户端产物,
 要用就只能按下文「构建」自行构建。
 
 1. 下载 `WuwaTerm-0.2.0-windows-x64.zip` 与同一次发布的 `SHA256SUMS`。

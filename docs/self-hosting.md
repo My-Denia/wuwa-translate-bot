@@ -39,7 +39,7 @@ Either path works; pick one.
 | | Container path | Source path |
 | --- | --- | --- |
 | Host | Linux with Docker and Compose v2 | Linux or macOS with Python 3.11 or newer; on Windows, inside WSL |
-| Python | supplied by the image (`python:3.11-slim`) | 3.11+ (`requires-python >=3.11`) |
+| Python | supplied by the image (`python:3.11-slim`) | 3.11+ (`requires-python >=3.11`), **plus a way to create a virtual environment**: either the standard library `venv` module with pip, which on Debian and Ubuntu is the separate `python3-venv` package rather than part of `python3`, or [uv](https://docs.astral.sh/uv/), which needs neither. Both forms are written out below. |
 | Disk | about 2 GB for the upstream data checkout, plus images | about 2 GB for the upstream data checkout |
 | Git | needed for the source checkout | needed for the checkout and for the data refresh |
 
@@ -80,6 +80,21 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
 .venv/bin/python -m pip install -e ".[api,build]"
 ```
+
+If the first line fails with `ensurepip is not available`, this host's Python
+has no `venv` module — a stock Ubuntu or Debian install does not carry one, and
+that message is what it looks like. Either install it
+(`sudo apt install python3-venv`, or the version-specific package the message
+names), or use uv, which supplies its own interpreter and pip and needs no
+system package at all:
+
+```bash
+uv venv --seed .venv
+.venv/bin/python -m pip install -e ".[api,build]"
+```
+
+Either way the environment ends up at `.venv/` and every later command in this
+document works unchanged.
 
 `api` carries FastAPI and uvicorn; `build` carries what the data build needs.
 The Telegram bot needs neither extra beyond the base install.
@@ -192,9 +207,17 @@ docker compose -f deploy/docker-compose.yml run --rm -e WUWATERM_DB_PATH=/app/da
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
 ```
 
+On either path the refresh fetches roughly a gigabyte over the network and can
+fail part-way on a slow or unreliable link. Re-run the same command if it does:
+an existing
+checkout is resumed rather than discarded, so a retry after a transient failure
+is usually much faster than the first attempt.
+
 `verify_db.py` checks integrity, the schema, the recorded source provenance
-against the profile, the required categories, and representative exact hits. On
-a first install, once it passes, put the candidate in place:
+against the profile, the required categories, and representative exact hits. It
+prints the category counts and the recorded provenance and nothing else — there
+is **no explicit PASS line**, so the exit status is the verdict: zero means
+verified. On a first install, once it passes, put the candidate in place:
 
 ```bash
 mv data/terms.candidate.db data/terms.db
@@ -281,6 +304,21 @@ There is no registration endpoint. The operator issues credentials, and the
 secret is read from standard input so it is never printed and never appears in
 a process listing.
 
+**You create the secret, and the store has rules for it.** It has to be at
+least **32 characters** and printable ASCII with no spaces and no control
+characters, because it is presented as an HTTP header value and a credential
+that cannot be sent is worse than none; anything shorter is refused as too
+little material. Generate it into a file that only you can read, rather than
+typing it or pasting it into a shell:
+
+```bash
+( umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > /path/to/secret )
+```
+
+That gives 43 URL-safe characters. Delete the file once the token is in the
+desktop client's credential store: the service keeps only a salted scrypt
+verifier and cannot give the secret back to you or to anyone else.
+
 **Container path.** A one-shot container of the API service. On a fresh
 install with one runtime image this is enough; on a host that carries several
 runtime image tags, pin the reference to the image the service is actually
@@ -314,12 +352,17 @@ keeps the row and stamps a revocation time, so a withdrawal stays auditable.
 Deleting `state-api/devices.db` revokes every device at once and the next start
 recreates an empty store.
 
-The credential store lives in the `state-api/` directory created back in
-[Build The Terminology Database](#build-the-terminology-database) — before any
-Compose command ran, so that it belongs to you and not to root. If you skipped
-that step, the directory Docker created is root-owned and mode 0700, and no
-host-side backup or restore below can read it; fix the ownership before going
-on.
+Where `state-api/` comes from differs by path, and only one of them asks
+anything of you:
+
+- **Container path.** It is the directory you created in
+  [Build The Terminology Database](#build-the-terminology-database) — before any
+  Compose command ran, so that it belongs to you and not to root. If you skipped
+  that step, the directory Docker created is root-owned and mode 0700, and no
+  host-side backup or restore below can read it; fix the ownership before going
+  on.
+- **Source path.** There is no such step and none is needed: the service creates
+  `state-api/` itself at first start, mode `0700`, owned by whoever runs it.
 
 ## First Lookup, First Translation
 
@@ -429,7 +472,7 @@ supported configuration.
 
 ## Optional: Container Images From GHCR
 
-From the next release (v0.4.0) onward there are two published images:
+From v0.4.0 onward there are two published images:
 `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder`
 (builder). They exist to save the local image build; they do not replace the
 source checkout, because the Compose files, the entrypoints, the data build and
@@ -639,7 +682,7 @@ mistake to avoid: the schema version travels with the source.
 | Bot answers in a private chat to nobody | `OWNER_USER_ID` unset | Empty means private chat rejects everyone, on purpose. Set it, or use the bot in a group. |
 | `/readyz` returns `503` | The terminology database is missing or unreadable | Confirm `WUWATERM_DB_PATH` points at a file that exists and that the process can read; build it if it does not. |
 | `verify-db` fails on a fresh build | The upstream checkout is not the pinned commit, or its version-provenance file does not say the expected version | This is fail-closed by design. Re-run `refresh-data`; if it still fails, the profile in `src/wuwaterm/constants.py` and the upstream repository have diverged and the pin has to be updated deliberately, not worked around. |
-| `refresh-data` fails and writes nothing | Same fail-closed check, or no network access to the upstream repository | Read the message: it names which check failed. A partial data directory is not left behind for the build to pick up. |
+| `refresh-data` fails | Same fail-closed check, or the fetch from the upstream repository failed or was interrupted | Read the message: it names which check failed. A network failure part-way through **does** leave a partial `data/wutheringdata/` behind, and re-running the same command **resumes** that checkout instead of starting over — that is deliberate, and it is why a retry after a transient failure is usually fast. A partial directory is still never consumed as data: `build-db` re-runs the same provenance inspection and refuses a checkout that is not at the pinned commit with the expected version file. |
 | `401` with `unauthorized` from `/v1` | No token, a malformed token, or a revoked device | The header is `Authorization: Bearer wtd1.<device id>.<secret>`. Run `device list` to see whether that device is still active. |
 | `403` with `forbidden` from `/v1` | The device has the wrong scopes | `translate` admits `POST /v1/translations`; `meta` admits `GET /v1/terms` and `GET /v1/meta`. Issue a device with both. |
 | `429` with `rate_limited` | Two different bounds answer with this code. One is the per-device request limiter. The other is credential-verification admission: verification is deliberately expensive, so a bounded number of them may run at once and a request that finds every slot taken is refused **before** it is authenticated | If the completion record for that request carries no device principal, it was refused at verification admission and raising `WUWATERM_API_RATE_LIMIT_PER_MINUTE` will not help — raise `WUWATERM_API_AUTH_MAX_CONCURRENCY`, or reduce how many unauthenticated requests arrive at once. If it does name a device, it is the per-device limiter. |

@@ -25,7 +25,7 @@ artifact; the upstream licence boundary is in
 
 - **Desktop user.** Download the Windows client zip from
   [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
-  (from the next release, v0.4.0, onward); usage is in
+  (from v0.4.0 onward); usage is in
   [Desktop Client](client/README.md).
 - **Telegram group admin.** Commands, authorization and linked-channel
   auto-translation are in [Telegram Behavior](docs/telegram-behavior.md).
@@ -81,12 +81,11 @@ and trust boundaries is [Architecture](docs/architecture.md).
 
 ## Downloads And Distribution
 
-The latest published release is v0.3.0, and it carries only a wheel, an sdist
-and `SHA256SUMS` — no client binary and no container image. What follows
-describes distribution from **the next release (v0.4.0)** onward; that release
-does not exist yet. The [release checklist](docs/release-checklist.md) and
-`.github/workflows/release.yml` already describe the asset policy below; what
-has not happened yet is the release itself.
+What follows describes distribution from **v0.4.0** onward. Releases up to and
+including v0.3.0 carried only a wheel, an sdist and `SHA256SUMS` — no client
+binary and no container image. The asset policy below is built and gated by the
+[release checklist](docs/release-checklist.md) and
+`.github/workflows/release.yml`.
 
 - **GitHub Releases.** From v0.4.0 onward each release carries the wheel, the
   sdist, the Windows client zip (`WuwaTerm-<version>-windows-x64.zip`),

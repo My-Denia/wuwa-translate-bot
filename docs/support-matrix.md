@@ -12,7 +12,7 @@ an intention.
 | Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
 | Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build and the Docker boundary job run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
-| Published images from the next release (v0.4.0) onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |
+| Published images from v0.4.0 onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |
 | Supported development platform | **Linux.** The suite is green there. |
 
 ### The server test suite on a Windows host is not supported
@@ -53,7 +53,7 @@ request without a Windows runner.
 | Signing | **None.** The build is unsigned and there is no installer, so Windows SmartScreen shows a warning the user has to click through. |
 | Byte-for-byte equality between two builds | Not claimed and not checked. There is no lock file for the client and no comparison of build outputs. |
 | Distribution today | a CI workflow artifact from the `desktop client build (windows)` job, retained for 90 days and requiring a GitHub login. The release workflow builds the same zip on every run, including its dry runs, so the artifact exists before any release does. |
-| Distribution from the next release (v0.4.0) onward | a release asset, `WuwaTerm-0.2.0-windows-x64.zip`, listed in `SHA256SUMS` |
+| Distribution from v0.4.0 onward | a release asset, `WuwaTerm-0.2.0-windows-x64.zip`, listed in `SHA256SUMS` |
 | Tested in CI | the client's own suite on `windows-latest` with Python 3.12, followed by the build; the release workflow repeats the suite, the build and the `--self-check` start-up rehearsal before it packages the zip |
 
 ## Compatibility contract

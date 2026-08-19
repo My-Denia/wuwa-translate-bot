@@ -5,6 +5,18 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-19
+
+Presentation, distribution and data release. A third presentation layer — an
+owner-private web interface running inside the API process and off by default —
+joins the Telegram bot and the HTTP API; the game-data pin moves to Wuthering
+Waves 3.6.0 / resource 3.6.4 / changelist 8464573 at upstream commit
+`6ce8d5eda49f2930da84d8846c144432142c7465`; the desktop client becomes 0.2.0 and
+is published as a release asset for the first time; and every release asset is
+now built by a workflow from one reviewed commit rather than by hand. The
+project also gains its governance entries, a generic self-hosting guide separate
+from the owner's own runbook, and one command that runs every offline gate.
+
 ### Game Data
 
 - data: pin Arikatsu 3.6.0 — the active source profile moves to Wuthering
@@ -25,6 +37,42 @@ does not distribute generated game data or generated SQLite databases.
 - No production data is shipped by this change: deployments pick the new pin
   up through `deploy/vps-update.sh`, which refreshes the checkout and rebuilds
   and re-verifies the candidate on the target host.
+
+### HTTP API / Web Presentation Layer
+
+- **New: an owner-private web presentation layer.** A mobile-first browser
+  interface for dictionary lookup and sentence translation, mounted inside the
+  API process as a sub-application over the same protocol-neutral pipeline the
+  Telegram bot and the HTTP API already use. It is **off by default**: with
+  `WUWATERM_API_WEB_ENABLED` unset there is no route, no sub-application and no
+  entry in the published API document, and the process behaves exactly as it
+  did before the layer existed. When enabled it requires a device credential
+  held server-side (`WUWATERM_API_WEB_DEVICE_TOKEN`) and a marker the reverse
+  proxy injects on every proxied request (`WUWATERM_API_WEB_EDGE_SECRET`);
+  without that marker it refuses everything, so reaching the loopback port
+  directly does not get past the front door. Session lifetime and the ceiling
+  on live sessions are `WUWATERM_API_WEB_SESSION_TTL_SECONDS` and
+  `WUWATERM_API_WEB_MAX_SESSIONS`. The surface ships no page scripts and the
+  browser holds only an opaque HttpOnly session cookie. Decision and cost:
+  [ADR 0014](docs/adr/0014-private-web-presentation-layer.md); operation:
+  [docs/web-presentation-layer.md](docs/web-presentation-layer.md). The layer
+  landed in an earlier pull request without an entry that introduced it; this
+  is that entry, written where the surface belongs rather than backdated.
+- Malformed serve-only numeric settings no longer block operator credential
+  commands such as `device revoke`: `from_env()` now retains their raw forms
+  while falling back safely, and `serve` validates all eight values strictly
+  before logging, credential-store initialization, app construction or socket
+  serving.
+- `TERM_QUERY_MAX_LENGTH` is defined once in `wuwaterm_api` and imported by
+  both the JSON routes and the web views (previously 200 vs a local 120).
+- The web surface envelope now matches the mount path exactly or its
+  children only, so a future sibling like `/wuwaterm-webhooks` is not
+  rewritten as a web page.
+- Restyled the owner-private web surface (markup unchanged): ink-and-gold
+  palette with a sharp 3px geometry, underline tabs, gold provenance heading
+  on result cards, gold focus rings, and a brand bar across the viewport top.
+  All previous functional rules stand: system fonts only, zero scripts, one
+  round trip, 16px inputs, `pre-wrap` results.
 
 ### Channel Adapter
 
@@ -99,41 +147,63 @@ does not distribute generated game data or generated SQLite databases.
   the HTTP adapter already did; a fuzzy lookup can no longer stall every
   concurrent handler.
 
-### HTTP API / Web Presentation Layer
+### Desktop Client
 
-- **New: an owner-private web presentation layer.** A mobile-first browser
-  interface for dictionary lookup and sentence translation, mounted inside the
-  API process as a sub-application over the same protocol-neutral pipeline the
-  Telegram bot and the HTTP API already use. It is **off by default**: with
-  `WUWATERM_API_WEB_ENABLED` unset there is no route, no sub-application and no
-  entry in the published API document, and the process behaves exactly as it
-  did before the layer existed. When enabled it requires a device credential
-  held server-side (`WUWATERM_API_WEB_DEVICE_TOKEN`) and a marker the reverse
-  proxy injects on every proxied request (`WUWATERM_API_WEB_EDGE_SECRET`);
-  without that marker it refuses everything, so reaching the loopback port
-  directly does not get past the front door. Session lifetime and the ceiling
-  on live sessions are `WUWATERM_API_WEB_SESSION_TTL_SECONDS` and
-  `WUWATERM_API_WEB_MAX_SESSIONS`. The surface ships no page scripts and the
-  browser holds only an opaque HttpOnly session cookie. Decision and cost:
-  [ADR 0014](docs/adr/0014-private-web-presentation-layer.md); operation:
-  [docs/web-presentation-layer.md](docs/web-presentation-layer.md). The layer
-  landed in an earlier pull request without an entry that introduced it; this
-  is that entry, written where the surface belongs rather than backdated.
-- Malformed serve-only numeric settings no longer block operator credential
-  commands such as `device revoke`: `from_env()` now retains their raw forms
-  while falling back safely, and `serve` validates all eight values strictly
-  before logging, credential-store initialization, app construction or socket
-  serving.
-- `TERM_QUERY_MAX_LENGTH` is defined once in `wuwaterm_api` and imported by
-  both the JSON routes and the web views (previously 200 vs a local 120).
-- The web surface envelope now matches the mount path exactly or its
-  children only, so a future sibling like `/wuwaterm-webhooks` is not
-  rewritten as a web page.
-- Restyled the owner-private web surface (markup unchanged): ink-and-gold
-  palette with a sharp 3px geometry, underline tabs, gold provenance heading
-  on result cards, gold focus rings, and a brand bar across the viewport top.
-  All previous functional rules stand: system fonts only, zero scripts, one
-  round trip, 16px inputs, `pre-wrap` results.
+- The client is **0.2.0**, the first version distributed as a release asset:
+  `WuwaTerm-<version>-windows-x64.zip`, the one-folder build, listed in
+  `SHA256SUMS`. It is **not code-signed** — SmartScreen will warn on first run,
+  and `client/README.md` says so and shows what to do.
+- Compatibility contract: client 0.2.x speaks HTTP API `v1`, served by wuwaterm
+  0.3.0 or newer. The client checks it on the `/v1/meta` reply the status view
+  already fetches when the owner presses 刷新 — **no new request, and none at
+  startup**: an unconfigured client still sends nothing. A server reporting an
+  API version this client does not support gets a warning naming both versions,
+  while the service facts stay on screen and the client keeps working.
+
+### Distribution And Release Pipeline
+
+- New `.github/workflows/release.yml` builds every release asset from one
+  reviewed commit: the wheel and the sdist (with `twine check --strict`, the
+  packaging audit and a clean-environment install smoke), the Windows client
+  zip (built on a Windows runner through `client/build.ps1` and started with
+  `--self-check` before it is packaged), a `SHA256SUMS` covering all three, and
+  a `release-manifest.json` recording the tag, both versions, the source
+  commit, the build time, the image tags and digests, and the game-data pin.
+  It has **no tag trigger**: publishing stays a human step, and a draft
+  release still creates no tag, so a discarded draft leaves nothing behind.
+- The workflow runs in two modes. `workflow_dispatch` with
+  `dry_run=false` is the real one and is the only mode that logs in to the
+  container registry, pushes an image, or creates the draft release; every
+  other run — including the `pull_request` run that fires when this workflow,
+  `deploy/**`, `client/**` or `pyproject.toml` changes — is a dry run that
+  builds and checks everything and publishes nothing. Write permissions match:
+  the workflow default is read-only, `packages: write` exists only on the
+  image job, and `contents: write` only on the job that creates the draft.
+- Release-pinned container images: `ghcr.io/my-denia/wuwaterm` (runtime) and
+  `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and
+  `sha-<7>`, carrying the source, version, revision and created OCI labels.
+  Both are published because the runtime image is useless without a terminology
+  database, which is built by the builder image and is never distributed. The
+  images save the local image build and nothing else: the generic path still
+  needs a source checkout at the release tag for the Compose files, the
+  entrypoints, the data build and the verification scripts. Whether an
+  anonymous pull is permitted is a registry-side setting and is stated as
+  something to verify, not as something this project has measured.
+- New `.github/workflows/selfhost-smoke.yml` follows the container path of
+  `docs/self-hosting.md` on a clean runner — build, `refresh-data`,
+  `build-db --atomic`, `verify-db`, promote, start the API alone, issue a
+  device credential, one exact lookup, one sentence translation against a mock
+  model endpoint started in the job, and a credential-store backup and restore
+  — and reports per-step timings. It runs on pull requests that touch
+  `deploy/**` or that guide, and can be dispatched at any ref.
+- `deploy/docker-compose.yml` reads the builder image reference from
+  `WUWATERM_BUILDER_IMAGE`, defaulting to the previous fixed local tag, so a
+  self-hoster can point it at a pulled image; `deploy/vps-update.sh` never sets
+  it and its behaviour is unchanged. `deploy/docker-compose.ghcr.yml` is a thin
+  overlay that sets only the three `image:` fields from `WUWATERM_IMAGE_TAG`.
+- `docs/release-checklist.md` is rewritten around the new asset policy and the
+  new flow: five assets, images on the registry, the client binary stated as
+  unsigned, and a readback performed while the release is still a draft.
 
 ### Documentation And Project Governance
 
@@ -185,63 +255,59 @@ does not distribute generated game data or generated SQLite databases.
   release zip, check it against `SHA256SUMS`, unpack it anywhere, and what an
   unsigned build looks like on first run.
 
-### Distribution And Release Pipeline
+### Developer Experience
 
-- New `.github/workflows/release.yml` builds every release asset from one
-  reviewed commit: the wheel and the sdist (with `twine check --strict`, the
-  packaging audit and a clean-environment install smoke), the Windows client
-  zip (built on a Windows runner through `client/build.ps1` and started with
-  `--self-check` before it is packaged), a `SHA256SUMS` covering all three, and
-  a `release-manifest.json` recording the tag, both versions, the source
-  commit, the build time, the image tags and digests, and the game-data pin.
-  It has **no tag trigger**: publishing stays a human step, and a draft
-  release still creates no tag, so a discarded draft leaves nothing behind.
-- The workflow runs in two modes. `workflow_dispatch` with
-  `dry_run=false` is the real one and is the only mode that logs in to the
-  container registry, pushes an image, or creates the draft release; every
-  other run — including the `pull_request` run that fires when this workflow,
-  `deploy/**`, `client/**` or `pyproject.toml` changes — is a dry run that
-  builds and checks everything and publishes nothing. Write permissions match:
-  the workflow default is read-only, `packages: write` exists only on the
-  image job, and `contents: write` only on the job that creates the draft.
-- Release-pinned container images: `ghcr.io/my-denia/wuwaterm` (runtime) and
-  `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and
-  `sha-<7>`, carrying the source, version, revision and created OCI labels.
-  Both are published because the runtime image is useless without a terminology
-  database, which is built by the builder image and is never distributed. The
-  images save the local image build and nothing else: the generic path still
-  needs a source checkout at the release tag for the Compose files, the
-  entrypoints, the data build and the verification scripts. Whether an
-  anonymous pull is permitted is a registry-side setting and is stated as
-  something to verify, not as something this project has measured.
-- New `.github/workflows/selfhost-smoke.yml` follows the container path of
-  `docs/self-hosting.md` on a clean runner — build, `refresh-data`,
-  `build-db --atomic`, `verify-db`, promote, start the API alone, issue a
-  device credential, one exact lookup, one sentence translation against a mock
-  model endpoint started in the job, and a credential-store backup and restore
-  — and reports per-step timings. It runs on pull requests that touch
-  `deploy/**` or that guide, and can be dispatched at any ref.
-- `deploy/docker-compose.yml` reads the builder image reference from
-  `WUWATERM_BUILDER_IMAGE`, defaulting to the previous fixed local tag, so a
-  self-hoster can point it at a pulled image; `deploy/vps-update.sh` never sets
-  it and its behaviour is unchanged. `deploy/docker-compose.ghcr.yml` is a thin
-  overlay that sets only the three `image:` fields from `WUWATERM_IMAGE_TAG`.
-- `docs/release-checklist.md` is rewritten around the new asset policy and the
-  new flow: five assets, images on the registry, the client binary stated as
-  unsigned, and a readback performed while the release is still a draft.
+- `scripts/validate.py` is now the single offline validation entry point:
+  hygiene, non-goals, architecture boundaries, the API contract, ruff and the
+  test suite, in that order, with `--list` to print what each gate fails on and
+  `--quick` to stop before the suite. CI's server matrix runs that one command
+  instead of listing the gates itself, so a contributor and a pull request run
+  the same list. It is standard library only, and every step runs under the
+  interpreter that ran the script, so there is no second Windows form to keep in
+  step. Its `--client` step is the exception and says so: no single interpreter
+  runs both sides, so that step runs the client's own environment or explains
+  how to create it.
+- Ruff joins the dev extra, bounded to one minor, with the enabled rule set
+  written out (`E4`, `E7`, `E9`, `F`) instead of left to the tool's defaults — a
+  wider range would silently change what the gate enforces. The unused imports
+  it reported are removed.
+- The CI test matrix widens to Python **3.11, 3.12, 3.13 and 3.14** on
+  `ubuntu-latest`, so no version inside the declared `requires-python >=3.11`
+  floor is untested; `docs/support-matrix.md` records what runs where and what
+  the Windows-host reds are.
+- `.github/dependabot.yml` proposes GitHub Actions and uv updates monthly, in
+  groups rather than one pull request per bump.
+- The four hygiene-test defects of issue #75 are fixed and each fix is pinned by
+  a test that fails when the handled branch is removed: the Git 2.51+
+  `<oid> submodule` response line and the broken-pipe branch gain discriminating
+  cases; the missing-response test is rebuilt on a response stream written out
+  in the test, because as written it had stopped measuring the marker rule and
+  started measuring which git the machine happens to have; and the
+  newline-in-path test is skip-guarded on Windows, where its own fixture cannot
+  run.
 
-### Desktop Client
+### Upgrading From 0.3.0
 
-- The client is **0.2.0**, the first version distributed as a release asset:
-  `WuwaTerm-<version>-windows-x64.zip`, the one-folder build, listed in
-  `SHA256SUMS`. It is **not code-signed** — SmartScreen will warn on first run,
-  and `client/README.md` says so and shows what to do.
-- Compatibility contract: client 0.2.x speaks HTTP API `v1`, served by wuwaterm
-  0.3.0 or newer. The client checks it on the `/v1/meta` reply the status view
-  already fetches when the owner presses 刷新 — **no new request, and none at
-  startup**: an unconfigured client still sends nothing. A server reporting an
-  API version this client does not support gets a warning naming both versions,
-  while the service facts stay on screen and the client keeps working.
+- **The terminology database must be rebuilt.** The game-data pin moves from
+  3.5.0 to 3.6.0, and no release ships a database. A production host picks the
+  pin up through `deploy/vps-update.sh`, which refreshes the checkout, rebuilds
+  the candidate, verifies it and promotes it transactionally. A source install
+  reruns `refresh-data` and `build-db --atomic` and re-verifies with
+  `scripts/verify_db.py` (see [docs/data-refresh.md](docs/data-refresh.md)).
+- **Nothing else has to change.** There is no state-directory migration, no
+  removed setting, and no change to the Telegram or HTTP surfaces a 0.3.0
+  deployment already serves. The owner-private web layer is new and **off by
+  default**: with `WUWATERM_API_WEB_ENABLED` unset the process behaves exactly
+  as 0.3.0 did.
+- **The desktop client is 0.2.0** and is distributed as an unsigned portable zip
+  on the release page. A 0.1.x client keeps working against this server; what
+  0.2.x adds is the compatibility check, not a new requirement.
+- **Release assets moved.** Releases now carry the wheel, the sdist, the client
+  zip, `SHA256SUMS` and `release-manifest.json`, all built by
+  `.github/workflows/release.yml` from one reviewed commit; container images are
+  published to the registry rather than to the release page. Verify that an
+  image pull works for you before relying on it; if it is denied, build from
+  source ([docs/self-hosting.md](docs/self-hosting.md)).
 
 ## 0.3.0 - 2026-08-12
 

@@ -10,7 +10,7 @@
 
 ## 从这里开始
 
-- **桌面用户**：从 [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases) 下载 Windows 客户端 zip（自下一个版本 v0.4.0 起提供），用法见[桌面客户端](client/README.md)。
+- **桌面用户**：从 [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases) 下载 Windows 客户端 zip（自 v0.4.0 起提供），用法见[桌面客户端](client/README.md)。
 - **Telegram 群管理员**：命令、授权与频道自动翻译见 [Telegram 行为](docs/telegram-behavior.md)。
 - **自建部署者**：从零把服务跑起来见[自建部署指南](docs/self-hosting.md)。
 - **贡献者**：先读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地校验只有一个入口 `python scripts/validate.py`。
@@ -31,7 +31,7 @@
 
 ## 下载与分发
 
-目前已发布的最新版本是 v0.3.0，其发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面描述的是自**下一个版本 v0.4.0** 起的分发形态，该版本尚未发布。与之对应的[发布检查单](docs/release-checklist.md)和 `.github/workflows/release.yml` 已经按下面这套资产策略写好了；尚未发生的是发布本身。
+下面描述的是自 **v0.4.0** 起的分发形态。截至 v0.3.0 的发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面这套资产策略由[发布检查单](docs/release-checklist.md)与 `.github/workflows/release.yml` 构建并把关。
 
 - **GitHub Releases**：自 v0.4.0 起，每个发布带 wheel、sdist、Windows 客户端 zip（`WuwaTerm-<version>-windows-x64.zip`）、`SHA256SUMS` 与 `release-manifest.json`。
 - **Windows 客户端**：便携式压缩包，解压即用，**未做代码签名**，因此 Windows SmartScreen 会弹出警告，需要用户自己点开「更多信息 → 仍要运行」才能启动。
