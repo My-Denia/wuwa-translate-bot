@@ -628,7 +628,7 @@ Three things are worth backing up, and one is not.
 | what | how |
 | --- | --- |
 | `.env` | Copy it. It holds every credential the service is given. |
-| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo`, or a one-shot container with the directory mounted. Pre-creating `state/` keeps the directory yours and not the files in it. |
+| `state/` | Bot settings and the channel reply index. Plain JSON; copy it while the bot is stopped. On the container path these files are written by the bot process, which runs as root in the shipped image and restricts them, so the copy needs the same privileges the credential store below does — `sudo` on the host, not a one-shot container, whose entrypoint takes only the three service commands. Pre-creating `state/` keeps the directory yours and not the files in it. |
 | `state-api/` | The device credential store. **A SQLite database in write-ahead-log mode.** Stop the API first, or take an online backup through SQLite's own backup API. Copying the file while the process holds it open can silently lose the most recent commits. |
 | `data/terms.db` | **Not worth backing up.** It is regenerable from the pinned upstream source with the build commands above, and rebuilding it is the only way to be sure of what is in it. |
 
@@ -649,19 +649,30 @@ chmod 600 backup/devices.db
 ```
 
 **Without the `sqlite3` shell**, the same backup call is in the Python standard
-library — `sqlite3.Connection.backup` — so a Python interpreter takes it with
-nothing to install. That is the **source path**, where you already created one
-to install this project into; on the container path the requirements promise
-only Docker and Compose, and the Python that runs this service lives inside the
-image, so run the same line from the one-shot container described below rather
-than assuming a host interpreter:
+library — `sqlite3.Connection.backup` — so no package has to be installed for
+it. **This is the source-path form**, and it uses the environment you built in
+[Get The Source At A Release Tag](#get-the-source-at-a-release-tag) rather than
+a system interpreter, because that environment is the one this document
+guarantees: the uv route supplies its own interpreter and a host may have no
+`python3` at all.
 
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && python3 -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
+( umask 077 && .venv/bin/python -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
 chmod 600 backup/devices.db
 ```
+
+**The container path has no interpreter of its own to offer here.** Its
+requirements promise Docker and Compose and nothing else; the Python that runs
+this service lives inside the image, and the runtime entrypoint accepts only
+`bot`, `api` and `device` — it refuses an arbitrary command by design, and the
+API service mounts no destination for a backup to land in. So on a container
+host that also lacks the `sqlite3` shell, do not improvise: stop the API
+(`docker compose -f deploy/docker-compose.yml down`) and copy `state-api/`,
+which is exactly what the table above allows. A stopped database has nothing
+in flight to lose, and that is the whole reason the online form exists in the
+first place.
 
 The source is opened **read-only, through a URI**, and that is not decoration.
 A plain path hands SQLite a filename it will CREATE if it is missing: point this
@@ -683,10 +694,11 @@ that for you. The same applies to whatever you copy `state/` and `.env` into.
 runtime image selects no unprivileged user, so the API process creates
 `devices.db` as root and then restricts it to mode 0600 — pre-creating the
 directory keeps the DIRECTORY yours, but not the database inside it. Run the
-backup with the same privileges the container has (through `sudo`, or from a
-one-shot container of the API service with the state directory mounted), or
-give the store a matching non-root owner. The source path, where the API runs
-as you, needs none of that.
+backup with the same privileges the container has — `sudo` on the host — or
+give the store a matching non-root owner. Reaching for a one-shot container of
+the API service instead does not work: its entrypoint accepts `bot`, `api` and
+`device` and refuses anything else, on purpose. The source path, where the API
+runs as you, needs none of that.
 
 Verify a restored credential store by a business count — `device list` should
 show the devices you expect — rather than by an integrity check alone: an
@@ -695,9 +707,13 @@ integrity check passes on a database that is intact but stale.
 To restore: stop the services, put `.env`, `state/` and `state-api/` back with
 their original permissions (`.env` at `600`, `state-api/` at `700`), rebuild
 `data/terms.db` from the pinned source if it is missing, and start again. On an
-API-only install there is no `state/` to restore — that directory belongs to the
-bot process and never exists if you never started the bot. Restore `.env` and
-`state-api/` and skip it; its absence is not a missing backup.
+API-only install there is nothing in `state/` to restore: that directory belongs
+to the bot process, and a bot that never ran wrote nothing into it. On the
+source path it will usually not exist at all; on the container path it exists
+and is **empty**, because the build step above pre-creates it along with the
+other bind mounts. Either way, restore `.env` and `state-api/` and skip it — an
+absent or empty `state/` on an API-only install is the expected state, not a
+missing backup.
 
 ## Rollback
 
