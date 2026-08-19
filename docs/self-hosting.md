@@ -161,7 +161,18 @@ that the checkout is the pinned commit of the pinned repository and that the
 upstream version-provenance file says the version the profile expects, and it
 stops rather than building from something else.
 
-**Container path:**
+**Container path.** Create the bind-mounted directories yourself first, before
+any Compose command touches them. Docker creates a missing bind source as root,
+and the builder then fills a root-owned `data/` with root-owned artifacts —
+after which the promotion step below, run as you, cannot rename a file in it.
+Both directories are git-ignored, so a fresh clone has neither:
+
+```bash
+mkdir -p data state state-api
+chmod 700 state-api
+```
+
+Then build:
 
 ```bash
 docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
@@ -266,12 +277,12 @@ keeps the row and stamps a revocation time, so a withdrawal stays auditable.
 Deleting `state-api/devices.db` revokes every device at once and the next start
 recreates an empty store.
 
-Create the state directory yourself before the first container start, so the
-container runtime does not create it owned by another user:
-
-```bash
-mkdir -p state-api && chmod 700 state-api
-```
+The credential store lives in the `state-api/` directory created back in
+[Build The Terminology Database](#build-the-terminology-database) — before any
+Compose command ran, so that it belongs to you and not to root. If you skipped
+that step, the directory Docker created is root-owned and mode 0700, and no
+host-side backup or restore below can read it; fix the ownership before going
+on.
 
 ## First Lookup, First Translation
 
@@ -409,9 +420,21 @@ Name the service here for the same reason as above: without it, an API-only
 installation starts the bot too, and a bot with no token fails and is restarted
 forever. Substitute `wuwaterm` for the bot alone, or list both.
 
-A later release may add a `deploy/docker-compose.ghcr.yml` overlay that does the
-same for both services; until then, an `image:` override in a Compose overlay
-file of your own is the equivalent.
+**The builder image needs an overlay, not a variable.** Only the two serving
+services read their reference from the environment; the builder service pins
+`wuwaterm-builder:local` in the Compose file, so the pulled builder image is
+not used by any command in this document until you override it. Write a small
+overlay of your own beside the Compose file:
+
+```yaml
+services:
+  wuwaterm-builder:
+    image: ghcr.io/my-denia/wuwaterm-builder:v0.4.0
+```
+
+and pass both files, the base first, on every builder command. A later release
+may ship that overlay as `deploy/docker-compose.ghcr.yml`; until it does, the
+file is yours to write, and pulling the builder image without it buys nothing.
 
 ## Upgrade
 

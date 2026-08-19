@@ -95,7 +95,7 @@ status. The steps, in order:
 
 | Step | What it is for | What a failure means |
 |---|---|---|
-| `hygiene` | Keeps generated data out of the index | A generated database, upstream game text, or runtime state would be committed |
+| `hygiene` | Keeps generated databases and runtime state out of the index, and bulk upstream game text — the game-text paths are checked by SIZE, above 1 MB, so a small upstream file passes this gate and is still not welcome | A generated database, a runtime state file, or a large upstream data file would be committed |
 | `non-goals` | Pins four product decisions as text | A boundary this project has refused was crossed in a file |
 | `architecture` | Guards import directions between layers | An import crosses a boundary the architecture forbids |
 | `api-contract` | Ties the published contract to the code | The committed `docs/api/openapi.json` no longer equals the document the application generates |
