@@ -118,8 +118,12 @@ it:
 - The API service binds loopback under the shipped Compose file. It is meant to
   be published, if at all, over HTTPS by a reverse proxy in front of it — not by
   moving the bind address.
-- The credential store keeps only a salted scrypt verifier. A device token is
-  shown once, at issue time, and is not recoverable from the store afterwards.
+- The credential store keeps only a salted scrypt verifier, and the service
+  never prints credential material at all. The operator supplies the secret on
+  standard input, `device issue` prints only the device id and its metadata, and
+  the token is `wtd1.` plus that device id plus the secret the operator supplied
+  — so the secret has to be kept at the moment it is generated. Nothing recovers
+  it from the store afterwards.
 - The web presentation layer is off by default and is owner-private when on. It
   is not a public front end and turning it on does not make it one.
 - Nothing in this repository distributes generated databases, upstream game

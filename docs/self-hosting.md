@@ -38,7 +38,7 @@ Either path works; pick one.
 
 | | Container path | Source path |
 | --- | --- | --- |
-| Host | Linux with Docker and Compose v2 | Any OS with Python 3.11 or newer |
+| Host | Linux with Docker and Compose v2 | Linux or macOS with Python 3.11 or newer; on Windows, inside WSL |
 | Python | supplied by the image (`python:3.11-slim`) | 3.11+ (`requires-python >=3.11`) |
 | Disk | about 2 GB for the upstream data checkout, plus images | about 2 GB for the upstream data checkout |
 | Git | needed for the source checkout | needed for the checkout and for the data refresh |
@@ -50,8 +50,12 @@ Optional, for either path:
 - An **OpenAI-compatible endpoint** (base URL, API key, model name) if you want
   sentence translation.
 
-Linux is the supported development platform for the server. See
-[Support Matrix](support-matrix.md) for what is tested where.
+Every command in this document is written for a POSIX shell, and the source
+path assumes one: the virtual environment's interpreter is at
+`.venv/bin/python`, and `chmod` decides who can read your credentials. On
+Windows that path is WSL, not the Windows interpreter — which is also where the
+server's own test suite is supported. See [Support Matrix](support-matrix.md)
+for what is tested where.
 
 ## Get The Source At A Release Tag
 
@@ -90,6 +94,22 @@ chmod 600 .env
 `.env` is git-ignored and is excluded from the container build context. Edit it
 before the first start. The variables are documented inline in the file; these
 are the ones that decide whether each surface works at all.
+
+**Nothing in this project reads that file for you on the source path.** Compose
+loads it for the container services through its own `env_file` directive, but
+the command-line entry points read the process environment directly — there is
+no dotenv loader anywhere in this codebase. So on the source path, export it
+into the shell you start a service from, or the bot will fail to start for want
+of a token and the API will quietly run on its defaults:
+
+```bash
+set -a
+. ./.env
+set +a
+```
+
+A process supervisor does the same thing with its own environment-file
+directive; either way, the variables have to reach the process.
 
 **For the Telegram bot:**
 
@@ -171,7 +191,10 @@ is running — stop it first, or use the transactional updater described in
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-**Source path**, one process each:
+**Source path**, one process each — and they are two long-running processes,
+not two lines of one script. Start each in its own terminal, or put each under
+a process supervisor; run in one shell, the second command waits for the first
+to exit. Each needs the environment exported as above.
 
 ```bash
 .venv/bin/python -m wuwaterm.cli bot --db data/terms.db
