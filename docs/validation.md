@@ -70,6 +70,7 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 .venv/bin/python scripts/check_non_goals.py
 .venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python scripts/check_api_contract.py
+.venv/bin/python -m ruff check .
 .venv/bin/python -m pytest
 uv lock --check
 ```
