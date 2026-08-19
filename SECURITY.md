@@ -128,7 +128,10 @@ it:
   is not a public front end and turning it on does not make it one.
 - Nothing in this repository distributes generated databases, upstream game
   text, or runtime state. If your deployment is committing any of those, that is
-  a local misconfiguration — `python scripts/validate.py` will say so.
+  a local misconfiguration. `python scripts/validate.py` catches most of it —
+  a database by its content as well as its name, and the runtime state paths by
+  name — but its upstream-game-text check is by SIZE, above 1 MB, so a small
+  upstream file passes it. A green run is not a licence to commit game data.
 
 ## Related Documents
 

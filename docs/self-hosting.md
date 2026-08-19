@@ -531,14 +531,18 @@ the source back and rebuild the runtime for the path you are on:
 
 ```bash
 git checkout vPREVIOUS
-docker compose -f deploy/docker-compose.yml build
+docker compose -f deploy/docker-compose.yml build wuwaterm wuwaterm-api
+docker compose -f deploy/docker-compose.yml --profile builder build wuwaterm-builder
 ```
 
 ```bash
 .venv/bin/python -m pip install -e ".[api,build]"
 ```
 
-The first block is the container path, the second the source path.
+The first block is the container path, the second the source path. The builder
+is named here for the same reason as in the upgrade above: it is behind a
+profile, a bare build skips it, and the database you are about to rebuild at
+the previous tag's pin has to be built by that tag's builder code.
 Restore `state/` and `state-api/` from the backup taken before the upgrade,
 rebuild and verify the database at that tag's pin, then start and re-check
 `/readyz`. Rolling the source back without rolling the database back is the
