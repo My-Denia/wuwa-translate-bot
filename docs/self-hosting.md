@@ -429,7 +429,7 @@ supported configuration.
 
 ## Optional: Container Images From GHCR
 
-From the next release (v0.4.0) onward there are two published images:
+From v0.4.0 onward there are two published images:
 `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder`
 (builder). They exist to save the local image build; they do not replace the
 source checkout, because the Compose files, the entrypoints, the data build and
