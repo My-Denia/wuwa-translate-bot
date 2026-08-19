@@ -12,11 +12,14 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Dependabot's version-bump pull requests are not reviewed here: the action
+    # refuses any workflow "initiated by non-human actor" that is not in
+    # allowed_bots, so every dependency bump showed a failed check while the
+    # real gates (CI matrix, lock drift, packaging) had already passed. Those
+    # bumps are mechanical; CI is the review. Skipping the job keeps the check
+    # green-by-absence instead of red-by-policy. Other bots still need the
+    # explicit allowed_bots entry below.
+    if: github.actor != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:
