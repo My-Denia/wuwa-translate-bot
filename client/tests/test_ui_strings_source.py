@@ -15,11 +15,14 @@ ui/ package sources with ast and applies two rules.
    (setAccessibleName, addAction, setItemData) is invisible to rule 1 and
    caught here (issue #65).
 
-Both rules read the package RECURSIVELY, and the Han ranges reach above the
-basic multilingual plane. Neither was true in the first version of this file,
-and both gaps are held open by a test that fails without them: a widget moved
-into ui/<subpackage>/ would not have been read at all, and an extension-B
-ideograph would have passed as though it were not a Han character.
+Both rules read the package RECURSIVELY, the Han ranges reach above the basic
+multilingual plane through extension I, and the only file the setter rule
+skips is the ui package's OWN __init__.py, identified by position rather than
+by name. None of those four was true in the first version of this file, and
+each is held open by a test that fails without it: a widget moved into
+ui/<subpackage>/ would not have been read at all, an extension-B or
+extension-I ideograph would have passed as though it were not a Han character,
+and a name-based exemption would have discarded every subpackage initializer.
 
 What rule 2 deliberately does not flag:
 
@@ -96,7 +99,11 @@ CJK_RANGES = (
     # while the gate stayed green - the exact failure this rule exists to
     # prevent, one plane up.
     (0x20000, 0x2A6DF),  # CJK unified ideographs extension B
-    (0x2A700, 0x2EBEF),  # CJK unified ideographs extensions C through F and I
+    # Extensions C through F run to U+2EBEF; extension I starts one code point
+    # later, at U+2EBF0. The first version of this row stopped at U+2EBEF while
+    # its own comment claimed extension I, which is the shape of mistake this
+    # file exists to catch - a label wider than the check under it.
+    (0x2A700, 0x2EE5F),  # CJK unified ideographs extensions C through F and I
     (0x2F800, 0x2FA1F),  # CJK compatibility ideographs supplement
     (0x30000, 0x323AF),  # CJK unified ideographs extensions G and H
 )
@@ -118,6 +125,21 @@ def _python_sources(root: Path) -> list[Path]:
 
 def _ui_source_files() -> list[Path]:
     return _python_sources(UI_DIR)
+
+
+def _files_for_setter_rule(files: list[Path]) -> list[Path]:
+    """``files`` minus the one file the setter rule is allowed to skip.
+
+    That file is the ui package's OWN ``__init__.py``, which is re-exports
+    rather than widget code. It has to be identified by position, not by name:
+    once enumeration became recursive a name test would also have dropped every
+    ``ui/<subpackage>/__init__.py``, and a subpackage initializer is ordinary
+    widget code that can call a setter with a literal. Written as a filter over
+    a given list rather than as a check inside the loop so the exemption itself
+    is testable on paths that do not have to exist.
+    """
+    root_init = UI_DIR / "__init__.py"
+    return [path for path in files if path != root_init]
 
 
 def _display(path: Path) -> str:
@@ -244,9 +266,7 @@ def test_strings_module_defines_a_substantial_set_of_constants() -> None:
 def test_ui_widgets_source_all_display_text_from_strings_module() -> None:
     assert UI_DIR.is_dir(), f"expected ui package at {UI_DIR}"
     all_violations: list[str] = []
-    for path in _ui_source_files():
-        if path.name == "__init__.py":
-            continue
+    for path in _files_for_setter_rule(_ui_source_files()):
         all_violations.extend(_setter_violations_in_file(path))
     assert not all_violations, "\n" + "\n".join(all_violations)
 
@@ -324,16 +344,21 @@ def test_cjk_rule_reaches_above_the_basic_multilingual_plane(tmp_path: Path) -> 
     source = (
         "def build():\n"
         "    a = \"\\U00020BB7\"\n"          # extension B
-        "    b = \"\\U0002F81A\"\n"          # compatibility ideographs supplement
-        "    c = \"plain ascii, not display text\"\n"
-        "    return a, b, c\n"
+        "    b = \"\\U0002EBF0\"\n"          # extension I, one code point past C-F
+        "    c = \"\\U0002F81A\"\n"          # compatibility ideographs supplement
+        "    d = \"plain ascii, not display text\"\n"
+        "    return a, b, c, d\n"
     )
     planted = tmp_path / "supplementary.py"
     planted.write_text(source, encoding="utf-8")
 
     violations = _cjk_literal_violations_in_file(planted)
     locations = [message.split(": ", 1)[0] for message in violations]
-    assert locations == ["supplementary.py:2", "supplementary.py:3"], violations
+    assert locations == [
+        "supplementary.py:2",
+        "supplementary.py:3",
+        "supplementary.py:4",
+    ], violations
 
 
 def test_source_enumeration_reaches_into_subpackages(tmp_path: Path) -> None:
@@ -371,3 +396,43 @@ def test_the_real_ui_package_is_enumerated_recursively() -> None:
     files = _ui_source_files()
     assert len(files) >= 5, files
     assert all(UI_DIR in path.parents for path in files), files
+
+
+def test_only_the_root_package_initializer_is_exempt_from_the_setter_rule() -> None:
+    """A subpackage initializer is widget code, and is not skipped.
+
+    The setter rule has always skipped ui/__init__.py, which is re-exports.
+    Once enumeration became recursive a name-only test would have skipped
+    ui/<subpackage>/__init__.py too, and the CJK rule cannot cover for it: an
+    ENGLISH literal at a setter is invisible to that rule by construction.
+    """
+    root_init = UI_DIR / "__init__.py"
+    nested_init = UI_DIR / "dialogs" / "__init__.py"
+    nested_widget = UI_DIR / "dialogs" / "foo.py"
+    top_widget = UI_DIR / "main_window.py"
+
+    kept = _files_for_setter_rule([root_init, nested_init, nested_widget, top_widget])
+    assert kept == [nested_init, nested_widget, top_widget], kept
+
+    # And the live list really does go through that filter, minus exactly one.
+    live = _ui_source_files()
+    assert root_init in live, live
+    assert _files_for_setter_rule(live) == [p for p in live if p != root_init]
+
+
+def test_the_setter_rule_flags_a_literal_in_a_subpackage_initializer(
+    tmp_path: Path,
+) -> None:
+    """And the rule itself reports it, in English, where the CJK rule is blind."""
+    nested_init = tmp_path / "dialogs" / "__init__.py"
+    nested_init.parent.mkdir(parents=True)
+    nested_init.write_text(
+        "def build(widget):\n"
+        '    widget.setText("Refresh")\n',
+        encoding="utf-8",
+    )
+    setter = _setter_violations_in_file(nested_init)
+    assert len(setter) == 1, setter
+    assert setter[0].startswith("__init__.py:2:"), setter[0]
+    # The CJK rule is silent on it, which is why the exemption had to narrow.
+    assert _cjk_literal_violations_in_file(nested_init) == []
