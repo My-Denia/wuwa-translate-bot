@@ -30,6 +30,11 @@ dev = [
   "pytest>=8.0,<9",
   "fastapi>=0.115,<1",
   "uvicorn>=0.30,<1",
+  # The linter is part of the validation entry (scripts/validate.py), so it is
+  # a development dependency rather than something a contributor installs by
+  # hand. Bounded to one minor: the enabled rule set below is written against
+  # what this range enforces, and a wider range would silently change the gate.
+  "ruff>=0.16,<0.17",
 ]
 
 [project.scripts]
@@ -43,3 +48,17 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q --strict-config --strict-markers"
+
+[tool.ruff]
+# Ruff takes the target version from project.requires-python. Generated data,
+# virtual environments and run folders are already excluded because ruff honours
+# .gitignore, so no extra exclusion list is carried here.
+
+[tool.ruff.lint]
+# Written out rather than left to the default so the gate cannot change under
+# the repository when the linter's own defaults move. E4 import placement, E7
+# statement-level errors, E9 syntax/IO errors, F the whole pyflakes set
+# (undefined names, unused imports, unused variables, f-string mistakes).
+# Style and modernisation rules are deliberately NOT enabled: this is a
+# correctness gate, and a formatting sweep is a separate decision.
+select = ["E4", "E7", "E9", "F"]

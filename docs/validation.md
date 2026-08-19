@@ -1,6 +1,65 @@
 # Validation
 
+## One Command
+
+```bash
+python scripts/validate.py            # every gate, in order
+python scripts/validate.py --list     # what it would run; runs nothing
+python scripts/validate.py --quick    # every gate except the test suite
+python scripts/validate.py --only ruff
+python scripts/validate.py --client   # additionally: the desktop client suite
+```
+
+The steps, in order: `hygiene`, `non-goals`, `architecture`, `api-contract`,
+`ruff`, `pytest`. `--list` prints them with the command each one runs and what
+its failure means. The run stops at the first failing step and names it, and
+the exit status is that step's.
+
+This is the entry point CI uses: the `pytest (py3.x)` matrix jobs install
+`.[dev]` and then run `python scripts/validate.py`, so a green local run and a
+green pull request are the same claim. Before it existed, CI carried one list,
+the README a shorter one, and this page a third, and a gate added to one of
+them was invisible in the others.
+
+One copy of the old list is still out there and is **not** equivalent: the two
+command blocks in `README.md` / `README.en.md` predate both the linter and the
+API-contract gate, so following them can leave a contributor green locally and
+red on the pull request. Use the entry point; routing the READMEs to it is a
+separate change to files this one does not touch.
+
+The script uses only the standard library and runs each step with the
+interpreter that runs the script, so there is no POSIX-only path in it:
+
+```powershell
+.venv\Scripts\python scripts\validate.py
+```
+
+```bash
+.venv/bin/python scripts/validate.py
+```
+
+`--client` is opt-in, and it runs under `client/.venv` rather than under the
+interpreter that started the script: the client is a separate package needing
+Qt, `keyring` and `qasync` and at least Python 3.12, while that environment
+carries none of the server's dependencies, so no single interpreter can run
+both sides. If `client/.venv` does not exist the step says so and how to make
+it, instead of failing in test collection. Everything about the client that can
+be checked by reading text is in the main suite instead (see the table below).
+
+The linter is `ruff`, installed by the `dev` extra and bounded to one minor
+release. The enabled rules are written out in `pyproject.toml` under
+`[tool.ruff.lint]` — `E4`, `E7`, `E9`, `F` — rather than left to the tool's
+defaults, so the gate cannot change under the repository when those defaults
+move. It is a correctness gate: unused imports, undefined names, broken
+f-strings. Formatting is not enforced.
+
 ## Offline Validation
+
+The commands below are what the entry point runs, plus the candidate-database
+checks that are **not** in it: those need a built `data/terms.candidate.db`,
+which only exists during a data refresh, so they belong to that workflow rather
+than to every commit. `uv lock --check` is also outside the script (it needs
+`uv`, which the `dev` extra does not install) and has its own CI job.
 
 ```bash
 .venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
@@ -11,6 +70,7 @@
 .venv/bin/python scripts/check_non_goals.py
 .venv/bin/python scripts/check_architecture_boundaries.py
 .venv/bin/python scripts/check_api_contract.py
+.venv/bin/python -m ruff check .
 .venv/bin/python -m pytest
 uv lock --check
 ```
@@ -46,7 +106,7 @@ four-module import allowlist into `wuwaterm` (see
 
 | Gate | What it proves | Where it runs |
 |---|---|---|
-| `scripts/check_api_contract.py` | The committed `docs/api/openapi.json` still equals the document the application generates, and the product token pins hold in that JSON artifact (which the text scanner does not read). A route, model or error code cannot change without the published contract changing in the same commit | Offline command above; CI `pytest (py3.11)` / `pytest (py3.12)` jobs, before the suite |
+| `scripts/check_api_contract.py` | The committed `docs/api/openapi.json` still equals the document the application generates, and the product token pins hold in that JSON artifact (which the text scanner does not read). A route, model or error code cannot change without the published contract changing in the same commit | `scripts/validate.py`, offline and in every CI matrix job, before the suite |
 | `tests/test_client_transport_policy.py` | The desktop client cannot regress into reaching the service through the operator's administration channel, and certificate verification cannot be turned off by an edit anywhere in the client tree, the deploy scripts or this runbook. Text gates over the shipped client surface, `docs/deployment.md` and `deploy/*` | The repository `pytest` run — deliberately here rather than in the client suite, so it runs on every pull request without a Windows runner or the client's dependencies |
 | `client/.venv/Scripts/python.exe -m pytest` (in `client/`) | The client's own behaviour: transport refusals, the request-target guard, credential storage, cancellation, error rendering, and that every displayed string comes from the strings module | CI `desktop client build (windows)` job on `windows-latest` |
 | `client/build.ps1` | The one-folder PyInstaller artifact builds from the committed spec and passes its own `--self-check`, and the build leaves nothing untracked in the working tree. Not that two builds agree: there is no lock file for the client and no byte comparison, and the script says so | Same CI job; the artifact is uploaded there |

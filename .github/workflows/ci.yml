@@ -14,7 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # The declared floor is requires-python >=3.11 with no upper bound, so
+        # the versions above the floor are tested rather than assumed. A red
+        # one is removed from this list with the reason recorded, never hidden
+        # behind an upper bound the package does not need.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -22,11 +26,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -U pip
       - run: python -m pip install -e ".[dev]"
-      - run: python scripts/check_repo_hygiene.py
-      - run: python scripts/check_non_goals.py
-      - run: python scripts/check_architecture_boundaries.py
-      - run: python scripts/check_api_contract.py
-      - run: python -m pytest
+      # One entry point, and it is the same one a contributor is told to run:
+      # hygiene, non-goals, architecture, API contract, ruff, then the suite.
+      # Listing the gates here as separate steps is what let CI and the
+      # documentation drift apart; the list lives in scripts/validate.py now.
+      - run: python scripts/validate.py
 
   lock:
     name: uv lock drift check

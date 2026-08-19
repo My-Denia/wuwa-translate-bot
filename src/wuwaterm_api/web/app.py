@@ -154,7 +154,7 @@ async def _establish_principal(request: Request, *, may_mint: bool):
     # Imported here rather than at module scope: ``..app`` imports THIS module
     # to mount it, so a module-scope import would be a cycle. By the time any
     # request runs, ``..app`` is fully initialised.
-    from ..app import _in_credential_pool, _require_active_device
+    from ..app import _in_credential_pool
 
     state = request.app.state
     settings = state.settings
