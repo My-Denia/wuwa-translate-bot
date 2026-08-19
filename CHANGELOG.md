@@ -20,12 +20,16 @@ does not distribute generated game data or generated SQLite databases.
   the test's own docstring. Review follow-ups on the same change: the ranges
   reach above the basic multilingual plane, so an extension-B ideograph is a
   Han character to the gate as well; and both rules enumerate the package
-  recursively, so a widget moved into a subpackage is still read; the Han
-  ranges run through extension I rather than stopping one code point short of
-  it; and the one file the setter rule skips is the ui package's own
-  `__init__.py`, identified by position, so a subpackage initializer is no
-  longer discarded by name. Each of those four is held open by a test that
-  fails without it.
+  recursively, so a widget moved into a subpackage is still read, and the one
+  file the setter rule skips is the ui package's own `__init__.py`, identified
+  by position rather than by name, so a subpackage initializer is no longer
+  discarded. The block list of what counts as a CJK character came up short
+  three review rounds running — the supplementary Han extensions, then
+  extension I by a single code point, then the supplementary Kana blocks — each
+  time while the rule's own description already claimed the missing one, so it
+  is now checked against the character database the interpreter ships with by a
+  sweep of the whole code space. Every one of those properties is held open by
+  a test that fails without it.
 
 ## 0.4.0 - 2026-08-19
 

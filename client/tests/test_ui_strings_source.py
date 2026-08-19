@@ -15,14 +15,18 @@ ui/ package sources with ast and applies two rules.
    (setAccessibleName, addAction, setItemData) is invisible to rule 1 and
    caught here (issue #65).
 
-Both rules read the package RECURSIVELY, the Han ranges reach above the basic
-multilingual plane through extension I, and the only file the setter rule
+Both rules read the package RECURSIVELY, and the only file the setter rule
 skips is the ui package's OWN __init__.py, identified by position rather than
-by name. None of those four was true in the first version of this file, and
-each is held open by a test that fails without it: a widget moved into
-ui/<subpackage>/ would not have been read at all, an extension-B or
-extension-I ideograph would have passed as though it were not a Han character,
-and a name-based exemption would have discarded every subpackage initializer.
+by name. Neither was true in the first version of this file, and each is held
+open by a test that fails without it.
+
+The block list of what counts as a CJK character was short three times in a
+row - the supplementary Han extensions, then extension I by one code point,
+then the supplementary Kana blocks - each time while the prose above already
+claimed the missing one. Hand-maintaining a list against a promise is the
+defect rather than any one omission, so the list is now checked against the
+character database the interpreter ships with, and the test that does it
+sweeps the whole code space rather than sampling it.
 
 What rule 2 deliberately does not flag:
 
@@ -43,6 +47,7 @@ from __future__ import annotations
 
 import ast
 import re
+import unicodedata
 from pathlib import Path
 
 CLIENT_SRC = Path(__file__).resolve().parents[1] / "src" / "wuwaterm_client"
@@ -73,39 +78,72 @@ TEXT_SETTER_NAMES = {
 }
 
 # The ranges that make a literal "display text" in this application. Kept as
-# an explicit list rather than a unicodedata script lookup so that reading the
-# test tells you exactly what it forbids, and written as code points rather
+# an explicit block list rather than a live unicodedata lookup, so that reading
+# the test tells you exactly what it forbids, and written as code points rather
 # than as the characters themselves so the supplementary-plane rows are
 # readable at all.
+#
+# Two review rounds found this list one block short - first the supplementary
+# Han extensions, then extension I by one code point, then the supplementary
+# Kana blocks. Hand-maintaining a list against a promise stated in prose is the
+# defect, not any one omission, so the list is now checked against Unicode
+# itself by test_the_range_list_covers_every_character_unicode_calls_cjk.
 CJK_RANGES = (
     (0x1100, 0x11FF),    # Hangul Jamo
     (0x2E80, 0x2EFF),    # CJK radicals supplement
     (0x2F00, 0x2FDF),    # Kangxi radicals
+    (0x2FF0, 0x2FFF),    # Ideographic description characters
     (0x3000, 0x303F),    # CJK symbols and punctuation, incl. the ideographic comma
     (0x3040, 0x309F),    # Hiragana
     (0x30A0, 0x30FF),    # Katakana
     (0x3100, 0x312F),    # Bopomofo
     (0x3130, 0x318F),    # Hangul compatibility Jamo
+    (0x3190, 0x319F),    # Kanbun
+    (0x31A0, 0x31BF),    # Bopomofo extended
+    (0x31C0, 0x31EF),    # CJK strokes
     (0x31F0, 0x31FF),    # Katakana phonetic extensions
+    (0x3200, 0x32FF),    # Enclosed CJK letters and months
+    (0x3300, 0x33FF),    # CJK compatibility
     (0x3400, 0x4DBF),    # CJK unified ideographs extension A
     (0x4E00, 0x9FFF),    # CJK unified ideographs
     (0xA960, 0xA97F),    # Hangul Jamo extended-A
     (0xAC00, 0xD7AF),    # Hangul syllables
     (0xD7B0, 0xD7FF),    # Hangul Jamo extended-B
     (0xF900, 0xFAFF),    # CJK compatibility ideographs
+    (0xFE10, 0xFE1F),    # Vertical forms
+    (0xFE30, 0xFE4F),    # CJK compatibility forms
+    (0xFE50, 0xFE6F),    # Small form variants, incl. the small ideographic comma
     (0xFF00, 0xFFEF),    # Halfwidth and fullwidth forms
-    # Supplementary planes. A Han character above the BMP is still a Han
-    # character; leaving these out let a literal such as U+20BB7 sit inline
-    # while the gate stayed green - the exact failure this rule exists to
-    # prevent, one plane up.
+    # Supplementary planes. A Han or Kana character above the BMP is still one.
+    (0x1AFF0, 0x1AFFF),  # Kana extended-B
+    (0x1B000, 0x1B0FF),  # Kana supplement
+    (0x1B100, 0x1B12F),  # Kana extended-A
+    (0x1B130, 0x1B16F),  # Small Kana extension
+    (0x1D360, 0x1D37F),  # Counting rod numerals, incl. the ideographic tally marks
+    (0x1F200, 0x1F2FF),  # Enclosed ideographic supplement
     (0x20000, 0x2A6DF),  # CJK unified ideographs extension B
     # Extensions C through F run to U+2EBEF; extension I starts one code point
-    # later, at U+2EBF0. The first version of this row stopped at U+2EBEF while
-    # its own comment claimed extension I, which is the shape of mistake this
-    # file exists to catch - a label wider than the check under it.
+    # later, at U+2EBF0. An earlier version of this row stopped at U+2EBEF while
+    # its own comment claimed extension I - a label wider than the check under
+    # it, which is the shape of mistake this file exists to catch.
     (0x2A700, 0x2EE5F),  # CJK unified ideographs extensions C through F and I
     (0x2F800, 0x2FA1F),  # CJK compatibility ideographs supplement
     (0x30000, 0x323AF),  # CJK unified ideographs extensions G and H
+)
+
+# The words in a Unicode character NAME that make it this rule's business. Used
+# only by the completeness test below, never by the rule itself: the rule reads
+# the block list above, which is deliberately WIDER than this (CJK punctuation
+# such as U+3008 LEFT ANGLE BRACKET carries none of these words and is still
+# display text here). So the test asserts a superset, not an equality.
+CJK_NAME_TOKENS = (
+    "CJK",
+    "HIRAGANA",
+    "KATAKANA",
+    "HANGUL",
+    "IDEOGRAPH",
+    "KANGXI",
+    "BOPOMOFO",
 )
 
 CJK_CHARACTER = re.compile(
@@ -336,18 +374,21 @@ def test_cjk_rule_reaches_above_the_basic_multilingual_plane(tmp_path: Path) -> 
     """A Han character outside the BMP is still a Han character.
 
     The first version of the range list stopped at U+9FFF and friends, so a
-    literal built from an extension-B ideograph passed the gate untouched. The
-    two literals below are the discriminating pair: they are flagged now and
-    were not before, and the ASCII line beside them must stay unflagged so the
-    widened ranges cannot pass by flagging everything.
+    literal built from an extension-B ideograph passed the gate untouched, and
+    two later versions fell short of extension I and of the supplementary Kana
+    blocks. One literal below stands for each of those three misses: each was
+    flagged only after the block it belongs to was added, and the ASCII line
+    beside them must stay unflagged so a widened range cannot pass by flagging
+    everything.
     """
     source = (
         "def build():\n"
         "    a = \"\\U00020BB7\"\n"          # extension B
         "    b = \"\\U0002EBF0\"\n"          # extension I, one code point past C-F
         "    c = \"\\U0002F81A\"\n"          # compatibility ideographs supplement
-        "    d = \"plain ascii, not display text\"\n"
-        "    return a, b, c, d\n"
+        "    d = \"\\U0001B000\"\n"          # kana supplement, archaic katakana E
+        "    e = \"plain ascii, not display text\"\n"
+        "    return a, b, c, d, e\n"
     )
     planted = tmp_path / "supplementary.py"
     planted.write_text(source, encoding="utf-8")
@@ -358,6 +399,7 @@ def test_cjk_rule_reaches_above_the_basic_multilingual_plane(tmp_path: Path) -> 
         "supplementary.py:2",
         "supplementary.py:3",
         "supplementary.py:4",
+        "supplementary.py:5",
     ], violations
 
 
@@ -436,3 +478,46 @@ def test_the_setter_rule_flags_a_literal_in_a_subpackage_initializer(
     assert setter[0].startswith("__init__.py:2:"), setter[0]
     # The CJK rule is silent on it, which is why the exemption had to narrow.
     assert _cjk_literal_violations_in_file(nested_init) == []
+
+
+def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
+    """The block list must not fall behind the promise stated in prose.
+
+    Three review rounds found this list one block short, each time for a
+    different block, and each time the rule's own description already claimed
+    the missing one. So the list is checked against the character database that
+    ships with the interpreter: every code point whose Unicode NAME contains
+    one of CJK_NAME_TOKENS must match. Superset, not equality - the list also
+    covers CJK punctuation whose names carry none of those words.
+
+    A sweep of the whole code space costs a fraction of a second, and it is the
+    only form of this check that cannot be one block behind.
+    """
+    uncovered = [
+        cp
+        for cp in range(0x110000)
+        if (name := _unicode_name(cp)) is not None
+        and any(token in name for token in CJK_NAME_TOKENS)
+        and not CJK_CHARACTER.match(chr(cp))
+    ]
+    assert not uncovered, (
+        "the block list misses %d code point(s) Unicode names as CJK, "
+        "starting at U+%05X %s"
+        % (len(uncovered), uncovered[0], _unicode_name(uncovered[0]))
+    )
+    # And the sweep must actually have found CJK characters to check, so an
+    # empty or broken name lookup cannot pass this test by finding nothing.
+    covered = sum(
+        1
+        for cp in range(0x110000)
+        if (name := _unicode_name(cp)) is not None
+        and any(token in name for token in CJK_NAME_TOKENS)
+    )
+    assert covered > 90000, covered
+
+
+def _unicode_name(code_point: int) -> str | None:
+    try:
+        return unicodedata.name(chr(code_point))
+    except ValueError:
+        return None
