@@ -61,7 +61,8 @@ request without a Windows runner.
 | --- | --- |
 | Client 0.1.x — what the tree carries today (`client/pyproject.toml`, `client/src/wuwaterm_client/__init__.py`), and what the Windows CI job builds and tests | speaks HTTP API `v1`, served by wuwaterm **>= 0.3.0** |
 | Client 0.2.x — the first publicly distributed build, not cut yet | the same contract; the version bump travels with the release change, so until it lands there is no package metadata saying 0.2.0 |
-| How the client learns the server's version | it reads `api_version` from `GET /v1/meta` |
+| How the client learns which PROTOCOL the server speaks | `api_version` in the body of `GET /v1/meta`. It is the contract identifier — `"v1"` — and it is stable across server releases, so it answers "can I talk to this at all", not "which release is this" |
+| How the client learns which RELEASE is running | `service_version` in the same body, which is the installed package version and is what the desktop status view shows. That is the field to read against the `>= 0.3.0` boundary above |
 | Where the contract lives | [`docs/api/openapi.json`](api/openapi.json), committed and drift-gated by `scripts/check_api_contract.py`, so a route, model or error code cannot change without the published contract changing in the same commit |
 
 The owner-private web presentation layer is deliberately outside this contract:

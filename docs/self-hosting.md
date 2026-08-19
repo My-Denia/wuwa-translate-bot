@@ -402,8 +402,12 @@ environment variable:
 
 ```bash
 WUWATERM_RUNTIME_IMAGE=ghcr.io/my-denia/wuwaterm:v0.4.0 \
-  docker compose -f deploy/docker-compose.yml up -d --no-build
+  docker compose -f deploy/docker-compose.yml up -d --no-build wuwaterm-api
 ```
+
+Name the service here for the same reason as above: without it, an API-only
+installation starts the bot too, and a bot with no token fails and is restarted
+forever. Substitute `wuwaterm` for the bot alone, or list both.
 
 A later release may add a `deploy/docker-compose.ghcr.yml` overlay that does the
 same for both services; until then, an `image:` override in a Compose overlay

@@ -74,9 +74,14 @@ the suite under WSL or a Linux container. See
 python scripts/validate.py
 ```
 
-That is the whole local gate, and it is exactly what CI runs. A green run here
-and a green pull request are the same claim, because both go through this file
-instead of through separate lists that drift apart.
+That is the whole local gate, and it is exactly what the server test matrix
+runs in CI — the same file, not a second list that drifts from this one. It is
+not the whole pull request, though: CI also runs the lock-drift check, the
+wheel and sdist build with its install audit, the Windows desktop-client build,
+and the Docker runtime and builder boundary, and none of those is in this
+command. If your change touches the lock file, the packaging metadata, the
+client, or anything under `deploy/`, a green run here is necessary and not
+sufficient — see the job list further down.
 
 ```bash
 python scripts/validate.py --list        # what it would run; runs nothing
