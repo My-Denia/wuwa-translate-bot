@@ -397,11 +397,16 @@ curl -sS "http://127.0.0.1:8788/v1/terms?q=%E4%BB%8A%E6%B1%90" \
 }
 ```
 
-**Several matches for one exact term is normal, not a duplicate.** A term that
-the upstream data carries in more than one category — this one is a resonator,
-an echo and a speaker — comes back once per category, and on an exact hit the
-English string is the same in each. Read `category` to tell them apart; a term
-that exists in a single category returns a single match.
+**Several matches for one exact term is normal, not a duplicate.** Matches are
+distinct on the triple of Chinese string, English string and category, so one
+query can legitimately return several. The response above is one shape of that:
+this particular term exists as a resonator, an echo and a speaker, and its
+English string happens to be the same in all three. It is not the only shape.
+When the upstream data records more than one official English string for a term,
+those come back as separate matches **inside one category** — at the 3.6 pin,
+`守岸人` returns both `Shorekeeper` and `The Shorekeeper` in `resonator`. So read
+`category` and `en` together, and do not treat a second match as a duplicate of
+the first: on an ambiguous term it is the other official answer.
 
 A sentence, which reaches the model only after the known terms in it have been
 locked:
@@ -644,15 +649,27 @@ chmod 600 backup/devices.db
 ```
 
 **Without the `sqlite3` shell**, the same backup call is in the Python standard
-library — `sqlite3.Connection.backup` — so any interpreter that satisfies this
-project's version requirement can take it, with nothing to install:
+library — `sqlite3.Connection.backup` — so a Python interpreter takes it with
+nothing to install. That is the **source path**, where you already created one
+to install this project into; on the container path the requirements promise
+only Docker and Compose, and the Python that runs this service lives inside the
+image, so run the same line from the one-shot container described below rather
+than assuming a host interpreter:
 
 ```bash
 mkdir -p backup
 chmod 700 backup
-( umask 077 && python3 -c "import sqlite3; src=sqlite3.connect('state-api/devices.db'); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
+( umask 077 && python3 -c "import sqlite3; src=sqlite3.connect('file:state-api/devices.db?mode=ro', uri=True); dst=sqlite3.connect('backup/devices.db'); src.backup(dst); dst.close(); src.close()" )
 chmod 600 backup/devices.db
 ```
+
+The source is opened **read-only, through a URI**, and that is not decoration.
+A plain path hands SQLite a filename it will CREATE if it is missing: point this
+line at a store that does not exist yet, or at the wrong state directory, and it
+exits 0 after writing a valid-looking backup of an empty database — a loss you
+would discover during a restore. The read-only URI fails immediately instead.
+Measured both ways, including against a live database with an uncheckpointed
+write-ahead log, where the read-only open still sees the newest commit.
 
 Both forms take the same online backup, and both need the same privileges. Use
 whichever is available; do not substitute a plain file copy for either.
