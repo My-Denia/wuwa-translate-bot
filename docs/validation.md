@@ -17,10 +17,15 @@ the exit status is that step's.
 
 This is the entry point CI uses: the `pytest (py3.x)` matrix jobs install
 `.[dev]` and then run `python scripts/validate.py`, so a green local run and a
-green pull request are the same claim. The list of gates lives in that script
-and nowhere else; before it existed, CI carried one list, the README a shorter
-one, and this page a third, and a gate added to one of them was invisible in
-the others.
+green pull request are the same claim. Before it existed, CI carried one list,
+the README a shorter one, and this page a third, and a gate added to one of
+them was invisible in the others.
+
+One copy of the old list is still out there and is **not** equivalent: the two
+command blocks in `README.md` / `README.en.md` predate both the linter and the
+API-contract gate, so following them can leave a contributor green locally and
+red on the pull request. Use the entry point; routing the READMEs to it is a
+separate change to files this one does not touch.
 
 The script uses only the standard library and runs each step with the
 interpreter that runs the script, so there is no POSIX-only path in it:
@@ -33,9 +38,13 @@ interpreter that runs the script, so there is no POSIX-only path in it:
 .venv/bin/python scripts/validate.py
 ```
 
-`--client` is opt-in because the client suite needs Qt, `keyring` and the
-client's own virtual environment; everything about the client that can be
-checked by reading text is in the main suite instead (see the table below).
+`--client` is opt-in, and it runs under `client/.venv` rather than under the
+interpreter that started the script: the client is a separate package needing
+Qt, `keyring` and `qasync` and at least Python 3.12, while that environment
+carries none of the server's dependencies, so no single interpreter can run
+both sides. If `client/.venv` does not exist the step says so and how to make
+it, instead of failing in test collection. Everything about the client that can
+be checked by reading text is in the main suite instead (see the table below).
 
 The linter is `ruff`, installed by the `dev` extra and bounded to one minor
 release. The enabled rules are written out in `pyproject.toml` under
