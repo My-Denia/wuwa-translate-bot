@@ -15,11 +15,20 @@ The steps, in order: `hygiene`, `non-goals`, `architecture`, `api-contract`,
 its failure means. The run stops at the first failing step and names it, and
 the exit status is that step's.
 
-This is the entry point CI uses: the `pytest (py3.x)` matrix jobs install
-`.[dev]` and then run `python scripts/validate.py`, so a green local run and a
-green pull request are the same claim. Before it existed, CI carried one list,
-the README a shorter one, and this page a third, and a gate added to one of
-them was invisible in the others.
+This is the entry point the **server test matrix** uses: the `pytest (py3.x)`
+jobs install `.[dev]` and then run `python scripts/validate.py`, so a green run
+here and a green matrix job are the same claim, on the same file. Before it
+existed, CI carried one list, the README a shorter one, and this page a third,
+and a gate added to one of them was invisible in the others.
+
+It is **not** the whole pull request. CI also runs the uv lock-drift check, the
+wheel and sdist build with its packaging audit and clean-venv install smoke, the
+Windows desktop-client build, and the Docker runtime/builder boundary job — four
+jobs this command does not contain, needing `uv`, a build, a Windows runner and
+Docker respectively. If a change touches the lock file, the packaging metadata,
+`client/` or `deploy/`, a green run here is necessary and not sufficient; the
+job list is in [the gate table below](#gates-for-the-http-api-and-the-desktop-client)
+and in `.github/workflows/ci.yml`.
 
 `README.md` and `README.en.md` used to carry their own command block, and it
 was **not** equivalent: it predated both the linter and the API-contract gate,

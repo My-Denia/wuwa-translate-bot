@@ -25,19 +25,26 @@ first step. Nothing is back-ported to an earlier tag.
 Report privately through GitHub. Do not open a public issue for a
 vulnerability.
 
+**Private vulnerability reporting is enabled on this repository**, so the
+private path exists and is the one to use:
+
 1. Open the repository's **Security** tab.
-2. Choose **Report a vulnerability** — this is GitHub's private vulnerability
-   reporting.
+2. Choose **Report a vulnerability**.
 3. Fill in the form. What you write is visible to the maintainer, not to the
    public.
 
 Direct link:
 <https://github.com/My-Denia/wuwa-translate-bot/security/advisories/new>
 
-There is no security mailbox and no other private channel. If private
-vulnerability reporting is unavailable to you, open a public issue that says
-only that you have a security report and nothing else — no details, no proof of
-concept, no logs.
+There is no security mailbox and no other private channel — no address is
+published here, deliberately, because a published address is a thing to
+maintain and to leak.
+
+If that form is unavailable to you for any reason, do **not** improvise in a
+public issue. Open a **Security contact request** from the issue chooser
+instead: it exists only to ask the maintainer to open a private channel, it
+takes no details, and it carries a required acknowledgement that you have put
+none there. Everything about the finding waits for the private channel.
 
 A useful report says what an attacker gains, what access they need to start,
 which surface it goes through (Telegram bot, HTTP API, private web layer,

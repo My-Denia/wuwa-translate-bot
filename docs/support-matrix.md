@@ -10,7 +10,7 @@ an intention.
 | --- | --- |
 | Declared range | `requires-python >=3.11`, no upper bound (`pyproject.toml`) |
 | Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
-| Entry point CI runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green pull request are the same claim ([Validation](validation.md)) |
+| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build and the Docker boundary job run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
 | Supported development platform | **Linux.** The suite is green there. |
 

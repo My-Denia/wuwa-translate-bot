@@ -23,7 +23,7 @@ Everything starts here:
 | Something behaves wrongly — a wrong translation path, a wrong response, a crash, a surface that misbehaves | **Bug report** |
 | You cannot install it, build the dictionary, start a service, issue a device credential, or get the desktop client to talk to the API | **Installation or setup problem** |
 | You want the project to do something it does not do | **Feature request** — read the non-goals in [CONTRIBUTING.md](CONTRIBUTING.md#non-goals) first |
-| You found a vulnerability | **Not an issue.** Follow [SECURITY.md](SECURITY.md) — report it privately |
+| You found a vulnerability | **Not an issue.** Follow [SECURITY.md](SECURITY.md) — report it privately through the Security tab, which is enabled. If that form is unavailable to you, the **Security contact request** form asks the maintainer to open a private channel and deliberately takes no details |
 
 GitHub Discussions is not enabled on this repository, so a question is an issue
 too. Use the bug-report form and say plainly that it is a question; a question

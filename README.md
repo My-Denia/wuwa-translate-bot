@@ -110,7 +110,7 @@ Telegram 命令示例：
 
 未给出方向参数时，默认仍为自动判定。要对某条消息作出回复式翻译，发送 `/tr --to en`、`/tr -to en`、`/sentence --to zh` 或 `/sent --to zh`，bot 会按指定方向翻译被回复的文本。就校验而言：非法的 --to 取值只返回用法说明，不调用 LLM；词典精确命中同样不调用 LLM。对于关联频道的贴文，频道自动翻译始终为自动判定方向，不接受命令方向参数。
 
-运行标准校验集。本地与 CI 共用这一个入口，因此本地绿与 pull request 绿是同一个判断：
+运行标准校验集。CI 的服务端测试矩阵跑的就是这个文件，所以本地绿与矩阵那几个 job 绿是同一个判断。但它不等于整个 pull request：lock 漂移检查、wheel/sdist 构建与打包审计、Windows 客户端构建、Docker 运行时/构建器边界这四个 job 都在这条命令之外，另行运行（见[校验](docs/validation.md)）：
 
 ```bash
 .venv/bin/python scripts/validate.py

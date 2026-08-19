@@ -117,6 +117,10 @@ equivalents elsewhere parse the file as data rather than executing it, which is
 also how Compose reads it for the container path. Either way, the variables have
 to reach the process; nothing in this project puts them there.
 
+If you run both surfaces on the source path, do not export one file into both:
+[Start The Service](#start-the-service) shows how to give each process only its
+own secrets, which is what the Compose file already does for the container path.
+
 **For the Telegram bot:**
 
 | variable | why it matters |
@@ -218,12 +222,45 @@ The three lines are alternatives: the API alone, the bot alone, or both.
 **Source path**, one process each — and they are two long-running processes,
 not two lines of one script. Start each in its own terminal, or put each under
 a process supervisor; run in one shell, the second command waits for the first
-to exit. Each needs the environment exported as above.
+to exit.
 
 ```bash
 .venv/bin/python -m wuwaterm.cli bot --db data/terms.db
 .venv/bin/python -m wuwaterm_api.cli serve
 ```
+
+**Give each process only its own secrets.** One `.env` exported into one shell
+puts every value into both processes: the bot would hold the web layer's device
+token and edge marker, and the API would hold the Telegram token, the owner id
+and the bot's log-redaction key — none of which either one uses. That is not a
+detail of taste; it is what the Compose file already does for you, blanking
+three variables in the bot service and five in the API service, and a source
+installation has to reproduce it. Two ways, both fine:
+
+Separate files, one per process — `.env.bot` and `.env.api`, each at mode 600,
+each holding only what that process needs (the shared ones — the database path,
+the data directory, the model settings — appear in both):
+
+```bash
+( set -a; . ./.env.bot; set +a; exec .venv/bin/python -m wuwaterm.cli bot --db data/terms.db )
+( set -a; . ./.env.api; set +a; exec .venv/bin/python -m wuwaterm_api.cli serve )
+```
+
+Or one file, with the other process's variables unset at the point of launch —
+the same list Compose blanks:
+
+```bash
+( set -a; . ./.env; set +a
+  unset WUWATERM_API_WEB_ENABLED WUWATERM_API_WEB_DEVICE_TOKEN WUWATERM_API_WEB_EDGE_SECRET
+  exec .venv/bin/python -m wuwaterm.cli bot --db data/terms.db )
+
+( set -a; . ./.env; set +a
+  unset TELEGRAM_BOT_TOKEN TELEGRAM_TEST_CHAT_ID OWNER_USER_ID WUWATERM_REDACTION_SECRET WUWATERM_API_DEVICE_DB_PATH
+  exec .venv/bin/python -m wuwaterm_api.cli serve )
+```
+
+A supervisor unit does the same with its own environment-file directive: point
+each unit at its own file, or at the shared one plus that unit's unsets.
 
 The API binds `127.0.0.1` and port `8788` unless you say otherwise, and it
 refuses to bind a non-loopback address. Check it:

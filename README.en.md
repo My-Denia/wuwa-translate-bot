@@ -186,8 +186,11 @@ dictionary hits do not call the LLM. For linked-channel posts, channel
 auto-translation remains auto-detected and does not accept command direction
 flags.
 
-Run the standard validation set. Local runs and CI share this one entry point,
-so a green local run and a green pull request are the same claim:
+Run the standard validation set. This is the same file CI's server test matrix
+runs, so a green run here and a green matrix job are the same claim. It is not
+the whole pull request: the lock-drift check, the packaging build and audit, the
+Windows client build and the Docker boundary job are separate CI jobs this
+command does not contain ([Validation](docs/validation.md)):
 
 ```bash
 .venv/bin/python scripts/validate.py
