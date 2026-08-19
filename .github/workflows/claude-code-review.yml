@@ -18,8 +18,11 @@ jobs:
     # real gates (CI matrix, lock drift, packaging) had already passed. Those
     # bumps are mechanical; CI is the review. Skipping the job keeps the check
     # green-by-absence instead of red-by-policy. Other bots still need the
-    # explicit allowed_bots entry below.
-    if: github.actor != 'dependabot[bot]'
+    # explicit allowed_bots entry below. The test is on the pull request's
+    # AUTHOR, not on github.actor: a maintainer who reopens or marks a
+    # dependabot pull request ready for review is the actor of that event,
+    # and the exclusion must follow the pull request, not the click.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:
