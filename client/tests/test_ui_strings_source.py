@@ -26,7 +26,14 @@ then the supplementary Kana blocks - each time while the prose above already
 claimed the missing one. Hand-maintaining a list against a promise is the
 defect rather than any one omission, so the list is now checked against the
 character database the interpreter ships with, and the test that does it
-sweeps the whole code space rather than sampling it.
+sweeps the whole code space rather than sampling it. That sweep proves less
+than "every CJK character": it sees only blocks whose character names carry
+one of CJK_NAME_TOKENS, so what this file forbids is precisely the East
+Asian scripts, CJK punctuation and related Chinese symbol blocks it
+ENUMERATES. Blocks whose names say something else - Yijing hexagrams, Tai
+Xuan Jing symbols, the old Chinese hook marks - are in the list by reading,
+each held open by its own planted-literal test, and a block absent from
+both the tokens and the list stays invisible until a reviewer reads for it.
 
 What rule 2 deliberately does not flag:
 
@@ -123,6 +130,13 @@ CJK_RANGES = (
     (0x1B000, 0x1B0FF),  # Kana supplement
     (0x1B100, 0x1B12F),  # Kana extended-A
     (0x1B130, 0x1B16F),  # Small Kana extension
+    # Tai Xuan Jing symbols - MONOGRAM/DIGRAM/TETRAGRAM FOR ..., Chinese
+    # divination symbols continuing the Yijing tradition. Like the Yijing
+    # block, none of their names carries a CJK_NAME_TOKENS entry, so the
+    # sweep cannot find this row; it is here by reading (review finding that
+    # arrived 88 seconds before PR 93 merged) and is held open by
+    # test_the_chinese_divination_symbol_blocks_are_covered.
+    (0x1D300, 0x1D35F),  # Tai Xuan Jing symbols
     (0x1D360, 0x1D37F),  # Counting rod numerals, incl. the ideographic tally marks
     # Ideographic symbols and punctuation - U+16FE2 OLD CHINESE HOOK MARK and
     # its neighbours. The completeness sweep below cannot find this block on
@@ -497,6 +511,32 @@ def test_the_setter_rule_flags_a_literal_in_a_subpackage_initializer(
     assert setter[0].startswith("__init__.py:2:"), setter[0]
     # The CJK rule is silent on it, which is why the exemption had to narrow.
     assert _cjk_literal_violations_in_file(nested_init) == []
+
+
+def test_the_chinese_divination_symbol_blocks_are_covered(tmp_path: Path) -> None:
+    """Yijing hexagrams and Tai Xuan Jing symbols are Chinese display symbols.
+
+    Both blocks sit outside every name the completeness sweep can see - their
+    character names say HEXAGRAM, MONOGRAM, DIGRAM or TETRAGRAM, none of which
+    is a CJK_NAME_TOKENS entry - so each is in the range list by reading, and
+    this test is what holds the two rows open. The Tai Xuan Jing row was the
+    fourth block found missing on review, eighty-eight seconds before the
+    original change merged; the sweep was structurally unable to catch it,
+    which is why a planted literal per block is asserted here instead.
+    """
+    source = (
+        "def build():\n"
+        "    a = \"\u4DC0\"\n"  # Yijing hexagram for the creative heaven
+        "    b = \"\U0001D300\"\n"  # Tai Xuan Jing monogram for earth
+        "    c = \"plain ascii, not display text\"\n"
+        "    return a, b, c\n"
+    )
+    planted = tmp_path / "taixuanjing.py"
+    planted.write_text(source, encoding="utf-8")
+
+    violations = _cjk_literal_violations_in_file(planted)
+    locations = [message.split(": ", 1)[0] for message in violations]
+    assert locations == ["taixuanjing.py:2", "taixuanjing.py:3"]
 
 
 def test_the_range_list_covers_every_character_unicode_calls_cjk() -> None:
