@@ -166,10 +166,11 @@ UNAUTHORIZED_GROUP_NOTICE = (
     "This bot is not authorized for this chat. It needs the owner's "
     "authorization to stay, so it is leaving now."
 )
-AUTHORIZE_USAGE = (
-    "用法（仅 bot 主人）：群内发 /authorize 授权本群；私聊发 /authorize <chat_id> 按 id 授权；/authorize list 查看名单。\n"
-    "Usage (owner only): /authorize in a group to allow it; /authorize <chat_id> "
-    "in private to allow by id; /authorize list to view."
+GRANT_USAGE = (
+    "用法 / Usage\n"
+    "/grant           授权本群 / this chat\n"
+    "/grant <chat_id> 按 id / by id\n"
+    "/grant list      查看名单 / list"
 )
 REVOKE_USAGE = (
     "用法（仅 bot 主人）：群内发 /revoke 撤销本群授权；私聊发 /revoke <chat_id> 按 id 撤销。\n"
@@ -862,7 +863,7 @@ def create_application(
     app.add_handler(CommandHandler("about", about_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("public", public_command))
-    app.add_handler(CommandHandler("authorize", authorize_command))
+    app.add_handler(CommandHandler("grant", grant_command))
     app.add_handler(CommandHandler("revoke", revoke_command))
     app.add_handler(
         MessageHandler(
@@ -1357,12 +1358,33 @@ async def my_chat_member_handler(
     await _leave_chat_quietly(context, chat.id)
 
 
-async def authorize_command(
+def _grant_success_text(chat_id: int, *, current_chat: bool) -> str:
+    heading = (
+        "已授权本群\nThis chat is granted."
+        if current_chat
+        else "已授权\nGranted."
+    )
+    return f"{heading}\n\n{chat_id}"
+
+
+def _grant_list_text(chat_ids: list[int]) -> str:
+    body = "\n".join(str(cid) for cid in chat_ids) if chat_ids else "（空）"
+    return (
+        f"授权名单 · {len(chat_ids)}\n"
+        f"Granted chats\n"
+        f"\n"
+        f"{body}\n"
+        f"\n"
+        f"{GRANT_USAGE}"
+    )
+
+
+async def grant_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Owner-only: add a chat to the group authorization allowlist. In a group,
-    /authorize allows the current chat; in private, /authorize <chat_id> allows
-    by id and /authorize (or 'list') shows the list. Non-owners get no reply."""
+    /grant allows the current chat; in private, /grant <chat_id> allows
+    by id and /grant (or 'list') shows the list. Non-owners get no reply."""
     message = update.effective_message
     if not message:
         return
@@ -1380,20 +1402,15 @@ async def authorize_command(
         if outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
             await reply_to_user(update, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
             return
-        await reply_to_user(
-            update,
-            f"已授权本群（chat_id={cid}）\nThis chat is authorized (chat_id={cid}).",
-        )
+        await reply_to_user(update, _grant_success_text(cid, current_chat=True))
         return
     if arg in {"", "list"}:
-        listing = settings.allowed_chats()
-        body = ", ".join(str(c) for c in listing) if listing else "（空 / empty）"
-        await reply_to_user(update, f"授权名单 / Allowlist: {body}\n\n{AUTHORIZE_USAGE}")
+        await reply_to_user(update, _grant_list_text(settings.allowed_chats()))
         return
     try:
         target = int(arg)
     except ValueError:
-        await reply_to_user(update, AUTHORIZE_USAGE)
+        await reply_to_user(update, GRANT_USAGE)
         return
     outcome = _try_persist(settings.allow, target)
     if outcome is _PersistenceOutcome.FAILED:
@@ -1402,7 +1419,7 @@ async def authorize_command(
     if outcome is _PersistenceOutcome.DURABILITY_UNCERTAIN:
         await reply_to_user(update, SETTINGS_DURABILITY_UNCERTAIN_NOTICE)
         return
-    await reply_to_user(update, f"已授权 / Authorized chat_id={target}")
+    await reply_to_user(update, _grant_success_text(target, current_chat=False))
 
 
 async def revoke_command(
