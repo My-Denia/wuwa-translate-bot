@@ -170,7 +170,7 @@ admin (see that section).
   last-load and last-save fields show whether the most recent persistence read
   or write succeeded.
 
-### Group Authorization / auto-leave (`/authorize`, `/revoke`)
+### Group Authorization / auto-leave (`/grant`, `/revoke`)
 
 The bot only stays in groups the owner has authorized. When it is added to a
 chat that is not on the allowlist, it posts a short bilingual notice and then
@@ -183,8 +183,8 @@ persisted-write fails, an unauthorized group still gets no translations
 - The owner adding the bot to a group auto-authorizes that group (its id goes on
   the allowlist), so the owner can drop the bot into their own groups with no
   extra step.
-- `/authorize` (owner only) — in a group, authorizes the current chat; in
-  private chat, `/authorize <chat_id>` authorizes by id and `/authorize list`
+- `/grant` (owner only) — in a group, authorizes the current chat; in
+  private chat, `/grant <chat_id>` authorizes by id and `/grant list`
   shows the allowlist.
 - `/revoke` (owner only) — removes a chat from the allowlist (current chat in a
   group, or `/revoke <chat_id>` in private).
@@ -199,8 +199,8 @@ persisted-write fails, an unauthorized group still gets no translations
 > First deploy into an existing group: the bot is already a member there, so it
 > does not auto-leave (no "added" event fires) — but because serving is gated on
 > the allowlist, `/tr` and the other commands will NOT respond there until the
-> group is authorized. Run `/authorize` once inside that group (or
-> `/authorize <chat_id>` from a private chat with the owner) to add it to the
+> group is authorized. Run `/grant` once inside that group (or
+> `/grant <chat_id>` from a private chat with the owner) to add it to the
 > allowlist; translations resume immediately.
 
 ### Opening a Group to Non-Admins (`/public`)

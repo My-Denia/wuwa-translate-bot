@@ -5,6 +5,13 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Telegram Bot
+
+- bot: owner chat allowlisting is now `/grant` (the `/authorize` command is
+  gone). Success and list replies are structured plain text — heading, one id
+  per line, and a three-line usage block — instead of a bilingual run-on.
+  `/revoke`, persistence, and auto-leave are unchanged.
+
 ### Desktop Client
 
 - client: the strings-source gate now forbids a string literal holding any CJK

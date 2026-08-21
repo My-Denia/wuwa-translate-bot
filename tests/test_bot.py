@@ -51,7 +51,8 @@ from wuwaterm.bot import (
     PerChatRateLimiter,
     StateMigrationError,
     about_command,
-    authorize_command,
+    GRANT_USAGE,
+    grant_command,
     create_application,
     my_chat_member_handler,
     public_command,
@@ -1078,9 +1079,11 @@ def test_slow_llm_does_not_block_control_commands_or_other_chat(
             chat_id=1, chat_type="private", message_id=4302, user_id=11
         )
         await asyncio.wait_for(
-            authorize_command(authorize_update, context), timeout=0.05
+            grant_command(authorize_update, context), timeout=0.05
         )
-        assert authorize_message.replies == [("已授权 / Authorized chat_id=-2999", None)]
+        assert authorize_message.replies == [
+            ("已授权\nGranted.\n\n-2999", None)
+        ]
 
         context.args = ["-2999"]
         revoke_update, revoke_message = fake_update(
@@ -1960,7 +1963,7 @@ def test_state_dir_invalid_channel_reply_target_with_legacy_fails_fast(
 
 def test_handler_set_is_exactly_commands_plus_channel_listener(sample_db):
     """Pin evolution (deliberate): seven command handlers (/tr+/term,
-    /sentence+/sent, /about, /status, /public, /authorize, /revoke), exactly one passive
+    /sentence+/sent, /about, /status, /public, /grant, /revoke), exactly one passive
     channel listener (the linked-channel hard boundary), and exactly one
     MY_CHAT_MEMBER handler (the group-authorization gate)."""
     app = create_application(
@@ -2002,7 +2005,8 @@ def test_data_plane_handlers_are_non_blocking_control_handlers_block(sample_db):
     assert message_handlers[0].block is False
     assert bool(by_commands[frozenset({"public"})].block) is True
     assert bool(by_commands[frozenset({"status"})].block) is True
-    assert bool(by_commands[frozenset({"authorize"})].block) is True
+    assert bool(by_commands[frozenset({"grant"})].block) is True
+    assert frozenset({"authorize"}) not in by_commands
     assert bool(by_commands[frozenset({"revoke"})].block) is True
 
 
@@ -3976,47 +3980,96 @@ def test_owner_add_durability_uncertain_stays_and_notifies(
     ]
 
 
-# --- /authorize, /revoke (owner-only) ---
+# --- /grant, /revoke (owner-only) ---
 
 
-def test_authorize_in_group_allows_current_chat(sample_db):
+def test_grant_in_group_allows_current_chat(sample_db):
     update, message = fake_update(
         chat_id=-2001, chat_type="supergroup", message_id=900, user_id=11
     )
     context = fake_context(sample_db, [])  # no args -> current chat
 
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     settings = context.application.bot_data[CHAT_SETTINGS_KEY]
     assert settings.is_allowed(-2001) is True
     assert message.replies == [
-        ("已授权本群（chat_id=-2001）\nThis chat is authorized (chat_id=-2001).", 900)
+        ("已授权本群\nThis chat is granted.\n\n-2001", 900)
     ]
 
 
-def test_authorize_by_id_in_private(sample_db):
+def test_grant_by_id_in_private(sample_db):
     update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
     context = fake_context(sample_db, ["-2002"])
 
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2002) is True
-    assert message.replies == [("已授权 / Authorized chat_id=-2002", None)]
+    assert message.replies == [("已授权\nGranted.\n\n-2002", None)]
 
 
-def test_authorize_non_owner_is_silent(sample_db):
+def test_grant_lists_allowed_chats_in_private(sample_db):
+    update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
+    context = fake_context(sample_db, [])
+
+    asyncio.run(grant_command(update, context))
+
+    assert message.replies == [
+        (
+            "授权名单 · 3\n"
+            "Granted chats\n"
+            "\n"
+            "-2003\n"
+            "-2002\n"
+            "-2001\n"
+            "\n"
+            f"{GRANT_USAGE}",
+            None,
+        )
+    ]
+
+
+def test_grant_list_empty_allowlist(sample_db):
+    update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
+    context = fake_context(sample_db, ["list"], allowlist=())
+
+    asyncio.run(grant_command(update, context))
+
+    assert message.replies == [
+        (
+            "授权名单 · 0\n"
+            "Granted chats\n"
+            "\n"
+            "（空）\n"
+            "\n"
+            f"{GRANT_USAGE}",
+            None,
+        )
+    ]
+
+
+def test_grant_invalid_arg_shows_usage(sample_db):
+    update, message = fake_update(chat_id=11, chat_type="private", user_id=11)
+    context = fake_context(sample_db, ["not-an-id"])
+
+    asyncio.run(grant_command(update, context))
+
+    assert message.replies == [(GRANT_USAGE, None)]
+
+
+def test_grant_non_owner_is_silent(sample_db):
     update, message = fake_update(
         chat_id=-2001, chat_type="supergroup", message_id=901, user_id=42
     )
     context = fake_context(sample_db, [], allowlist=())
 
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     assert message.replies == []
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
 
 
-def test_authorize_owner_unset_is_silent_for_everyone(sample_db):
+def test_grant_owner_unset_is_silent_for_everyone(sample_db):
     update, message = fake_update(
         chat_id=-2001, chat_type="supergroup", message_id=903, user_id=11
     )
@@ -4027,7 +4080,7 @@ def test_authorize_owner_unset_is_silent_for_everyone(sample_db):
         allowlist=(),
     )
 
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     assert message.replies == []
     assert context.application.bot_data[CHAT_SETTINGS_KEY].is_allowed(-2001) is False
@@ -4099,7 +4152,7 @@ def test_tr_rejected_in_non_allowlisted_group(sample_db):
     assert message.replies == [(DEFAULT_GROUP_TR_REJECT_TEXT, 950)]
 
 
-def test_authorize_durability_uncertain_reports_applied_state(
+def test_grant_durability_uncertain_reports_applied_state(
     monkeypatch, sample_db
 ):
     update, message = fake_update(
@@ -4109,13 +4162,13 @@ def test_authorize_durability_uncertain_reports_applied_state(
     settings = context.application.bot_data[CHAT_SETTINGS_KEY]
     monkeypatch.setattr(settings, "_save_state", raise_durability_uncertain)
 
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     assert settings.is_allowed(-7001) is True
     assert message.replies == [(SETTINGS_DURABILITY_UNCERTAIN_NOTICE, 949)]
 
 
-def test_authorize_save_failure_notifies_and_does_not_claim_success(monkeypatch, sample_db):
+def test_grant_save_failure_notifies_and_does_not_claim_success(monkeypatch, sample_db):
     update, message = fake_update(
         chat_id=-7001, chat_type="supergroup", message_id=951, user_id=11
     )
@@ -4126,7 +4179,7 @@ def test_authorize_save_failure_notifies_and_does_not_claim_success(monkeypatch,
         raise OSError("disk full")
 
     monkeypatch.setattr(settings, "allow", boom)
-    asyncio.run(authorize_command(update, context))
+    asyncio.run(grant_command(update, context))
 
     assert message.replies == [(SETTINGS_SAVE_FAILED_NOTICE, 951)]
     assert settings.is_allowed(-7001) is False  # not claimed authorized

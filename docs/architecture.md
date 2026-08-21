@@ -90,7 +90,7 @@ re-checks the `/v1` routes apply.
 
 | Actor | Role | Evidence |
 |-------|------|----------|
-| Owner (`OWNER_USER_ID`) | Private `/tr`, `/authorize` / `/revoke`, `/public`, `/status` | `bot.py` `_is_owner`, `authorize_command`, `public_command` |
+| Owner (`OWNER_USER_ID`) | Private `/tr`, `/grant` / `/revoke`, `/public`, `/status` | `bot.py` `_is_owner`, `grant_command`, `public_command` |
 | Group admins | `/tr` when chat is allowlisted (unless public mode) | `bot.py` `_is_authorized_group_sender`, `ChatSettings` |
 | Group members | `/tr` only when public mode is on for that chat | `settings.py` public map; `docs/telegram-behavior.md` |
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
@@ -155,7 +155,7 @@ construction, and **neither can grant, extend or revoke the other**.
 |---|---|---|
 | Principal | A Telegram user id, and a chat id | A device registered by the operator |
 | Owner authority | `OWNER_USER_ID` from the environment | none — there is no owner device, only devices |
-| Grant | `/authorize` adds a chat to the allowlist; `/public` opens a chat to its members | `wuwaterm-api device issue`, reading the secret from standard input |
+| Grant | `/grant` adds a chat to the allowlist; `/public` opens a chat to its members | `wuwaterm-api device issue`, reading the secret from standard input |
 | Stored where | `state/chat_settings.json` (bot's writable mount) | `state-api/devices.db` (API's own mount) |
 | Stored what | Chat ids and flags | A salted scrypt verifier, scopes, timestamps — never a secret |
 | Withdraw | `/revoke` for a chat | `wuwaterm-api device revoke` stamps `revoked_at`; deleting the store file revokes everything |
@@ -405,7 +405,7 @@ Channel path is always auto-detected direction; it does not accept command
 | Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |
 | LLM env incomplete | The bot restores locked placeholders without inventing terms; the API refuses with `llm_unavailable` |
-| `/about`, `/status`, authorize/revoke/public membership housekeeping | No translation |
+| `/about`, `/status`, grant/revoke/public membership housekeeping | No translation |
 
 ## Data model: immutable vs mutable
 
