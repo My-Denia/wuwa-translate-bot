@@ -40,7 +40,7 @@ assert.equal(clientComponent.includes("fetch('/api/meta'"), true, 'client fetch 
 
 const hostingText = readFileSync(join(root, '.openai/hosting.json'), 'utf8');
 for (const name of envNames) assert.equal(hostingText.includes(name), false, `hosting.json contains ${name}`);
-assert.deepEqual(Object.keys(JSON.parse(hostingText)).sort(), ['d1', 'r2']);
+assert.deepEqual(Object.keys(JSON.parse(hostingText)).sort(), ['d1', 'project_id', 'r2']);
 
 const scanExtensions = new Set(['.html', '.js', '.css', '.map', '.json']);
 const emittedRoots = ['dist/client', 'dist/assets'];
