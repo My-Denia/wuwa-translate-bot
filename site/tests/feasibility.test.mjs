@@ -222,6 +222,28 @@ test('timeout aborts one request and returns a fixed 504', async () => {
   await assertUnavailable(response, 504, 'upstream_timeout');
 });
 
+test('timeout also cancels a body that stalls after response headers', async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const response = await proxyMetaRequest({
+    environment: ENVIRONMENT,
+    timeoutMs: 5,
+    fetchImpl: async () => new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  assert.equal(cancelled, true);
+  await assertUnavailable(response, 504, 'upstream_timeout');
+});
+
 for (const label of ['dns failure', 'tls failure', 'connection reset']) {
   test(`${label} is a redacted fixed 502 and is not retried or logged`, async () => {
     const original = { log: console.log, warn: console.warn, error: console.error };

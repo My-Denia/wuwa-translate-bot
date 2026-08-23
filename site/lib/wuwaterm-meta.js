@@ -120,7 +120,21 @@ function strictJsonContentType(value) {
   return value.split(';', 1)[0].trim().toLowerCase() === 'application/json';
 }
 
-async function readBoundedBody(upstream) {
+async function readWithAbort(reader, signal) {
+  if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+  let onAbort;
+  const aborted = new Promise((_resolve, reject) => {
+    onAbort = () => reject(new DOMException('aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+async function readBoundedBody(upstream, signal) {
   const contentLength = upstream.headers.get('content-length');
   if (contentLength !== null) {
     const parsed = Number(contentLength);
@@ -135,7 +149,7 @@ async function readBoundedBody(upstream) {
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithAbort(reader, signal);
       if (done) break;
       total += value.byteLength;
       if (total > MAX_UPSTREAM_BYTES) {
@@ -145,9 +159,21 @@ async function readBoundedBody(upstream) {
       chunks.push(value);
     }
   } catch {
-    return { ok: false, reason: 'upstream_network_error' };
+    try {
+      await reader.cancel();
+    } catch {
+      // Cancellation errors are intentionally not exposed or logged.
+    }
+    return {
+      ok: false,
+      reason: signal.aborted ? 'upstream_timeout' : 'upstream_network_error',
+    };
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled reader may already have released its lock.
+    }
   }
 
   const bytes = new Uint8Array(total);
@@ -208,7 +234,7 @@ export async function proxyMetaRequest({
     if (!strictJsonContentType(contentType)) {
       return errorResponse('upstream_invalid_content_type');
     }
-    const raw = await readBoundedBody(upstream);
+    const raw = await readBoundedBody(upstream, controller.signal);
     if (!raw.ok) return errorResponse(raw.reason);
 
     let body;
