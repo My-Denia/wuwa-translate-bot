@@ -6,7 +6,7 @@ import { proxyMetaRequest } from '../lib/wuwaterm-meta.js';
 
 const TOKEN = 'SYNTHETIC_DEVICE_SENTINEL_74A1C9';
 const ALLOWED_HOST = 'meta.wuwaterm-test.net';
-const BASE_URL = `https://${ALLOWED_HOST}/`;
+const BASE_URL = `https://${ALLOWED_HOST}/wuwaterm-api/`;
 const ENVIRONMENT = {
   WUWATERM_API_BASE_URL: BASE_URL,
   WUWATERM_API_ALLOWED_HOST: ALLOWED_HOST,
@@ -93,6 +93,22 @@ test('200 uses the fixed metadata path and strict server-owned request', async (
   });
 });
 
+test('the documented API mount accepts an omitted trailing slash only', async () => {
+  let captured;
+  const response = await proxyMetaRequest({
+    environment: {
+      ...ENVIRONMENT,
+      WUWATERM_API_BASE_URL: BASE_URL.slice(0, -1),
+    },
+    fetchImpl: async (url) => {
+      captured = url.toString();
+      return upstreamJson(200, metaBody());
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(captured, `${BASE_URL}v1/meta`);
+});
+
 test('missing or unsafe runtime settings fail closed without fetching', async () => {
   const credentialedBase = new URL(BASE_URL);
   credentialedBase.username = 'synthetic-user';
@@ -101,26 +117,28 @@ test('missing or unsafe runtime settings fail closed without fetching', async ()
     undefined,
     {},
     { ...ENVIRONMENT, WUWATERM_API_ALLOWED_HOST: undefined },
-    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `http://${ALLOWED_HOST}/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `http://${ALLOWED_HOST}/wuwaterm-api/` },
     { ...ENVIRONMENT, WUWATERM_API_ALLOWED_HOST: 'other.wuwaterm-test.net' },
     { ...ENVIRONMENT, WUWATERM_API_ALLOWED_HOST: ALLOWED_HOST.toUpperCase() },
     { ...ENVIRONMENT, WUWATERM_API_BASE_URL: credentialedBase.toString() },
-    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `${BASE_URL}root/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}/root/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}/wuwaterm-api//` },
     { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `${BASE_URL}?leak=1` },
-    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}:8443/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}:8443/wuwaterm-api/` },
     {
       ...ENVIRONMENT,
-      WUWATERM_API_BASE_URL: 'https://127.0.0.1/',
+      WUWATERM_API_BASE_URL: 'https://127.0.0.1/wuwaterm-api/',
       WUWATERM_API_ALLOWED_HOST: '127.0.0.1',
     },
     {
       ...ENVIRONMENT,
-      WUWATERM_API_BASE_URL: 'https://[::1]/',
+      WUWATERM_API_BASE_URL: 'https://[::1]/wuwaterm-api/',
       WUWATERM_API_ALLOWED_HOST: '[::1]',
     },
     {
       ...ENVIRONMENT,
-      WUWATERM_API_BASE_URL: 'https://service.internal/',
+      WUWATERM_API_BASE_URL: 'https://service.internal/wuwaterm-api/',
       WUWATERM_API_ALLOWED_HOST: 'service.internal',
     },
   ];

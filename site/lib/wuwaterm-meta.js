@@ -1,4 +1,5 @@
 const MAX_UPSTREAM_BYTES = 65_536;
+const EXPECTED_API_MOUNT_PATH = '/wuwaterm-api/';
 
 const JSON_HEADERS = Object.freeze({
   'cache-control': 'no-store',
@@ -94,7 +95,6 @@ function configuredUpstream(environment) {
     baseUrl.username ||
     baseUrl.password ||
     baseUrl.port ||
-    baseUrl.pathname !== '/' ||
     baseUrl.search ||
     baseUrl.hash ||
     baseUrl.hostname.toLowerCase() !== allowedHost
@@ -102,9 +102,15 @@ function configuredUpstream(environment) {
     return null;
   }
 
+  const normalizedPath = baseUrl.pathname.endsWith('/')
+    ? baseUrl.pathname
+    : `${baseUrl.pathname}/`;
+  if (normalizedPath !== EXPECTED_API_MOUNT_PATH) return null;
+  baseUrl.pathname = EXPECTED_API_MOUNT_PATH;
+
   return {
     baseValue,
-    metaUrl: new URL('/v1/meta', baseUrl.origin),
+    metaUrl: new URL('v1/meta', baseUrl),
     token,
   };
 }
