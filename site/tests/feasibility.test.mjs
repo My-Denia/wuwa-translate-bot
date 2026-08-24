@@ -34,6 +34,23 @@ function upstreamJson(status, body, headers = {}) {
   });
 }
 
+function stalledResponse(status, headers = {}, { cancelStalls = false } = {}) {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled = true;
+      if (cancelStalls) return new Promise(() => {});
+    },
+  });
+  return {
+    response: new Response(stream, { status, headers }),
+    wasCancelled: () => cancelled,
+  };
+}
+
 async function bodyOf(response) {
   return JSON.parse(await response.text());
 }
@@ -220,6 +237,44 @@ for (const status of [300, 301, 302, 307, 308]) {
     await assertUnavailable(response, 502, 'upstream_redirect');
   });
 }
+
+test('every pre-body rejection cancels a stalled upstream stream', async () => {
+  const cases = [
+    { status: 302, reason: 'upstream_redirect', expectedStatus: 502 },
+    { status: 401, reason: 'upstream_unauthorized', expectedStatus: 401 },
+    { status: 403, reason: 'upstream_forbidden', expectedStatus: 403 },
+    { status: 404, reason: 'upstream_not_found', expectedStatus: 502 },
+    { status: 429, reason: 'upstream_rate_limited', expectedStatus: 429 },
+    { status: 500, reason: 'upstream_unavailable', expectedStatus: 503 },
+    { status: 504, reason: 'upstream_timeout', expectedStatus: 504 },
+    { status: 418, reason: 'upstream_network_error', expectedStatus: 502 },
+    {
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+      reason: 'upstream_invalid_content_type',
+      expectedStatus: 502,
+    },
+    {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': '65537' },
+      reason: 'upstream_response_too_large',
+      expectedStatus: 502,
+    },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const stalled = stalledResponse(item.status, {
+      'content-type': 'application/json',
+      ...item.headers,
+    }, { cancelStalls: index === 0 });
+    const response = await proxyMetaRequest({
+      environment: ENVIRONMENT,
+      fetchImpl: async () => stalled.response,
+    });
+    assert.equal(stalled.wasCancelled(), true, `status ${item.status} body was not cancelled`);
+    await assertUnavailable(response, item.expectedStatus, item.reason);
+  }
+});
 
 test('timeout aborts one request and returns a fixed 504', async () => {
   let observedSignal;

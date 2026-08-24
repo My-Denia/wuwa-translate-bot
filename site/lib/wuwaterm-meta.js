@@ -140,11 +140,27 @@ async function readWithAbort(reader, signal) {
   }
 }
 
+function cancelUpstreamBody(upstream) {
+  if (!upstream.body) return;
+  try {
+    const cancellation = upstream.body.cancel();
+    cancellation?.catch?.(() => {});
+  } catch {
+    // Cancellation errors are intentionally not exposed or logged.
+  }
+}
+
+function rejectUpstream(upstream, reason) {
+  cancelUpstreamBody(upstream);
+  return errorResponse(reason);
+}
+
 async function readBoundedBody(upstream, signal) {
   const contentLength = upstream.headers.get('content-length');
   if (contentLength !== null) {
     const parsed = Number(contentLength);
     if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_UPSTREAM_BYTES) {
+      cancelUpstreamBody(upstream);
       return { ok: false, reason: 'upstream_response_too_large' };
     }
   }
@@ -226,19 +242,19 @@ export async function proxyMetaRequest({
     });
 
     if (upstream.status >= 300 && upstream.status < 400) {
-      return errorResponse('upstream_redirect');
+      return rejectUpstream(upstream, 'upstream_redirect');
     }
-    if (upstream.status === 401) return errorResponse('upstream_unauthorized');
-    if (upstream.status === 403) return errorResponse('upstream_forbidden');
-    if (upstream.status === 404) return errorResponse('upstream_not_found');
-    if (upstream.status === 429) return errorResponse('upstream_rate_limited');
-    if (upstream.status === 504) return errorResponse('upstream_timeout');
-    if (upstream.status >= 500) return errorResponse('upstream_unavailable');
-    if (upstream.status !== 200) return errorResponse('upstream_network_error');
+    if (upstream.status === 401) return rejectUpstream(upstream, 'upstream_unauthorized');
+    if (upstream.status === 403) return rejectUpstream(upstream, 'upstream_forbidden');
+    if (upstream.status === 404) return rejectUpstream(upstream, 'upstream_not_found');
+    if (upstream.status === 429) return rejectUpstream(upstream, 'upstream_rate_limited');
+    if (upstream.status === 504) return rejectUpstream(upstream, 'upstream_timeout');
+    if (upstream.status >= 500) return rejectUpstream(upstream, 'upstream_unavailable');
+    if (upstream.status !== 200) return rejectUpstream(upstream, 'upstream_network_error');
 
     const contentType = upstream.headers.get('content-type') ?? '';
     if (!strictJsonContentType(contentType)) {
-      return errorResponse('upstream_invalid_content_type');
+      return rejectUpstream(upstream, 'upstream_invalid_content_type');
     }
     const raw = await readBoundedBody(upstream, controller.signal);
     if (!raw.ok) return errorResponse(raw.reason);

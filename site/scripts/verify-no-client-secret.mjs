@@ -43,18 +43,28 @@ for (const name of envNames) assert.equal(hostingText.includes(name), false, `ho
 assert.deepEqual(Object.keys(JSON.parse(hostingText)).sort(), ['d1', 'project_id', 'r2']);
 
 const scanExtensions = new Set(['.html', '.js', '.css', '.map', '.json']);
-const emittedRoots = ['dist/client', 'dist/assets'];
+const requiredBuildArtifacts = [
+  'dist/server/index.js',
+  'dist/client/vinext-client-entry-manifest.json',
+];
+for (const artifact of requiredBuildArtifacts) {
+  assert.equal(existsSync(join(root, artifact)), true, `missing ${artifact}; run the production build first`);
+}
+
+const emittedRoots = ['dist/client', 'dist/assets'].filter((path) => existsSync(join(root, path)));
+let scannedFiles = 0;
 for (const emittedRoot of emittedRoots) {
   const absolute = join(root, emittedRoot);
-  if (!existsSync(absolute)) continue;
   for (const file of walk(absolute)) {
     if (!scanExtensions.has(extname(file))) continue;
+    scannedFiles += 1;
     const text = readFileSync(file, 'utf8');
     for (const needle of [...envNames, ...canaries]) {
       assert.equal(text.includes(needle), false, `${relative(root, file)} exposes ${needle}`);
     }
   }
 }
+assert.ok(scannedFiles > 0, 'production build emitted no scannable client artifacts');
 
 const rootHtml = join(root, 'dist/index.html');
 if (existsSync(rootHtml)) {
@@ -64,7 +74,6 @@ if (existsSync(rootHtml)) {
 
 for (const emittedRoot of emittedRoots) {
   const absolute = join(root, emittedRoot);
-  if (!existsSync(absolute)) continue;
   for (const file of walk(absolute)) {
     assert.notEqual(extname(file), '.map', `${relative(root, file)} is an unexpected client source map`);
   }
