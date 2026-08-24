@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from wuwaterm.db import connect, insert_records
+from wuwaterm.models import TermRecord
 from wuwaterm.application import (
     ERROR_INPUT_TOO_LONG,
     ERROR_LLM_BUDGET_EXHAUSTED,
@@ -31,6 +33,7 @@ from wuwaterm.application import (
     error_code_for_llm_reason,
     input_too_long_message,
     lookup_exact_terms,
+    lookup_terms,
     probe_database,
     service_metadata,
     split_plain_text,
@@ -492,6 +495,58 @@ def test_lookup_exact_terms_is_empty_for_unknown_query(sample_db):
     service = build_term_service(sample_db)
 
     assert lookup_exact_terms(service, "not-a-term") == []
+
+
+def test_lookup_terms_exposes_backend_ranked_pinyin_match(sample_db):
+    service = build_term_service(sample_db)
+
+    matches = lookup_terms(service, "jinxi")
+
+    assert [
+        (match.zh, match.en, match.category, match.score, match.reason)
+        for match in matches
+    ] == [("今汐", "Jinhsi", "resonator", 100.0, "pinyin")]
+
+
+def test_lookup_terms_preserves_backend_category_order_and_limit(sample_db):
+    rows = [
+        ("core_term", "Shared Official"),
+        ("resonator", "Shared Official"),
+        ("weapon", "Weapon Official"),
+        ("echo", "Echo Official"),
+        ("skill", "Skill Official"),
+        ("location", "Location Official"),
+        ("item", "Item Official"),
+        ("speaker", "Speaker Official"),
+    ]
+    with connect(sample_db) as conn:
+        insert_records(
+            conn,
+            [
+                TermRecord(
+                    category=category,
+                    source_file=f"{category}.json",
+                    source_id=str(index),
+                    text_key=f"Ambiguous_{index}",
+                    zh="多义测试词",
+                    en=english,
+                )
+                for index, (category, english) in enumerate(rows)
+            ],
+        )
+        conn.commit()
+
+    matches = lookup_terms(build_term_service(sample_db), "多义测试词")
+
+    assert [
+        (match.category, match.en, match.score, match.reason) for match in matches
+    ] == [
+        ("core_term", "Shared Official", 100.0, "exact"),
+        ("resonator", "Shared Official", 100.0, "exact"),
+        ("weapon", "Weapon Official", 100.0, "exact"),
+        ("echo", "Echo Official", 100.0, "exact"),
+        ("skill", "Skill Official", 100.0, "exact"),
+    ]
 
 
 def test_service_metadata_exposes_no_paths_or_secrets(sample_db):

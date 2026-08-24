@@ -410,6 +410,12 @@ those come back as separate matches **inside one category** — at the 3.6 pin,
 together, and do not treat a second match as a duplicate of the first: on an
 ambiguous term it is the other official answer.
 
+When there is no exact candidate, the same endpoint returns the dictionary
+service's backend-ranked fuzzy candidates (up to five) with their scores and
+reasons. For example, pinyin `jinxi` can return `今汐 -> Jinhsi` with reason
+`pinyin`. Clients must preserve the returned order and must not independently
+rescore or deduplicate the list.
+
 A sentence, which reaches the model only after the known terms in it have been
 locked:
 

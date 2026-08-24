@@ -54,7 +54,7 @@ from wuwaterm.application import (
     build_term_service,
     build_translator,
     llm_configured,
-    lookup_exact_terms,
+    lookup_terms,
     probe_database,
     service_metadata,
     translate_request_async,
@@ -1175,14 +1175,14 @@ def _register_routes(app: FastAPI) -> None:
         device: Annotated[Device, Depends(require_scope(SCOPE_META))],
         q: str = Query(description="Term to look up."),
     ) -> TermsResponseBody:
-        """Exact dictionary candidates for a query. Official strings only."""
+        """Backend-ranked exact or fuzzy dictionary candidates for a query."""
         query = q.strip()
         if not query:
             raise ApiError(ERROR_INVALID_REQUEST, "query parameter q is required")
         if len(query) > TERM_QUERY_MAX_LENGTH:
             raise ApiError(ERROR_INVALID_REQUEST, "query parameter q is too long")
         matches = await asyncio.to_thread(
-            lookup_exact_terms, request.app.state.term_service, query
+            lookup_terms, request.app.state.term_service, query
         )
         return TermsResponseBody(
             query=query,

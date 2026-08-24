@@ -598,6 +598,14 @@ def lookup_exact_terms(
     return [_term_match(candidate) for candidate in result.candidates]
 
 
+def lookup_terms(
+    service: TermService, query: str, *, limit: int = 5
+) -> list[TermMatch]:
+    """Backend-ranked exact or fuzzy dictionary candidates for ``query``."""
+    result = service.lookup(query, limit=limit)
+    return [_term_match(candidate) for candidate in result.candidates]
+
+
 @dataclass(frozen=True)
 class ServiceMetadata:
     """Non-sensitive service facts safe to expose to any adapter surface.

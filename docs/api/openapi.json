@@ -283,7 +283,7 @@
   "info": {
     "description": "Read-only translation surface for the Wuthering Waves terminology service.\n\nThe same dictionary-first pipeline answers here and in the chat adapter:\nofficial dictionary hit first, then a trusted pinyin hit, then a term-locked\nmodel call. Responses are plain text; rich-text markup is never part of this\ncontract.\n\nAuthentication is a bearer device token issued by the operator. There is no\nregistration endpoint: tokens are created out of band and can be revoked.",
     "title": "wuwaterm API",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -460,7 +460,7 @@
     },
     "/v1/terms": {
       "get": {
-        "description": "Exact dictionary candidates for a query. Official strings only.",
+        "description": "Backend-ranked exact or fuzzy dictionary candidates for a query.",
         "operationId": "read_terms_v1_terms_get",
         "parameters": [
           {
