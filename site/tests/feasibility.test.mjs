@@ -51,6 +51,33 @@ function stalledResponse(status, headers = {}, { cancelStalls = false } = {}) {
   };
 }
 
+function unsettledReaderResponse(read) {
+  let cancelled = false;
+  const reader = {
+    read,
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+    releaseLock() {},
+  };
+  return {
+    response: {
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: { getReader: () => reader },
+    },
+    wasCancelled: () => cancelled,
+  };
+}
+
+async function settleWithin(promise, timeoutMs = 150) {
+  return Promise.race([
+    promise.then((value) => ({ settled: true, value })),
+    new Promise((resolve) => setTimeout(() => resolve({ settled: false }), timeoutMs)),
+  ]);
+}
+
 async function bodyOf(response) {
   return JSON.parse(await response.text());
 }
@@ -317,6 +344,18 @@ test('timeout also cancels a body that stalls after response headers', async () 
   await assertUnavailable(response, 504, 'upstream_timeout');
 });
 
+test('timeout does not await a reader cancellation promise that never settles', async () => {
+  const stalled = unsettledReaderResponse(() => new Promise(() => {}));
+  const outcome = await settleWithin(proxyMetaRequest({
+    environment: ENVIRONMENT,
+    timeoutMs: 5,
+    fetchImpl: async () => stalled.response,
+  }));
+  assert.equal(stalled.wasCancelled(), true);
+  assert.equal(outcome.settled, true);
+  await assertUnavailable(outcome.value, 504, 'upstream_timeout');
+});
+
 for (const label of ['dns failure', 'tls failure', 'connection reset']) {
   test(`${label} is a redacted fixed 502 and is not retried or logged`, async () => {
     const original = { log: console.log, warn: console.warn, error: console.error };
@@ -398,6 +437,8 @@ test('canary values in projected success fields are rejected rather than reflect
   for (const overrides of [
     { service_version: TOKEN },
     { api_version: BASE_URL },
+    { service_version: new URL(BASE_URL).origin },
+    { api_version: ALLOWED_HOST },
     { request_id: `req-${TOKEN}` },
   ]) {
     const response = await proxyMetaRequest({
@@ -405,6 +446,54 @@ test('canary values in projected success fields are rejected rather than reflect
       fetchImpl: async () => upstreamJson(200, metaBody(overrides)),
     });
     await assertUnavailable(response, 502, 'upstream_schema_mismatch');
+  }
+});
+
+test('printable quote and backslash token values are checked before JSON escaping', async () => {
+  const token = 'SYNTHETIC_DEVICE_"TOKEN\\VALUE';
+  const environment = { ...ENVIRONMENT, WUWATERM_SITE_DEVICE_TOKEN: token };
+  for (const overrides of [
+    { service_version: token },
+    { api_version: `v1-${token}` },
+    { request_id: `req-${token}` },
+  ]) {
+    const response = await proxyMetaRequest({
+      environment,
+      fetchImpl: async () => upstreamJson(200, metaBody(overrides)),
+    });
+    assert.equal(response.status, 502);
+    const text = await response.text();
+    assert.equal(text.includes(token), false);
+    assert.deepEqual(JSON.parse(text), {
+      status: 'unavailable',
+      reason: 'upstream_schema_mismatch',
+    });
+  }
+
+  const escapedLookalike = JSON.stringify(token).slice(1, -1);
+  assert.equal(escapedLookalike.includes(token), false);
+  const allowed = await proxyMetaRequest({
+    environment,
+    fetchImpl: async () => upstreamJson(200, metaBody({
+      service_version: escapedLookalike,
+    })),
+  });
+  assert.equal(allowed.status, 200);
+  assert.equal((await bodyOf(allowed)).service_version, escapedLookalike);
+});
+
+test('sensitive values colliding with numeric fields or fixed JSON keys are rejected', async () => {
+  for (const token of [String(metaBody().term_count), 'api_version']) {
+    const response = await proxyMetaRequest({
+      environment: { ...ENVIRONMENT, WUWATERM_SITE_DEVICE_TOKEN: token },
+      fetchImpl: async () => upstreamJson(200, metaBody()),
+    });
+    assert.equal(response.status, 502);
+    const text = await response.text();
+    assert.deepEqual(JSON.parse(text), {
+      status: 'unavailable',
+      reason: 'upstream_schema_mismatch',
+    });
   }
 });
 
@@ -441,6 +530,20 @@ test('streaming byte cap cancels an oversized response', async () => {
   });
   assert.equal(cancelled, true);
   await assertUnavailable(response, 502, 'upstream_response_too_large');
+});
+
+test('streaming byte cap does not await a reader cancellation promise that never settles', async () => {
+  const chunks = [new Uint8Array(40_000), new Uint8Array(30_000)];
+  const stalled = unsettledReaderResponse(async () => (
+    chunks.length ? { done: false, value: chunks.shift() } : { done: true }
+  ));
+  const outcome = await settleWithin(proxyMetaRequest({
+    environment: ENVIRONMENT,
+    fetchImpl: async () => stalled.response,
+  }));
+  assert.equal(stalled.wasCancelled(), true);
+  assert.equal(outcome.settled, true);
+  await assertUnavailable(outcome.value, 502, 'upstream_response_too_large');
 });
 
 test('concurrent browser requests remain bounded one-to-one with upstream requests', async () => {

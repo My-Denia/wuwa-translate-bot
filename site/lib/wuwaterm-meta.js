@@ -116,10 +116,16 @@ function configuredUpstream(environment) {
 }
 
 function containsSensitiveValue(value, ...sensitiveValues) {
-  const serialized = JSON.stringify(value);
-  return sensitiveValues.some(
-    (sensitive) => nonEmptyString(sensitive) && serialized.includes(sensitive),
+  const projectedStrings = Object.values(value).filter(
+    (field) => typeof field === 'string',
   );
+  const serialized = JSON.stringify(value);
+  return sensitiveValues.some((sensitive) => {
+    if (!nonEmptyString(sensitive)) return false;
+    const escapedSensitive = JSON.stringify(sensitive).slice(1, -1);
+    return projectedStrings.some((field) => field.includes(sensitive))
+      || serialized.includes(escapedSensitive);
+  });
 }
 
 function strictJsonContentType(value) {
@@ -140,14 +146,18 @@ async function readWithAbort(reader, signal) {
   }
 }
 
-function cancelUpstreamBody(upstream) {
-  if (!upstream.body) return;
+function cancelWithoutWaiting(cancelable) {
+  if (!cancelable || typeof cancelable.cancel !== 'function') return;
   try {
-    const cancellation = upstream.body.cancel();
+    const cancellation = cancelable.cancel();
     cancellation?.catch?.(() => {});
   } catch {
     // Cancellation errors are intentionally not exposed or logged.
   }
+}
+
+function cancelUpstreamBody(upstream) {
+  cancelWithoutWaiting(upstream.body);
 }
 
 function rejectUpstream(upstream, reason) {
@@ -175,17 +185,13 @@ async function readBoundedBody(upstream, signal) {
       if (done) break;
       total += value.byteLength;
       if (total > MAX_UPSTREAM_BYTES) {
-        await reader.cancel();
+        cancelWithoutWaiting(reader);
         return { ok: false, reason: 'upstream_response_too_large' };
       }
       chunks.push(value);
     }
   } catch {
-    try {
-      await reader.cancel();
-    } catch {
-      // Cancellation errors are intentionally not exposed or logged.
-    }
+    cancelWithoutWaiting(reader);
     return {
       ok: false,
       reason: signal.aborted ? 'upstream_timeout' : 'upstream_network_error',
@@ -278,6 +284,8 @@ export async function proxyMetaRequest({
         clientBody,
         configured.token,
         configured.baseValue,
+        configured.metaUrl.origin,
+        configured.metaUrl.hostname,
         configured.metaUrl.toString(),
       )
     ) {
