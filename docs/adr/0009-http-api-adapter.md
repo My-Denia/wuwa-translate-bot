@@ -69,7 +69,7 @@ The surface is versioned under `/v1`:
 | Route | Scope | Answer |
 |---|---|---|
 | `POST /v1/translations` | `translate` | `kind` (`noop`/`exact`/`fuzzy`/`llm`), `text`, `direction`, `dictionary_miss`, `request_id` |
-| `GET /v1/terms?q=` | `meta` | Exact dictionary candidates, official strings only |
+| `GET /v1/terms?q=` | `meta` | Backend-ranked exact or fuzzy dictionary candidates with official strings, scores and reasons |
 | `GET /v1/meta` | `meta` | Service and data provenance: no paths, no secrets, no chat identifiers |
 | `GET /healthz` | none | Liveness |
 | `GET /readyz` | none | Readiness: the terminology database is readable right now |

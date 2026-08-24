@@ -5,6 +5,15 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### HTTP API
+
+- api: `/v1/terms` now exposes the existing backend-ranked exact-to-fuzzy
+  dictionary lookup instead of stopping after exact candidates. The backend
+  still owns the five-result limit, ordering, category-aware exact handling,
+  fuzzy scoring, reasons, and deduplication; API consumers only render the
+  returned list. This private server-package patch is version `0.4.1`; it does
+  not publish a new GitHub release or desktop client.
+
 ### Telegram Bot
 
 - bot: owner chat allowlisting is now `/grant` (the `/authorize` command is

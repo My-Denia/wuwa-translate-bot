@@ -19,6 +19,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from wuwaterm.db import connect, insert_records
+from wuwaterm.models import TermRecord
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import (
     MIN_SECRET_LENGTH,
@@ -585,6 +587,82 @@ def test_terms_returns_official_strings(tmp_path, sample_db):
     assert miss.json()["matches"] == []
     assert empty.status_code == 400
     assert empty.json()["error"]["code"] == "invalid_request"
+
+
+def test_terms_returns_backend_ranked_pinyin_match(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(app, "GET", "/v1/terms", params={"q": "jinxi"}, headers=bearer(token))
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query"] == "jinxi"
+    assert response.json()["matches"] == [
+        {
+            "zh": "今汐",
+            "en": "Jinhsi",
+            "category": "resonator",
+            "score": 100.0,
+            "reason": "pinyin",
+        }
+    ]
+    assert response.headers["X-Request-Id"] == response.json()["request_id"]
+
+
+def test_terms_preserves_backend_category_order_and_limit(tmp_path, sample_db):
+    rows = [
+        ("core_term", "Shared Official"),
+        ("resonator", "Shared Official"),
+        ("weapon", "Weapon Official"),
+        ("echo", "Echo Official"),
+        ("skill", "Skill Official"),
+        ("location", "Location Official"),
+        ("item", "Item Official"),
+        ("speaker", "Speaker Official"),
+    ]
+    with connect(sample_db) as conn:
+        insert_records(
+            conn,
+            [
+                TermRecord(
+                    category=category,
+                    source_file=f"{category}.json",
+                    source_id=str(index),
+                    text_key=f"Ambiguous_{index}",
+                    zh="多义测试词",
+                    en=english,
+                )
+                for index, (category, english) in enumerate(rows)
+            ],
+        )
+        conn.commit()
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "GET",
+            "/v1/terms",
+            params={"q": "多义测试词"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200
+    assert [
+        (match["category"], match["en"], match["score"], match["reason"])
+        for match in response.json()["matches"]
+    ] == [
+        ("core_term", "Shared Official", 100.0, "exact"),
+        ("resonator", "Shared Official", 100.0, "exact"),
+        ("weapon", "Weapon Official", 100.0, "exact"),
+        ("echo", "Echo Official", 100.0, "exact"),
+        ("skill", "Skill Official", 100.0, "exact"),
+    ]
+    assert response.headers["X-Request-Id"] == response.json()["request_id"]
 
 
 def test_meta_exposes_provenance_without_paths_or_secrets(
