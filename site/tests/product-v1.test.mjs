@@ -512,6 +512,7 @@ test('Product v1 UI uses only same-origin APIs and does not sort, filter, or ded
   assert.match(source, /仅停止本页等待/u);
   assert.match(source, /controller\.signal\.aborted \|\| translationController\.current !== controller/u);
   assert.match(source, /dictionary_miss/u);
+  assert.equal(source.includes('dictionary hit'), false);
   assert.match(source, /转到整句翻译/u);
   assert.match(source, /重试状态/u);
   const transfer = source.slice(

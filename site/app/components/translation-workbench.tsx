@@ -314,7 +314,7 @@ function TranslationView({ state, copied, onCopy }: { state: ResultState<Transla
   if (state.kind === 'error') return <FailureView failure={state.error} />;
   return (
     <div className="translation-result" aria-live="polite">
-      <div className="result-meta"><span>kind={state.data.kind}</span><span>目标：{state.data.direction === 'en' ? '英文' : '中文'}</span><span>{state.data.dictionary_miss ? 'dictionary miss' : 'dictionary hit'}</span></div>
+      <div className="result-meta"><span>kind={state.data.kind}</span><span>目标：{state.data.direction === 'en' ? '英文' : '中文'}</span>{state.data.dictionary_miss && <span>dictionary miss</span>}</div>
       {state.data.dictionary_miss && <p className="guidance">未命中官方术语；此结果来自服务端模型翻译。</p>}
       <p>{state.data.text}</p>
       <div className="result-actions"><button className="secondary-button" type="button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button></div>
