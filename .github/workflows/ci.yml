@@ -62,7 +62,7 @@ jobs:
       - run: npm ci
       - run: npm audit --json
       - run: npm audit --omit=dev --json
-      - run: npm run test:feasibility
+      - run: npm test
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build

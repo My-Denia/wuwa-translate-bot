@@ -9,14 +9,19 @@ const envNames = [
   'WUWATERM_API_ALLOWED_HOST',
   'WUWATERM_SITE_DEVICE_TOKEN',
 ];
-const canaries = ['SYNTHETIC_DEVICE_SENTINEL_74A1C9', 'not-a-real-service.invalid'];
-const clientSources = [
-  'app/components/meta-panel.tsx',
-  'app/page.tsx',
-  'app/layout.tsx',
-  'app/robots.ts',
-  'app/globals.css',
+const canaries = [
+  'SYNTHETIC_DEVICE_SENTINEL_74A1C9',
+  'SYNTHETIC_PRODUCT_TOKEN_61E8',
+  'not-a-real-service.invalid',
+  'api.wuwaterm-test.net',
+  '/wuwaterm-api/',
+  '/private',
 ];
+const sourceExtensions = new Set(['.css', '.ts', '.tsx']);
+const clientSources = [...walk(join(root, 'app'))]
+  .filter((path) => sourceExtensions.has(extname(path)))
+  .filter((path) => !relative(root, path).split(sep).includes('api'))
+  .map((path) => relative(root, path));
 const forbiddenClientPatterns = [
   /localStorage/u,
   /sessionStorage/u,
@@ -25,6 +30,10 @@ const forbiddenClientPatterns = [
   /\bcaches\s*\./u,
   /\bgtag\s*\(/u,
   /\banalytics\b/iu,
+  /\bXMLHttpRequest\b/u,
+  /\bWebSocket\b/u,
+  /\bEventSource\b/u,
+  /\bnavigator\.sendBeacon\b/u,
 ];
 
 for (const source of clientSources) {
@@ -34,9 +43,14 @@ for (const source of clientSources) {
   assert.equal(/https?:\/\//u.test(text), false, `${source} contains an absolute network target`);
 }
 
-const clientComponent = readFileSync(join(root, 'app/components/meta-panel.tsx'), 'utf8');
-assert.equal((clientComponent.match(/fetch\s*\(/gu) ?? []).length, 1, 'client must contain one fetch call');
-assert.equal(clientComponent.includes("fetch('/api/meta'"), true, 'client fetch must be same-origin /api/meta');
+const clientComponent = readFileSync(join(root, 'app/components/translation-workbench.tsx'), 'utf8');
+assert.equal((clientComponent.match(/fetch\s*\(/gu) ?? []).length, 3, 'client must contain exactly three fetch calls');
+assert.equal(clientComponent.includes("fetch('/api/meta'"), true, 'meta fetch must be same-origin');
+assert.equal(clientComponent.includes('fetch(`/api/terms?q='), true, 'terms fetch must be same-origin');
+assert.equal(clientComponent.includes("fetch('/api/translations'"), true, 'translation fetch must be same-origin');
+for (const forbidden of ['Authorization', 'Bearer ', '/wuwaterm-api/', 'WUWATERM_']) {
+  assert.equal(clientComponent.includes(forbidden), false, `client contains ${forbidden}`);
+}
 
 const hostingText = readFileSync(join(root, '.openai/hosting.json'), 'utf8');
 for (const name of envNames) assert.equal(hostingText.includes(name), false, `hosting.json contains ${name}`);
@@ -59,7 +73,7 @@ for (const emittedRoot of emittedRoots) {
     if (!scanExtensions.has(extname(file))) continue;
     scannedFiles += 1;
     const text = readFileSync(file, 'utf8');
-    for (const needle of [...envNames, ...canaries]) {
+    for (const needle of [...envNames, ...canaries, 'Authorization', 'Bearer ']) {
       assert.equal(text.includes(needle), false, `${relative(root, file)} exposes ${needle}`);
     }
   }
