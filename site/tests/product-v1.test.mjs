@@ -377,6 +377,29 @@ test('translation timeout covers response-header stalls and returns no upstream 
   });
 });
 
+test('translation error-body timeout stays armed after response headers', async () => {
+  let cancelled = false;
+  const result = await Promise.race([
+    proxyTranslationRequest({
+      environment: ENVIRONMENT,
+      input: { text: 'test' },
+      timeoutMs: 5,
+      fetchImpl: async () => new Response(new ReadableStream({
+        pull() { return new Promise(() => {}); },
+        cancel() { cancelled = true; },
+      }), { status: 503, headers: { 'content-type': 'application/json' } }),
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('did-not-settle'), 100)),
+  ]);
+  assert.notEqual(result, 'did-not-settle');
+  assert.equal(cancelled, true);
+  assert.equal(result.status, 504);
+  assert.deepEqual(await result.json(), {
+    status: 'unavailable',
+    reason: 'upstream_timeout',
+  });
+});
+
 test('chunked inbound translation bodies are capped while streaming', async () => {
   let cancelled = false;
   const request = new Request('https://site.invalid/api/translations', {
@@ -487,4 +510,16 @@ test('Product v1 UI uses only same-origin APIs and does not sort, filter, or ded
   }
   assert.equal(source.includes('AbortController'), true);
   assert.match(source, /仅停止本页等待/u);
+  assert.match(source, /controller\.signal\.aborted \|\| translationController\.current !== controller/u);
+  assert.match(source, /dictionary_miss/u);
+  assert.match(source, /转到整句翻译/u);
+  assert.match(source, /重试状态/u);
+  const transfer = source.slice(
+    source.indexOf('function moveQueryToTranslation()'),
+    source.indexOf('return (', source.indexOf('function moveQueryToTranslation()')),
+  );
+  assert.ok(transfer.indexOf('translationController.current?.abort()') >= 0);
+  assert.ok(transfer.indexOf('translationController.current = null') >= 0);
+  assert.ok(transfer.indexOf('translationController.current?.abort()') < transfer.indexOf('setSource(query)'));
+  assert.ok(transfer.indexOf('translationController.current = null') < transfer.indexOf('setSource(query)'));
 });

@@ -101,6 +101,7 @@ async function responsePayload(response: Response): Promise<unknown> {
 
 export function TranslationWorkbench() {
   const [meta, setMeta] = useState<ResultState<Meta>>({ kind: 'loading' });
+  const [metaAttempt, setMetaAttempt] = useState(0);
   const [query, setQuery] = useState('');
   const [terms, setTerms] = useState<ResultState<TermsResult>>({ kind: 'idle' });
   const [source, setSource] = useState('');
@@ -125,7 +126,12 @@ export function TranslationWorkbench() {
         if (!controller.signal.aborted) setMeta({ kind: 'error', error: FALLBACK_FAILURE });
       });
     return () => controller.abort();
-  }, []);
+  }, [metaAttempt]);
+
+  function retryMeta() {
+    setMeta({ kind: 'loading' });
+    setMetaAttempt((value) => value + 1);
+  }
 
   async function lookup(event: FormEvent) {
     event.preventDefault();
@@ -162,13 +168,16 @@ export function TranslationWorkbench() {
         signal: controller.signal,
       });
       const payload = await responsePayload(response);
+      if (controller.signal.aborted || translationController.current !== controller) return;
       if (response.ok && isTranslationResult(payload)) {
         setTranslation({ kind: 'success', data: payload });
       } else {
         setTranslation({ kind: 'error', error: isFailure(payload) ? payload : FALLBACK_FAILURE });
       }
     } catch {
-      if (!controller.signal.aborted) setTranslation({ kind: 'error', error: FALLBACK_FAILURE });
+      if (!controller.signal.aborted && translationController.current === controller) {
+        setTranslation({ kind: 'error', error: FALLBACK_FAILURE });
+      }
     } finally {
       if (translationController.current === controller) translationController.current = null;
     }
@@ -191,7 +200,10 @@ export function TranslationWorkbench() {
   }
 
   function moveQueryToTranslation() {
+    translationController.current?.abort();
+    translationController.current = null;
     setSource(query);
+    setTranslation({ kind: 'idle' });
     translationInput.current?.focus();
   }
 
@@ -207,7 +219,7 @@ export function TranslationWorkbench() {
       </header>
 
       <section className="status-strip" aria-live="polite">
-        <StatusContent state={meta} />
+        <StatusContent state={meta} onRetry={retryMeta} />
       </section>
 
       <div className="workspace-grid">
@@ -219,7 +231,10 @@ export function TranslationWorkbench() {
           <form onSubmit={lookup} className="lookup-form">
             <label htmlFor="term-query">输入中文或英文术语</label>
             <div className="input-row">
-              <input id="term-query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：今汐 / Suisui" autoComplete="off" />
+              <input id="term-query" value={query} onChange={(event) => {
+                setQuery(event.target.value);
+                if (terms.kind !== 'loading') setTerms({ kind: 'idle' });
+              }} placeholder="例如：今汐 / Suisui" autoComplete="off" disabled={terms.kind === 'loading'} />
               <button type="submit" disabled={!query.trim() || terms.kind === 'loading'}>{terms.kind === 'loading' ? '查询中…' : '查询'}</button>
             </div>
           </form>
@@ -230,7 +245,7 @@ export function TranslationWorkbench() {
         <section className="workspace-card translation-card" aria-labelledby="translation-title">
           <div className="card-heading">
             <div><p className="section-kicker">SENTENCE TRANSLATION</p><h2 id="translation-title">整句翻译</h2></div>
-            <select aria-label="翻译方向" value={target} onChange={(event) => setTarget(event.target.value as 'auto' | 'en' | 'zh')}>
+            <select aria-label="翻译方向" value={target} disabled={translation.kind === 'loading'} onChange={(event) => setTarget(event.target.value as 'auto' | 'en' | 'zh')}>
               <option value="auto">自动方向</option>
               <option value="en">中译英</option>
               <option value="zh">英译中</option>
@@ -238,7 +253,10 @@ export function TranslationWorkbench() {
           </div>
           <form onSubmit={translate}>
             <label htmlFor="translation-source">待翻译文本</label>
-            <textarea ref={translationInput} id="translation-source" value={source} onChange={(event) => setSource(event.target.value)} placeholder="输入完整句子…" rows={7} />
+            <textarea ref={translationInput} id="translation-source" value={source} disabled={translation.kind === 'loading'} onChange={(event) => {
+              setSource(event.target.value);
+              setTranslation({ kind: 'idle' });
+            }} placeholder="输入完整句子…" rows={7} />
             <div className="actions">
               <button type="submit" disabled={!source.trim() || translation.kind === 'loading'}>{translation.kind === 'loading' ? '翻译中…' : '翻译'}</button>
               {translation.kind === 'loading' && <button className="secondary-button" type="button" onClick={cancelTranslation}>取消等待</button>}
@@ -251,9 +269,9 @@ export function TranslationWorkbench() {
   );
 }
 
-function StatusContent({ state }: { state: ResultState<Meta> }) {
+function StatusContent({ state, onRetry }: { state: ResultState<Meta>; onRetry: () => void }) {
   if (state.kind === 'loading') return <p>正在读取服务状态…</p>;
-  if (state.kind === 'error') return <FailureView failure={state.error} />;
+  if (state.kind === 'error') return <FailureView failure={state.error} action={<button type="button" className="text-button" onClick={onRetry}>重试状态</button>} />;
   if (state.kind !== 'success') return null;
   const data = state.data;
   return (
@@ -272,7 +290,7 @@ function TermsView({ state, onTranslate }: { state: ResultState<TermsResult>; on
   if (state.kind === 'loading') return <div className="empty-state" aria-live="polite">正在查询官方术语…</div>;
   if (state.kind === 'error') return <FailureView failure={state.error} action={<button type="button" className="text-button" onClick={onTranslate}>转到整句翻译</button>} />;
   if (state.kind !== 'success') return null;
-  if (state.data.matches.length === 0) return <div className="empty-state">未找到术语匹配。可转到整句翻译继续处理。</div>;
+  if (state.data.matches.length === 0) return <div className="empty-state">未找到术语匹配。<button type="button" className="text-button" onClick={onTranslate}>转到整句翻译</button></div>;
   return (
     <div className="terms-results" aria-live="polite">
       <p className="result-summary">服务返回 {state.data.matches.length} 条匹配</p>
@@ -296,7 +314,8 @@ function TranslationView({ state, copied, onCopy }: { state: ResultState<Transla
   if (state.kind === 'error') return <FailureView failure={state.error} />;
   return (
     <div className="translation-result" aria-live="polite">
-      <div className="result-meta"><span>kind={state.data.kind}</span><span>目标：{state.data.direction === 'en' ? '英文' : '中文'}</span></div>
+      <div className="result-meta"><span>kind={state.data.kind}</span><span>目标：{state.data.direction === 'en' ? '英文' : '中文'}</span><span>{state.data.dictionary_miss ? 'dictionary miss' : 'dictionary hit'}</span></div>
+      {state.data.dictionary_miss && <p className="guidance">未命中官方术语；此结果来自服务端模型翻译。</p>}
       <p>{state.data.text}</p>
       <div className="result-actions"><button className="secondary-button" type="button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button></div>
       <RequestId value={state.data.request_id} />

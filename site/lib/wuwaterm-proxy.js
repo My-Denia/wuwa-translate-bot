@@ -399,7 +399,7 @@ async function proxyRequest({
       if (!strictJsonContentType(contentType)) {
         return rejectUpstream(upstream, 'upstream_invalid_content_type');
       }
-      return projectApiError(upstream, controller, configured, upstreamUrl);
+      return await projectApiError(upstream, controller, configured, upstreamUrl);
     }
     if (upstream.status === 401) return rejectUpstream(upstream, 'upstream_unauthorized');
     if (upstream.status === 403) return rejectUpstream(upstream, 'upstream_forbidden');
