@@ -523,4 +523,8 @@ test('Product v1 UI uses only same-origin APIs and does not sort, filter, or ded
   assert.ok(transfer.indexOf('translationController.current = null') >= 0);
   assert.ok(transfer.indexOf('translationController.current?.abort()') < transfer.indexOf('setSource(query)'));
   assert.ok(transfer.indexOf('translationController.current = null') < transfer.indexOf('setSource(query)'));
+  const proxySource = readFileSync(fileURLToPath(new URL('../lib/wuwaterm-proxy.js', import.meta.url)), 'utf8');
+  assert.match(proxySource, /timeoutMs = 100_000/u);
+  const pageSource = readFileSync(fileURLToPath(new URL('../app/page.tsx', import.meta.url)), 'utf8');
+  assert.match(pageSource, /id="top"/u);
 });

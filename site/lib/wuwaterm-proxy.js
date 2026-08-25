@@ -532,7 +532,7 @@ export async function proxyTranslationRequest({
   environment,
   input,
   fetchImpl = globalThis.fetch,
-  timeoutMs = 65_000,
+  timeoutMs = 100_000,
 } = {}) {
   if (!validTranslationInput(input)) return errorResponse('site_invalid_request');
   return proxyRequest({

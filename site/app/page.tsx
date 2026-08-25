@@ -2,7 +2,7 @@ import { TranslationWorkbench } from './components/translation-workbench';
 
 export default function Home() {
   return (
-    <main className="site-main">
+    <main id="top" className="site-main">
       <div className="ambient ambient-one" aria-hidden="true" />
       <div className="ambient ambient-two" aria-hidden="true" />
       <nav className="topbar" aria-label="站点导航">
