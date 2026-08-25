@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { proxyMetaRequest } from '../lib/wuwaterm-meta.js';
+import { proxyMetaRequest } from '../lib/wuwaterm-proxy.js';
 
 const TOKEN = 'SYNTHETIC_DEVICE_SENTINEL_74A1C9';
 const ALLOWED_HOST = 'meta.wuwaterm-test.net';
@@ -132,7 +132,11 @@ test('200 uses the fixed metadata path and strict server-owned request', async (
   assert.deepEqual(await bodyOf(response), {
     api_version: 'v1',
     service_version: '0.4.0',
+    schema_version: '3.6.0',
+    source_profile: 'official',
+    source_commit: 'abc123',
     term_count: 12_345,
+    llm_configured: true,
     request_id: 'req-test-001',
   });
 });
@@ -170,6 +174,8 @@ test('missing or unsafe runtime settings fail closed without fetching', async ()
     { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}/wuwaterm-api//` },
     { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `${BASE_URL}?leak=1` },
     { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}:8443/wuwaterm-api/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}:443/wuwaterm-api/` },
+    { ...ENVIRONMENT, WUWATERM_API_BASE_URL: `https://${ALLOWED_HOST}\\wuwaterm-api\\` },
     {
       ...ENVIRONMENT,
       WUWATERM_API_BASE_URL: 'https://127.0.0.1/wuwaterm-api/',
