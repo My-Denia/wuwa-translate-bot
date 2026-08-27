@@ -49,6 +49,12 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Documentation
 
+- docs: add a read-only repository inventory at
+  [docs/repo-audit.md](docs/repo-audit.md) for current `main` (`291d82d`,
+  after the Sites product v1 squash). It maps the five surfaces (Telegram,
+  `/v1`, the in-process owner web layer, the Windows client, and `site/`),
+  the trust boundaries, the CI gates, and the documentation gaps around
+  Sites. No runtime behaviour changes.
 - docs: contributing gains a behaviour-over-wiring test rule (#66), and the
   self-hosting guide gets the four accuracy fixes the v0.4.0 clean-room run
   found (#90) — a standard-library fallback for the online credential-store
