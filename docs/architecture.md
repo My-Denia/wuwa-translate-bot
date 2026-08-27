@@ -1,9 +1,10 @@
 # Architecture
 
 Maintainer entry for the **current** system: a Telegram bot and an HTTP API
-serving one shared translation pipeline, plus a desktop client that consumes
-the API. Claims map to source, tests, deploy scripts, and Compose topology.
-This is not an aspirational redesign.
+serving one shared translation pipeline, plus a desktop client and a
+separately hosted Sites workbench that consume the API. Claims map to source,
+tests, deploy scripts, and Compose topology. This is not an aspirational
+redesign.
 
 Operational detail lives in sibling guides. Decision rationale lives in
 [ADRs](adr/). Automated import-direction and non-goal gates live under
@@ -46,7 +47,7 @@ Telegram users / groups / linked discussion groups        owner's PC and browser
       +----------------------------------------------------------------+
 ```
 
-Three presentation adapters, one application layer, one more consumer:
+Three presentation adapters, one application layer, two consumers:
 
 | Surface | What it is | Where |
 |---------|------------|-------|
@@ -54,6 +55,7 @@ Three presentation adapters, one application layer, one more consumer:
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
 | Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
 | Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
+| Sites workbench | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that proxies `/v1` with a server-side device token | `site/` |
 
 The desktop client is deliberately outside the service: it renders answers the
 API produced, and every rule the API applies is applied whether the caller is
@@ -86,6 +88,14 @@ exemption either: a browser request is still resolved to a device principal and
 still passes the same scope check, per-device rate limit and revocation
 re-checks the `/v1` routes apply.
 
+The Sites workbench is the other consumer, and it is the opposite of the
+in-process web layer in every way that matters for trust: it runs outside
+this Compose topology, holds `WUWATERM_SITE_DEVICE_TOKEN` on the Worker, and
+has **no visitor authentication in application code**. UI labels that call it
+private are not a gate. Details, environment, and the operator checklist are
+in [sites.md](sites.md). Do not add Sites setup to
+[web-presentation-layer.md](web-presentation-layer.md).
+
 ### Users and actors
 
 | Actor | Role | Evidence |
@@ -96,6 +106,7 @@ re-checks the `/v1` routes apply.
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
 | API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
 | Owner at a browser | The private web layer's two views (lookup, sentence translation), only when it is switched on and only through the proxy | `src/wuwaterm_api/web/app.py`, [ADR 0014](adr/0014-private-web-presentation-layer.md) |
+| Anyone who can reach the Sites URL | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | `site/`, [sites.md](sites.md) |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
 ### External systems
@@ -104,7 +115,8 @@ re-checks the `/v1` routes apply.
 |--------|-----------|---------|
 | Telegram Bot API | Outbound long polling + send/edit/delete | Chat presentation only |
 | OpenAI-compatible HTTP API | Outbound when LLM configured and dictionary miss | Sentence translation after term lock |
-| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | The only intended caller of the published `/v1` contract |
+| Owner's desktop client | **Inbound** over HTTPS through the operator's existing ingress | One intended caller of the published `/v1` contract |
+| Sites Worker | **Inbound** to `/v1` over HTTPS from the Hosted runtime, using `WUWATERM_SITE_DEVICE_TOKEN` | The other published-contract caller; the browser never talks to `/v1` |
 | Owner's browser | **Inbound** over HTTPS to `/wuwaterm-web` through the same ingress, when that layer is switched on | Renders the private web layer's pages; it never calls `/v1` |
 | GitHub game-data repos | Builder sparse checkout only | Source for `terms.db` (`data_source.py`, `constants.py` pins) |
 | Local Docker Compose host | Runtime (two serving containers) + optional builder jobs | Supported single-host topology |
@@ -145,6 +157,11 @@ re-checks the `/v1` routes apply.
    ([ADR 0003](adr/0003-long-polling-not-webhook.md), unchanged). Operator
    shell access to the host is an administration channel and is never the
    application's path to the service.
+8. **The Sites Worker is a half-trusted hop.** It holds a Bearer token that
+   can spend the API's per-device rate limit and model budget. The browser
+   is locked down by `site/scripts/verify-no-client-secret.mjs`; callers of
+   the Worker are not. URL secrecy or a platform ACL is an operational
+   choice this repository does not encode ([sites.md](sites.md)).
 
 ## Identity model: two separate controls
 
@@ -178,6 +195,11 @@ from the store in the right-hand column, so `wuwaterm-api device revoke` turns
 that surface off without touching the edge, the desktop client or any chat
 ([ADR 0014](adr/0014-private-web-presentation-layer.md)).
 
+The Sites workbench is a third *credential location*, not a third control in
+the table: `WUWATERM_SITE_DEVICE_TOKEN` lives in the Hosted runtime. Revoking
+that device stops the Worker the same way it stops any other `/v1` caller.
+It does not authenticate the person who opened the Sites URL.
+
 ## Cost topology: budgets are per process, and the worst case is their sum
 
 Each serving process has its OWN limiter objects, in its own memory. Nothing
@@ -208,6 +230,12 @@ machine; an observed breach of the model account's own limits or spend
 budget; or any topology with more than one instance of either surface. Until
 one of those is real, the honest description is the one above — two
 independent budgets whose worst case is their sum.
+
+Sites traffic lands in the API process as one device principal. It shares
+that device's sliding window and the API process's model budget with every
+other caller of the same token. A dedicated Sites device keeps the
+workbench from starving the desktop client; sharing one token does the
+opposite. The bot process is still a separate summand.
 
 The API's other limits are its own too, and none of them are model budgets:
 a per-request time budget, a request body cap enforced by streaming rather

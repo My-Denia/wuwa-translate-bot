@@ -7,6 +7,11 @@ already use, and it runs **inside the API process** rather than as a service of
 its own. The reasoning for that, and the cost it carries, are recorded in
 [ADR 0014](adr/0014-private-web-presentation-layer.md).
 
+**This is not `site/`.** The Hosted / Cloudflare workbench is a separately
+deployed same-origin proxy with no visitor gate in application code. Do not
+copy these `WUWATERM_API_WEB_*` settings or the Caddy `basic_auth` / edge
+marker recipe onto that product. That surface is [sites.md](sites.md).
+
 This document extends [deployment.md](deployment.md); the route below is a
 second block in the same site that already carries the API route, and every
 precondition listed there applies here unchanged.

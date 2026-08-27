@@ -12,7 +12,8 @@ release line receives them; earlier tags are historical and get nothing.
 
 | Version | Supported |
 |---|---|
-| 0.3.x — the latest published release | Yes |
+| 0.4.x — the latest published release | Yes |
+| 0.3.x | No |
 | 0.2.x | No |
 | 0.1.x | No |
 | `main` | Fixes land here first, but `main` is not a release |
@@ -48,7 +49,8 @@ none there. Everything about the finding waits for the private channel.
 
 A useful report says what an attacker gains, what access they need to start,
 which surface it goes through (Telegram bot, HTTP API, private web layer,
-desktop client, or the data build), and the smallest sequence that shows it.
+Sites workbench under `site/`, desktop client, or the data build), and the
+smallest sequence that shows it.
 
 ## What Not To Put In A Report
 
@@ -57,7 +59,8 @@ a screenshot, or an attachment:
 
 - Telegram bot tokens.
 - OpenAI-compatible API keys, or any other provider credential.
-- Device credentials — the bearer tokens the API issues, which begin `wtd1.`.
+- Device credentials — the bearer tokens the API issues, which begin `wtd1.`,
+  including `WUWATERM_SITE_DEVICE_TOKEN` on the Sites Worker.
 - Raw production logs. Excerpt the lines that matter and redact the rest.
 - Real Telegram chat ids, user ids, or channel ids.
 - The contents of a `.env` file.
@@ -73,8 +76,9 @@ for you — the redaction is yours to do.
 In scope:
 
 - The code in this repository: the Telegram bot, the HTTP API under `/v1`, the
-  owner-private web presentation layer, the desktop client under `client/`, the
-  data-build scripts, and the packaging and deployment material under `deploy/`.
+  owner-private web presentation layer, the Sites workbench under `site/`, the
+  desktop client under `client/`, the data-build scripts, and the packaging
+  and deployment material under `deploy/`.
 - The deployment guidance this project publishes, when following it as written
   leaves an instance exposed. A wrong instruction is a defect worth reporting.
 
@@ -133,6 +137,10 @@ it:
   it from the store afterwards.
 - The web presentation layer is off by default and is owner-private when on. It
   is not a public front end and turning it on does not make it one.
+- The Sites workbench under `site/` is a separate Hosted proxy. It is not the
+  in-process web layer. Application code does not authenticate the visitor;
+  the Worker holds a device token that can spend `/v1` quota. See
+  [Sites Workbench](docs/sites.md).
 - Nothing in this repository distributes generated databases, upstream game
   text, or runtime state. If your deployment is committing any of those, that is
   a local misconfiguration. `python scripts/validate.py` catches most of it —

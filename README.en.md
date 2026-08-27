@@ -7,7 +7,11 @@ exact official English and the reverse, with term-locked sentence translation
 in both directions. One protocol-neutral application layer serves two
 presentation adapters — the Telegram bot and a versioned HTTP API — plus an
 owner-private web presentation layer that runs inside the API process and is
-off by default, plus a Windows desktop client that consumes the API.
+off by default, plus a Windows desktop client that consumes the API. `site/`
+is a separately hosted owner workbench: the browser only calls same-origin
+`/api/*`, and a server-side proxy holds the device credential for the
+published `/v1` contract. It is not the in-process `/wuwaterm-web` layer and
+not a third translation pipeline ([Sites Workbench](docs/sites.md)).
 
 The service is dictionary-first. An exact database hit returns the official
 string from the local SQLite database byte-for-byte and does not call the LLM.
@@ -34,7 +38,9 @@ artifact; the upstream licence boundary is in
 - **Contributor.** Read [CONTRIBUTING.md](CONTRIBUTING.md); local validation has
   exactly one entry point, `python scripts/validate.py`.
 - **Owner production operations.** The transactional update flow for this
-  particular host is [Deployment](docs/deployment.md).
+  particular host is [Deployment](docs/deployment.md). The Sites workbench
+  environment, trust boundary and checks are in
+  [Sites Workbench](docs/sites.md).
 
 Which platforms and versions are covered is in
 [Support Matrix](docs/support-matrix.md).
@@ -67,13 +73,19 @@ Which platforms and versions are covered is in
   translation logic. It reaches the service over HTTPS
   ([ADR 0011](docs/adr/0011-pc-client-stack.md),
   [ADR 0012](docs/adr/0012-client-transport-selection.md)).
+- **Sites private workbench.** `site/` is a separate Hosted / Cloudflare
+  Worker product, not part of the API process. The browser does not hold a
+  device credential; visitor authentication is not in the application code.
+  Do not treat it as the same surface as the off-by-default `/wuwaterm-web`
+  layer ([Sites Workbench](docs/sites.md)).
 - **Published contract.** The API contract snapshot is committed at
   [`docs/api/openapi.json`](docs/api/openapi.json) and drift-gated by
   `scripts/check_api_contract.py`.
 
 Taken together: two presentation adapters, plus a third, owner-private
-presentation layer inside the API process that is off by default, plus one API
-consumer (the desktop client). The 0.3.0 release notes frame this step as an
+presentation layer inside the API process that is off by default, plus two API
+consumers (the desktop client, and the server-side proxy under `site/`). The
+0.3.0 release notes frame this step as an
 "API-first release: the Telegram-only bot becomes a multi-adapter system"
 ([Changelog](CHANGELOG.md)). Decision rationale lives in the
 [ADR index](docs/adr/README.md); the maintainer map of modules, request flows
@@ -247,6 +259,8 @@ details.
 - [Web Presentation Layer](docs/web-presentation-layer.md): the owner-private
   browser interface inside the API process — the switch, the route, and the
   boundaries it keeps. Off by default.
+- [Sites Workbench](docs/sites.md): the separately hosted same-origin proxy
+  workbench. It is not `/wuwaterm-web`.
 - [Validation](docs/validation.md): offline validation commands, live smoke
   caveats, and Windows reference commands.
 - [Release Checklist](docs/release-checklist.md): release metadata, validation,

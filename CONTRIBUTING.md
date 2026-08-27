@@ -13,13 +13,17 @@ adds one will be rejected no matter how well it is written.
 
 ## What This Repository Contains
 
-Four surfaces share one application layer:
+Five surfaces share one application layer (the last two are consumers, not
+adapters):
 
 - a Telegram bot,
 - an HTTP API under `/v1`,
 - an owner-private web presentation layer that lives inside the API process and
   is off by default,
-- a Windows desktop client under `client/`, which only calls the API.
+- a Windows desktop client under `client/`, which only calls the API,
+- an owner workbench under `site/`, a separately hosted same-origin proxy.
+  It is not the in-process `/wuwaterm-web` layer; see
+  [Sites Workbench](docs/sites.md).
 
 Terminology comes from a pinned upstream game-data repository and is built into
 a local SQLite dictionary. Wuthering Waves game data and terminology are
@@ -78,10 +82,10 @@ That is the whole local gate, and it is exactly what the server test matrix
 runs in CI — the same file, not a second list that drifts from this one. It is
 not the whole pull request, though: CI also runs the lock-drift check, the
 wheel and sdist build with its install audit, the Windows desktop-client build,
-and the Docker runtime and builder boundary, and none of those is in this
-command. If your change touches the lock file, the packaging metadata, the
-client, or anything under `deploy/`, a green run here is necessary and not
-sufficient — see the job list further down.
+the Docker runtime and builder boundary, and the `site` job under `site/`,
+and none of those is in this command. If your change touches the lock file,
+the packaging metadata, the client, `site/`, or anything under `deploy/`, a
+green run here is necessary and not sufficient — see the job list further down.
 
 ```bash
 python scripts/validate.py --list        # what it would run; runs nothing
@@ -107,10 +111,11 @@ candidate-database checks that belong to a data refresh rather than to every
 commit.
 
 Continuous integration runs `python scripts/validate.py` on Python 3.11, 3.12,
-3.13 and 3.14 on `ubuntu-latest`, plus four more jobs: a uv lock-drift check, a
+3.13 and 3.14 on `ubuntu-latest`, plus five more jobs: a uv lock-drift check, a
 wheel and sdist packaging audit with a clean-environment install smoke, a
-Windows desktop-client build, and a Docker runtime/builder boundary check. CI
-publishes nothing.
+Windows desktop-client build, a Docker runtime/builder boundary check, and
+the Site suite (`npm test`, typecheck, lint, build, and
+`verify:no-client-secret` in `site/`). CI publishes nothing.
 
 ## Working On The Desktop Client
 
