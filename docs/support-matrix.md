@@ -10,7 +10,7 @@ an intention.
 | --- | --- |
 | Declared range | `requires-python >=3.11`, no upper bound (`pyproject.toml`) |
 | Tested in CI | Python **3.11, 3.12, 3.13 and 3.14**, on `ubuntu-latest` — the `pytest (py3.x)` matrix, added in pull request #82. No version in that range is skipped. |
-| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build and the Docker boundary job run separately ([Validation](validation.md)) |
+| Entry point the matrix runs | `python scripts/validate.py` — the same command a contributor runs locally, so a green local run and a green matrix job are the same claim. It is not the whole pull request: the lock-drift check, the packaging build and audit, the Windows client build, the Docker boundary job and the `site` job run separately ([Validation](validation.md)) |
 | Container image | `python:3.11-slim` (`deploy/Dockerfile`). The image pins the low end of the range; the matrix covers the rest. |
 | Published images from v0.4.0 onward | `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder` (builder), tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. They save the local image build and nothing else — the generic path still needs a source checkout at the release tag. Verify that the pull succeeds before planning around it; if it is denied, build from source. |
 | Supported development platform | **Linux.** The suite is green there. |
@@ -70,6 +70,20 @@ request without a Windows runner.
 The owner-private web presentation layer is deliberately outside this contract:
 it is off by default and has no entry in the published API document
 ([Web Presentation Layer](web-presentation-layer.md)).
+
+The Sites workbench is also outside this contract: it is a separately hosted
+proxy with its own error envelope, checked by the CI `site` job, not by the
+desktop client ([Sites Workbench](sites.md)).
+
+## Sites workbench
+
+| | |
+| --- | --- |
+| Tree | `site/` — Next.js / vinext on Cloudflare Workers, package `sites-project` 0.1.0 |
+| Tested in CI | job `site` (`site feasibility security`) on `ubuntu-latest` with Node 24: `npm ci`, `npm test`, typecheck, lint, production build, `verify:no-client-secret` |
+| Not in `scripts/validate.py` | by design; the server matrix does not install Node |
+| Visitor authentication | **none in application code.** Crawler `noindex` is not an ACL |
+| Relation to `/wuwaterm-web` | different process, different auth, different docs |
 
 ## Telegram
 

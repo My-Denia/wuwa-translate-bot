@@ -47,8 +47,22 @@ does not distribute generated game data or generated SQLite databases.
   sweep of the whole code space. Every one of those properties is held open by
   a test that fails without it.
 
+### Sites
+
+- site: document the Hosted workbench that shipped in #96 (metadata
+  feasibility) and #98 (terminology and sentence translation). `site/` is a
+  same-origin proxy, not `/wuwaterm-web`, and application code does not
+  authenticate the visitor. Operator contract, environment, and CI live in
+  [docs/sites.md](docs/sites.md).
+
 ### Documentation
 
+- docs: name `site/` as a fifth surface in both READMEs, CONTRIBUTING, the
+  architecture map, the support matrix, and the validation job list; put it
+  in SECURITY.md scope; correct the supported-release table from 0.3.x to
+  0.4.x; and tell the in-process web guide that it is not the Sites
+  workbench. A read-only inventory of `main` at `291d82d` remains at
+  [docs/repo-audit.md](docs/repo-audit.md). No runtime behaviour changes.
 - docs: contributing gains a behaviour-over-wiring test rule (#66), and the
   self-hosting guide gets the four accuracy fixes the v0.4.0 clean-room run
   found (#90) — a standard-library fallback for the online credential-store
