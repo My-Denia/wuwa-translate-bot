@@ -58,7 +58,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Stable vocabulary shared across application and specialized channel paths
+# Stable application outcome vocabulary
 # --------------------------------------------------------------------------
 
 KIND_NOOP = "noop"
