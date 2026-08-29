@@ -1,8 +1,9 @@
 # Security Policy
 
 WuwaTerm is a personal, MIT-licensed hobby project maintained by one person.
-There is no hosted service: every running instance belongs to whoever deployed
-it. Security reports are read and handled best-effort — please read
+The project provides no public hosted service: every running instance belongs
+to whoever deployed it, including an owner's private Hosted Sites Worker.
+Security reports are read and handled best-effort — please read
 [What To Expect](#what-to-expect) before depending on a reply.
 
 ## Supported Versions

@@ -6,8 +6,9 @@ time to answer them, and some will not be answered at all. That is the honest
 version, and it is better to say it here than to leave you waiting on a promise
 that was never made.
 
-There is **no hosted service**. Every running instance is somebody's own
-deployment — including yours, if you are running one.
+There is **no project-provided public hosted service**. Every running instance
+is somebody's own deployment — including an owner-private Hosted Sites Worker,
+or yours if you are running one.
 
 There is **no private support channel**: no support mailbox, no chat, no direct
 messages. Everything happens in public issues, with one exception, which is

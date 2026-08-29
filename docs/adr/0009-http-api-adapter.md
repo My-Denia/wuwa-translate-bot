@@ -24,20 +24,28 @@ the property ADR 0001 protects:
 
 ## Decision
 
-### One application layer, two presentation adapters, one more consumer
+### One shared application pipeline, one specialized channel path, one more consumer
 
-`src/wuwaterm/application.py` holds the dictionary-first pipeline exactly
-once: prepare, direction resolution, exact dictionary hit, trusted fuzzy hit,
+`src/wuwaterm/application.py` holds the dictionary-first pipeline used by
+Telegram command handlers, the HTTP API and the API process's private web
+layer: prepare, direction resolution, exact dictionary hit, trusted fuzzy hit,
 length gate, chunked term-locked model call, and the stable error vocabulary.
 It is protocol-neutral: it imports no presentation module and no chat SDK.
 
-Both inbound adapters call it:
+Current callers and the intentional exception are:
 
-- `src/wuwaterm/bot.py` and `src/wuwaterm/channel.py` — the chat adapter.
-  It injects the two adapter-shaped steps the pipeline takes as parameters: a
-  markup-aware translator and a markup-aware text splitter.
+- `src/wuwaterm/bot.py` command handlers inject the two adapter-shaped steps
+  the pipeline takes as parameters: a markup-aware translator and a
+  markup-aware text splitter.
+- `src/wuwaterm/channel.py` linked-channel auto-translation intentionally owns
+  channel admission, freshness, edit, delivery and exact-first orchestration;
+  it shares protocol-neutral term and sentence primitives rather than calling
+  the application pipeline.
 - `src/wuwaterm_api/` — the HTTP adapter. It injects neither, so its answers
   are plain text by construction rather than by convention.
+
+This qualification records the existing implementation; it does not change
+linked-channel behavior or turn the channel path into another API contract.
 
 The desktop client (`client/`, [ADR 0011](0011-pc-client-stack.md)) is not a
 third adapter: it is a consumer of the HTTP adapter's published contract, and

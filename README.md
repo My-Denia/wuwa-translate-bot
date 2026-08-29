@@ -2,7 +2,7 @@
 
 # WuWa Term Bot
 
-自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。系统由一个 protocol-neutral 应用层同时服务两个 presentation adapter——Telegram bot 与版本化的 HTTP API——外加一个跑在 API 进程内、默认关闭的 owner 私有 web 表示层，以及一个消费该 API 的 Windows 桌面客户端。`site/` 是另一条、独立托管的 owner 工作台：浏览器只打同源 `/api/*`，由服务端代理持有设备凭据再访问已发布的 `/v1`；它不是进程内 `/wuwaterm-web`，也不是第三条翻译流水线（[Sites 工作台](docs/sites.md)）。
+自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的 owner 工作台：浏览器只打同源 `/api/*`，由服务端代理持有设备凭据再访问已发布的 `/v1`；它不是进程内 `/wuwaterm-web`，也不是第三条翻译流水线（[Sites 工作台](docs/sites.md)）。
 
 服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
 
@@ -20,8 +20,8 @@
 
 ## 架构概述
 
-- **应用层**：`src/wuwaterm/application.py` 唯一一次持有 dictionary-first 翻译流水线。它是 protocol-neutral 的——不导入任何表示层模块，也不导入聊天 SDK（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
-- **两个 presentation adapter**：Telegram bot（`src/wuwaterm/bot.py`、`channel.py`）负责命令、会话授权、聊天措辞与富文本标记；版本化的 HTTP API（`src/wuwaterm_api/`）负责版本化路由、设备认证、统一错误信封与纯文本响应。两个对外入口均由这同一条流水线提供服务（[架构文档](docs/architecture.md)）。
+- **应用层**：`src/wuwaterm/application.py` 持有命令、API 与进程内 web 共用的 dictionary-first 翻译流水线。它是 protocol-neutral 的——不导入任何表示层模块，也不导入聊天 SDK（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
+- **两个 presentation adapter**：Telegram bot（`src/wuwaterm/bot.py`、`channel.py`）负责命令、会话授权、聊天措辞与富文本标记；版本化的 HTTP API（`src/wuwaterm_api/`）负责版本化路由、设备认证、统一错误信封与纯文本响应。Telegram 命令走应用流水线；linked-channel 使用频道专用的 admission、freshness、edit 与 delivery 编排（[架构文档](docs/architecture.md)）。
 - **第三个表示层 owner 私有 web**：`src/wuwaterm_api/web/` 是一个供 owner 从手机使用的移动端网页界面，跑在 API 进程内部而不是独立服务。它由 `WUWATERM_API_WEB_ENABLED` 控制，**默认关闭**：开关关闭时既没有路由，也没有子应用，已发布的 API 契约里同样没有它的任何条目（[web 表示层](docs/web-presentation-layer.md)、[ADR 0014](docs/adr/0014-private-web-presentation-layer.md)）。
 - **device-principal 设备主体认证**：所有 `/v1` 路由都要求设备凭据。凭据可单独吊销，不涉及 Telegram bot 自身的访问控制；凭据存储中只保存加盐 scrypt 校验值（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
 - **Windows 桌面客户端**：`client/` 下的客户端有意不作为 adapter，而是 API 已发布契约的消费方，自身不含任何翻译逻辑。它经由 HTTPS 访问服务（[ADR 0011](docs/adr/0011-pc-client-stack.md)、[ADR 0012](docs/adr/0012-client-transport-selection.md)）。

@@ -197,7 +197,8 @@
       "TranslationRequestBody": {
         "properties": {
           "text": {
-            "description": "Source text to translate. Plain text only.",
+            "description": "Source text to translate. Plain text only. Clients should send at most 2,000 characters. The server applies its authoritative limit after text preparation, so a normalized superset may be accepted; callers must not depend on that permissiveness.",
+            "maxLength": 2000,
             "title": "Text",
             "type": "string"
           },
@@ -281,7 +282,7 @@
     }
   },
   "info": {
-    "description": "Read-only translation surface for the Wuthering Waves terminology service.\n\nThe same dictionary-first pipeline answers here and in the chat adapter:\nofficial dictionary hit first, then a trusted pinyin hit, then a term-locked\nmodel call. Responses are plain text; rich-text markup is never part of this\ncontract.\n\nAuthentication is a bearer device token issued by the operator. There is no\nregistration endpoint: tokens are created out of band and can be revoked.",
+    "description": "Read-only translation surface for the Wuthering Waves terminology service.\n\nThis API uses the application pipeline also used by Telegram command routes\nand the in-process private web layer: official dictionary hit first, then a\ntrusted pinyin hit, then a term-locked model call. Linked-channel\nauto-translation has specialized channel orchestration and is not part of this\nAPI contract. Responses are plain text; rich-text markup is never part of this\ncontract.\n\nAuthentication is a bearer device token issued by the operator. There is no\nregistration endpoint: tokens are created out of band and can be revoked.",
     "title": "wuwaterm API",
     "version": "0.4.1"
   },
@@ -464,12 +465,13 @@
         "operationId": "read_terms_v1_terms_get",
         "parameters": [
           {
-            "description": "Term to look up.",
+            "description": "Term to look up. Clients should send at most 200 characters. The server strips surrounding whitespace before its authoritative limit check; callers must not depend on the permissive normalized superset.",
             "in": "query",
             "name": "q",
             "required": true,
             "schema": {
-              "description": "Term to look up.",
+              "description": "Term to look up. Clients should send at most 200 characters. The server strips surrounding whitespace before its authoritative limit check; callers must not depend on the permissive normalized superset.",
+              "maxLength": 200,
               "title": "Q",
               "type": "string"
             }

@@ -19,8 +19,11 @@ from pathlib import Path
 import httpx
 import pytest
 
+from wuwaterm.application import ERROR_INPUT_TOO_LONG
 from wuwaterm.db import connect, insert_records
 from wuwaterm.models import TermRecord
+from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
+from wuwaterm_api import TERM_QUERY_MAX_LENGTH
 from wuwaterm_api.app import create_app
 from wuwaterm_api.auth import (
     MIN_SECRET_LENGTH,
@@ -31,7 +34,7 @@ from wuwaterm_api.auth import (
     DeviceStoreError,
     parse_token,
 )
-from wuwaterm_api.errors import STATUS_BY_CODE
+from wuwaterm_api.errors import MESSAGE_BY_CODE, STATUS_BY_CODE
 from wuwaterm_api.settings import ApiConfigError, ApiSettings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -337,7 +340,7 @@ def test_oversized_body_is_refused_before_parsing(tmp_path, sample_db):
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-def test_input_over_translation_limit_returns_input_too_long(
+def test_translation_limit_keeps_stable_input_too_long_error(
     monkeypatch, tmp_path, sample_db
 ):
     app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
@@ -349,13 +352,16 @@ def test_input_over_translation_limit_returns_input_too_long(
             app,
             "POST",
             "/v1/translations",
-            json={"text": "中" * 2100},
+            json={"text": "中" * (LLM_INPUT_CHAR_LIMIT + 1)},
             headers=bearer(token),
         )
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "input_too_long"
+    assert response.json()["error"] == {
+        "code": ERROR_INPUT_TOO_LONG,
+        "message": MESSAGE_BY_CODE[ERROR_INPUT_TOO_LONG],
+    }
 
 
 def test_request_timeout_returns_the_envelope(monkeypatch, tmp_path, sample_db):
@@ -611,6 +617,92 @@ def test_terms_returns_backend_ranked_pinyin_match(tmp_path, sample_db):
     assert response.headers["X-Request-Id"] == response.json()["request_id"]
 
 
+def test_term_query_limit_keeps_stable_invalid_request_error(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "GET",
+            "/v1/terms",
+            params={"q": "x" * (TERM_QUERY_MAX_LENGTH + 1)},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "invalid_request",
+        "message": "query parameter q is too long",
+    }
+
+
+def test_schema_only_limits_do_not_preempt_authentication(tmp_path, sample_db):
+    app, _store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+
+    translation = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": "中" * (LLM_INPUT_CHAR_LIMIT + 1)},
+        )
+    )
+    terms = run(
+        call(
+            app,
+            "GET",
+            "/v1/terms",
+            params={"q": "x" * (TERM_QUERY_MAX_LENGTH + 1)},
+        )
+    )
+
+    assert translation.status_code == 401
+    assert translation.json()["error"]["code"] == "unauthorized"
+    assert terms.status_code == 401
+    assert terms.json()["error"]["code"] == "unauthorized"
+
+
+def test_schema_only_limits_preserve_preparation_and_strip_order(
+    tmp_path, sample_db
+):
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=64 * 1024)
+    _, translate_token = issue_device(store, "owner translate")
+    _, meta_token = issue_device(store, "owner meta", [SCOPE_META])
+    source = "[spoiler]\n" * (LLM_INPUT_CHAR_LIMIT // len("[spoiler]\n") + 1)
+    source += "声骸"
+    padded_query = f"  {'x' * TERM_QUERY_MAX_LENGTH}  "
+
+    assert len(source) > LLM_INPUT_CHAR_LIMIT
+    assert len(padded_query) > TERM_QUERY_MAX_LENGTH
+    translation = run(
+        call(
+            app,
+            "POST",
+            "/v1/translations",
+            json={"text": source},
+            headers=bearer(translate_token),
+        )
+    )
+    terms = run(
+        call(
+            app,
+            "GET",
+            "/v1/terms",
+            params={"q": padded_query},
+            headers=bearer(meta_token),
+        )
+    )
+
+    assert translation.status_code == 200
+    assert translation.json()["kind"] == "exact"
+    assert translation.json()["text"] == "Echo"
+    assert terms.status_code == 200
+    assert terms.json()["query"] == "x" * TERM_QUERY_MAX_LENGTH
+    assert terms.json()["matches"] == []
+
+
 def test_terms_preserves_backend_category_order_and_limit(tmp_path, sample_db):
     rows = [
         ("core_term", "Shared Official"),
@@ -840,6 +932,24 @@ def test_openapi_snapshot_documents_the_versioned_surface():
     # scripts/check_non_goals.py does not read .json files, so the same
     # patterns are re-applied here through the contract gate.
     assert check_tokens(raw) == []
+
+
+def test_openapi_documents_conservative_client_limits():
+    document = json.loads(
+        (ROOT / "docs" / "api" / "openapi.json").read_text(encoding="utf-8")
+    )
+
+    text_schema = document["components"]["schemas"]["TranslationRequestBody"][
+        "properties"
+    ]["text"]
+    query_schema = next(
+        parameter["schema"]
+        for parameter in document["paths"]["/v1/terms"]["get"]["parameters"]
+        if parameter["name"] == "q"
+    )
+
+    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
 
 
 API_NUMERIC_SETTING_CASES = (
