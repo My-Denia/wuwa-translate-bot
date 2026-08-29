@@ -2,9 +2,10 @@
 
 A mobile-first browser interface for dictionary lookup and sentence
 translation, for the owner's own use from a phone. It is a third presentation
-layer over the same protocol-neutral pipeline the Telegram bot and the HTTP API
-already use, and it runs **inside the API process** rather than as a service of
-its own. The reasoning for that, and the cost it carries, are recorded in
+layer over the application pipeline used by Telegram command routes and the
+HTTP API; linked-channel posts retain their specialized orchestration. It runs
+**inside the API process** rather than as a service of its own. The reasoning
+for that, and the cost it carries, are recorded in
 [ADR 0014](adr/0014-private-web-presentation-layer.md).
 
 **This is not `site/`.** The Hosted / Cloudflare workbench is a separately

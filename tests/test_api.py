@@ -952,6 +952,133 @@ def test_openapi_documents_conservative_client_limits():
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
 
 
+def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
+    from wuwaterm_api.app import _apply_openapi_client_limits
+
+    document = {
+        "components": {
+            "schemas": {
+                "TranslationRequestBody": {
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "json_schema_extra": {
+                                "maxLength": 1,
+                                "x-preserved": "body",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "paths": {
+            "/v1/terms": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "schema": {
+                                "type": "string",
+                                "json_schema_extra": {
+                                    "maxLength": 2,
+                                    "x-preserved": "query",
+                                },
+                            },
+                        }
+                    ]
+                }
+            }
+        },
+    }
+
+    result = _apply_openapi_client_limits(document)
+
+    text_schema = result["components"]["schemas"]["TranslationRequestBody"][
+        "properties"
+    ]["text"]
+    query_schema = result["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"]
+    assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert text_schema["json_schema_extra"] == {"x-preserved": "body"}
+    assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
+    assert query_schema["json_schema_extra"] == {"x-preserved": "query"}
+
+
+def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
+    from wuwaterm_api.app import _apply_openapi_client_limits
+
+    document = {
+        "components": {
+            "schemas": {
+                "TranslationRequestBody": {
+                    "properties": {"text": {"type": "string", "maxLength": 7}}
+                }
+            }
+        },
+        "paths": {
+            "/v1/terms": {
+                "get": {
+                    "parameters": [
+                        {"name": "q", "schema": {"type": "string", "maxLength": 8}}
+                    ]
+                }
+            }
+        },
+    }
+
+    first = _apply_openapi_client_limits(document)
+    second = _apply_openapi_client_limits(first)
+
+    assert first is document
+    assert second is document
+    assert document["components"]["schemas"]["TranslationRequestBody"][
+        "properties"
+    ]["text"]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"][
+        "maxLength"
+    ] == TERM_QUERY_MAX_LENGTH
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {
+            "components": {
+                "schemas": {
+                    "TranslationRequestBody": {
+                        "properties": {"text": {"type": "string"}}
+                    }
+                }
+            },
+            "paths": {"/v1/terms": {"get": {"parameters": []}}},
+        },
+    ],
+)
+def test_openapi_limit_postprocessor_fails_on_missing_paths(document):
+    from wuwaterm_api.app import _apply_openapi_client_limits
+
+    with pytest.raises(KeyError):
+        _apply_openapi_client_limits(document)
+
+
+def test_openapi_schema_cache_uses_postprocessed_document(tmp_path, sample_db):
+    app, _store = build_client_app(tmp_path, sample_db)
+
+    first = app.openapi()
+    second = app.openapi()
+
+    assert first is second
+    assert first is app.openapi_schema
+    assert first["components"]["schemas"]["TranslationRequestBody"]["properties"][
+        "text"
+    ]["maxLength"] == LLM_INPUT_CHAR_LIMIT
+    assert next(
+        parameter["schema"]["maxLength"]
+        for parameter in first["paths"]["/v1/terms"]["get"]["parameters"]
+        if parameter["name"] == "q"
+    ) == TERM_QUERY_MAX_LENGTH
+
+
 API_NUMERIC_SETTING_CASES = (
     (
         "WUWATERM_API_PORT",

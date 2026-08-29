@@ -197,7 +197,6 @@ class TranslationRequestBody(BaseModel):
             "limit after text preparation, so a normalized superset may be "
             "accepted; callers must not depend on that permissiveness."
         ),
-        json_schema_extra={"maxLength": LLM_INPUT_CHAR_LIMIT},
     )
     to: Literal["en", "zh"] | None = Field(
         default=None,
@@ -896,6 +895,45 @@ registration endpoint: tokens are created out of band and can be revoked.
 """
 
 
+def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
+    """Publish schema-only limits after either Pydantic generation path."""
+    text_schema = document["components"]["schemas"]["TranslationRequestBody"][
+        "properties"
+    ]["text"]
+    parameters = document["paths"][f"/{API_VERSION}/terms"]["get"]["parameters"]
+    try:
+        query_schema = next(
+            parameter["schema"] for parameter in parameters if parameter["name"] == "q"
+        )
+    except StopIteration as exc:
+        raise KeyError("OpenAPI terms query parameter q is missing") from exc
+
+    for schema, limit in (
+        (text_schema, LLM_INPUT_CHAR_LIMIT),
+        (query_schema, TERM_QUERY_MAX_LENGTH),
+    ):
+        nested = schema.get("json_schema_extra")
+        if isinstance(nested, dict) and "maxLength" in nested:
+            remaining = {key: value for key, value in nested.items() if key != "maxLength"}
+            if remaining:
+                schema["json_schema_extra"] = remaining
+            else:
+                schema.pop("json_schema_extra")
+        schema["maxLength"] = limit
+    return document
+
+
+def _install_openapi_client_limits(app: FastAPI) -> None:
+    render_openapi = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            app.openapi_schema = _apply_openapi_client_limits(render_openapi())
+        return app.openapi_schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
+
+
 def create_app(
     settings=None,
     *,
@@ -1031,6 +1069,7 @@ def create_app(
         app.router.routes.insert(
             0, _PlainRoute(WEB_MOUNT_PATH, bare_mount_guard(app))
         )
+    _install_openapi_client_limits(app)
     return app
 
 
@@ -1191,7 +1230,6 @@ def _register_routes(app: FastAPI) -> None:
                 "authoritative limit check; callers must not depend on the "
                 "permissive normalized superset."
             ),
-            json_schema_extra={"maxLength": TERM_QUERY_MAX_LENGTH},
         ),
     ) -> TermsResponseBody:
         """Backend-ranked exact or fuzzy dictionary candidates for a query."""

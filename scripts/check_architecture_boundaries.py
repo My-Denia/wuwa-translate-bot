@@ -70,6 +70,8 @@ CURRENT_CONTRACT_FILES = (
     ROOT / "README.md",
     ROOT / "README.en.md",
     ROOT / "docs" / "architecture.md",
+    ROOT / "docs" / "web-presentation-layer.md",
+    ROOT / "docs" / "adr" / "0001-telegram-as-presentation-layer.md",
     ROOT / "docs" / "adr" / "0009-http-api-adapter.md",
     ROOT / "docs" / "api" / "openapi.json",
 )
