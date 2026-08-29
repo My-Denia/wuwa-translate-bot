@@ -4,11 +4,12 @@
 
 Self-hosted Wuthering Waves official localization service: Chinese terms to
 exact official English and the reverse, with term-locked sentence translation
-in both directions. One protocol-neutral application layer serves two
-presentation adapters — the Telegram bot and a versioned HTTP API — plus an
-owner-private web presentation layer that runs inside the API process and is
-off by default, plus a Windows desktop client that consumes the API. `site/`
-is a separately hosted owner workbench: the browser only calls same-origin
+in both directions. One protocol-neutral application pipeline serves Telegram
+command routes, a versioned HTTP API, and an owner-private web presentation
+layer that runs inside the API process and is off by default. Linked-channel
+posts keep channel-specific orchestration while sharing the same term and
+sentence primitives. A Windows desktop client consumes the API. `site/` is a
+separately hosted owner workbench: the browser only calls same-origin
 `/api/*`, and a server-side proxy holds the device credential for the
 published `/v1` contract. It is not the in-process `/wuwaterm-web` layer and
 not a third translation pipeline ([Sites Workbench](docs/sites.md)).
@@ -47,15 +48,17 @@ Which platforms and versions are covered is in
 
 ## Architecture Overview
 
-- **Application layer.** `src/wuwaterm/application.py` holds the
-  dictionary-first pipeline exactly once. It is protocol-neutral: it imports no
-  presentation module and no chat SDK
+- **Application layer.** `src/wuwaterm/application.py` holds the shared
+  dictionary-first pipeline for command, API, and in-process web translation.
+  It is protocol-neutral: it imports no presentation module and no chat SDK
   ([ADR 0009](docs/adr/0009-http-api-adapter.md)).
 - **Two presentation adapters.** The Telegram bot (`src/wuwaterm/bot.py`,
   `channel.py`) owns commands, chat authorization, chat wording and markup; the
   versioned HTTP API (`src/wuwaterm_api/`) owns versioned routes, device
-  authentication, one error envelope and plain-text responses. Both surfaces
-  are served by that one pipeline ([Architecture](docs/architecture.md)).
+  authentication, one error envelope and plain-text responses. Telegram
+  command routes use the application pipeline; linked-channel posts use their
+  dedicated admission, freshness, edit and delivery orchestration
+  ([Architecture](docs/architecture.md)).
 - **A third presentation layer: the owner-private web UI.**
   `src/wuwaterm_api/web/` is a mobile-first browser interface for the owner's
   own use from a phone, and it runs *inside* the API process rather than as a

@@ -1,10 +1,11 @@
 # Architecture
 
-Maintainer entry for the **current** system: a Telegram bot and an HTTP API
-serving one shared translation pipeline, plus a desktop client and a
-separately hosted Sites workbench that consume the API. Claims map to source,
-tests, deploy scripts, and Compose topology. This is not an aspirational
-redesign.
+Maintainer entry for the **current** system: Telegram command routes, an HTTP
+API and its in-process web layer use the shared application pipeline;
+linked-channel posts retain specialized channel orchestration. A desktop
+client and a separately hosted Sites workbench consume the API. Claims map to
+source, tests, deploy scripts, and Compose topology. This is not an
+aspirational redesign.
 
 Operational detail lives in sibling guides. Decision rationale lives in
 [ADRs](adr/). Automated import-direction and non-goal gates live under
@@ -21,7 +22,7 @@ Telegram users / groups / linked discussion groups        owner's PC and browser
 | wuwaterm-bot (Compose service)    |  | reverse proxy already serving   |
 |  presentation: bot.py, channel.py |  | the operator's existing sites   |
 +-----------------+-----------------+  +-----------------+---------------+
-                  |                                      | 127.0.0.1 (loopback)
+                  | command routes                       | 127.0.0.1 (loopback)
                   |                                      v
                   |                    +---------------------------------+
                   |                    | wuwaterm-api (Compose service)  |
@@ -32,7 +33,7 @@ Telegram users / groups / linked discussion groups        owner's PC and browser
                   v                                      v
       +----------------------------------------------------------------+
       |  application layer   src/wuwaterm/application.py               |
-      |  dictionary-first pipeline, protocol-neutral, exactly once     |
+      |  command/API/web dictionary-first pipeline, protocol-neutral   |
       +-----------------------------+----------------------------------+
                                     |
                   +-----------------+--------------------+
@@ -314,16 +315,16 @@ reach `lookup` or `sentence` directly could grow a second, divergent pipeline
 without anyone noticing, which is exactly what a second surface is most likely
 to do.
 
-The application layer holds the dictionary-first pipeline exactly once
-(prepare → direction → exact hit → trusted fuzzy hit → length gate → chunked,
-term-locked LLM call) and knows nothing about Telegram or HTTP. The two
-adapter-shaped steps are injected by the caller: a markup translator and a
-text splitter. The bot injects both (Telegram HTML, the UTF-16 aware
-splitter); the API injects neither, which is why its answers are plain text by
-construction. Adapters receive a `TranslationOutcome` (`kind`, `text`,
-direction, `dictionary_miss`, `error_code`) and own their own wording, so
-protocol-specific notices never leak downward — the API renders enumerated
-codes, the bot renders chat sentences, from the same outcome.
+The application layer holds the shared command/API/web pipeline (prepare →
+direction → exact hit → trusted fuzzy hit → length gate → chunked, term-locked
+LLM call) and knows nothing about Telegram or HTTP. Its adapter-shaped steps
+are injected by the caller: Telegram commands inject a markup translator and
+UTF-16-aware splitter; the API injects neither, which is why its answers are
+plain text by construction. Those callers receive a `TranslationOutcome` and
+own their wording. Linked-channel posts deliberately do not consume that
+outcome: `channel.py` owns channel admission, freshness, edits, delivery and
+its exact-first path while sharing protocol-neutral term and sentence
+primitives. This is a contract distinction, not a request to merge the flows.
 
 Observed edges (static imports among shipped modules):
 

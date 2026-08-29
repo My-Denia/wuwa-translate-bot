@@ -5,9 +5,9 @@ Intended layers (must stay aligned with docs/architecture.md):
 
   domain core:     lookup, normalize, models
   domain+LLM:      sentence  (may use telegram_html; must not import bot/channel)
-  application:     application  (protocol-neutral pipeline shared by every
-                   inbound adapter; must not import any presentation module,
-                   the Telegram SDK, or builder modules)
+  application:     application  (protocol-neutral command/API/web pipeline;
+                   must not import any presentation module, the Telegram SDK,
+                   or builder modules)
   shared policy:   translation_policy, runtime_keys, constants
   presentation:    bot, channel, telegram_html, telegram_text
   local state:     settings, channel_reply_index, channel_reply_schema,
@@ -63,11 +63,41 @@ API_ALLOWED_WUWATERM_MODULES = frozenset(
     {"application", "models", "translation_policy", "logging_utils"}
 )
 
+CURRENT_CONTRACT_FILES = (
+    ROOT / "src" / "wuwaterm" / "application.py",
+    ROOT / "src" / "wuwaterm_api" / "app.py",
+    ROOT / "scripts" / "check_architecture_boundaries.py",
+    ROOT / "README.md",
+    ROOT / "README.en.md",
+    ROOT / "docs" / "architecture.md",
+    ROOT / "docs" / "adr" / "0009-http-api-adapter.md",
+    ROOT / "docs" / "api" / "openapi.json",
+)
+
+# Build fragments from pieces so the guard can scan its own source without the
+# denylisted prose appearing verbatim in this declaration.
+STALE_CONTRACT_FRAGMENTS = tuple(
+    " ".join(parts).casefold()
+    for parts in (
+        ("every", "inbound", "adapter"),
+        ("are", "served", "by", "that", "one", "pipeline"),
+        ("here", "and", "in", "the", "chat", "adapter"),
+        ("shared", "by", "every", "inbound", "adapter"),
+        ("both", "inbound", "adapters", "call", "it"),
+        ("pipeline", "exactly", "once"),
+        ("one", "shared", "translation", "pipeline"),
+        ("shared", "by", "every", "adapter"),
+        ("唯一一次持有", "dictionary-first", "翻译流水线"),
+    )
+)
+
 DOMAIN_CORE = frozenset({"lookup", "normalize", "models"})
 DOMAIN_LLM = frozenset({"sentence"})
-# Protocol-neutral orchestration shared by every inbound adapter. It sits above
-# domain/LLM and below presentation: adapters import it, it imports none of
-# them.
+# Protocol-neutral orchestration used by command, API and in-process web
+# translation. Linked-channel auto-translation owns specialized channel
+# orchestration while sharing lower-level term and sentence primitives. This
+# module sits above domain/LLM and below presentation: callers import it; it
+# imports none of them.
 APPLICATION = frozenset({"application"})
 SHARED = frozenset({"translation_policy", "runtime_keys", "constants"})
 PRESENTATION = frozenset({"bot", "channel", "telegram_html", "telegram_text"})
@@ -406,10 +436,28 @@ def check_api_package() -> list[str]:
     return failures
 
 
+def check_current_contract_wording() -> list[str]:
+    """Reject stale universal-pipeline prose even when Markdown wraps it."""
+    failures: list[str] = []
+    for path in CURRENT_CONTRACT_FILES:
+        if not path.is_file():
+            failures.append(f"missing current contract file: {path.relative_to(ROOT)}")
+            continue
+        normalized = " ".join(path.read_text(encoding="utf-8").split()).casefold()
+        for fragment in STALE_CONTRACT_FRAGMENTS:
+            if fragment in normalized:
+                failures.append(
+                    f"{path.relative_to(ROOT).as_posix()}: stale universal-pipeline "
+                    f"claim contains {fragment!r}"
+                )
+    return failures
+
+
 def check() -> list[str]:
     modules, collisions = _discover_modules()
     failures: list[str] = list(collisions)
     failures.extend(check_api_package())
+    failures.extend(check_current_contract_wording())
 
     unclassified = sorted(set(modules) - ALL_CLASSIFIED)
     if unclassified:

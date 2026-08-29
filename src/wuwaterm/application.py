@@ -1,24 +1,29 @@
 """Protocol-neutral translation application layer.
 
-This module owns the dictionary-first translation pipeline exactly once so
-every inbound adapter (Telegram bot, HTTP API, future surfaces) shares one
-behavior:
+This module owns the shared dictionary-first pipeline used by Telegram command
+handlers, the HTTP API, and the API process's private web layer:
 
     prepare -> resolve direction -> exact dictionary hit -> trusted fuzzy hit
     -> input length gate -> long-text splitting -> term-locked LLM call
 
-Nothing here knows about Telegram, HTTP, chats, users or markup formats. The
-two adapter-specific steps are injected:
+Linked-channel auto-translation is intentionally different: ``channel.py``
+owns channel admission, freshness, edit and delivery orchestration and calls
+the protocol-neutral term and sentence primitives directly. It does not return
+a :class:`TranslationOutcome` from this pipeline.
+
+Nothing here knows about Telegram, HTTP, chats, users or markup formats. For
+callers that use this pipeline, the two adapter-specific steps are injected:
 
 * ``markup_translator`` — an adapter-supplied async callable that translates a
   markup payload (Telegram HTML today) while preserving its structure. The
-  Telegram adapter injects one; the HTTP API deliberately injects none and is
-  therefore plain-text only.
+  Telegram command adapter injects one; the HTTP API deliberately injects none
+  and is therefore plain-text only.
 * ``splitter`` — how oversized text is cut into LLM-sized chunks. The default
   splits on plain line boundaries; the Telegram adapter injects its UTF-16
   aware splitter so message limits keep their existing meaning.
 
-Adapters receive a :class:`TranslationOutcome` and decide how to render it.
+Pipeline callers receive a :class:`TranslationOutcome` and decide how to
+render it.
 User-facing wording that belongs to a protocol (bilingual Telegram notices,
 HTTP error envelopes) stays in the adapter; this layer returns a stable
 ``kind`` plus a stable ``error_code`` from :data:`TRANSLATION_ERROR_CODES`.
@@ -53,7 +58,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Stable vocabulary shared by every adapter
+# Stable application outcome vocabulary
 # --------------------------------------------------------------------------
 
 KIND_NOOP = "noop"

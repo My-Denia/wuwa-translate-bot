@@ -10,10 +10,12 @@ release. That boundary has not moved.
 
 ## Release Metadata
 
-- Prospective release version: `v0.4.0` — the version `pyproject.toml` declares
-  at this commit, which is what the workflow reads and prefixes with `v` to get
-  the tag. Set `NEXT_VERSION` to it explicitly before any release command below;
-  `v0.1.0` remains the historical 3.4 release recorded in `CHANGELOG.md`.
+- Prospective release version: derive `v<project.version>` from
+  `pyproject.toml` at the reviewed release commit; never copy the latest
+  published tag. The current unreleased server line is `0.4.1`. Set
+  `NEXT_VERSION` to the derived tag explicitly before any release command
+  below; `v0.4.0` is the latest historical release, not the current project
+  version.
 - Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
   independently of the server and carried in the release as
   `WuwaTerm-0.2.0-windows-x64.zip`

@@ -60,6 +60,7 @@ from wuwaterm.application import (
     translate_request_async,
 )
 from wuwaterm.logging_utils import redact_id
+from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 
 from . import API_VERSION, TERM_QUERY_MAX_LENGTH
 from .auth import SCOPE_META, SCOPE_TRANSLATE, TOKEN_SCHEME, Device, DeviceStore
@@ -189,7 +190,15 @@ def service_version() -> str:
 
 
 class TranslationRequestBody(BaseModel):
-    text: str = Field(description="Source text to translate. Plain text only.")
+    text: str = Field(
+        description=(
+            "Source text to translate. Plain text only. Clients should send "
+            "at most 2,000 characters. The server applies its authoritative "
+            "limit after text preparation, so a normalized superset may be "
+            "accepted; callers must not depend on that permissiveness."
+        ),
+        json_schema_extra={"maxLength": LLM_INPUT_CHAR_LIMIT},
+    )
     to: Literal["en", "zh"] | None = Field(
         default=None,
         description=(
@@ -875,9 +884,11 @@ def require_scope(scope: str):
 OPENAPI_DESCRIPTION = """
 Read-only translation surface for the Wuthering Waves terminology service.
 
-The same dictionary-first pipeline answers here and in the chat adapter:
-official dictionary hit first, then a trusted pinyin hit, then a term-locked
-model call. Responses are plain text; rich-text markup is never part of this
+This API uses the application pipeline also used by Telegram command routes
+and the in-process private web layer: official dictionary hit first, then a
+trusted pinyin hit, then a term-locked model call. Linked-channel
+auto-translation has specialized channel orchestration and is not part of this
+API contract. Responses are plain text; rich-text markup is never part of this
 contract.
 
 Authentication is a bearer device token issued by the operator. There is no
@@ -1173,7 +1184,15 @@ def _register_routes(app: FastAPI) -> None:
     async def read_terms(
         request: Request,
         device: Annotated[Device, Depends(require_scope(SCOPE_META))],
-        q: str = Query(description="Term to look up."),
+        q: str = Query(
+            description=(
+                "Term to look up. Clients should send at most 200 characters. "
+                "The server strips surrounding whitespace before its "
+                "authoritative limit check; callers must not depend on the "
+                "permissive normalized superset."
+            ),
+            json_schema_extra={"maxLength": TERM_QUERY_MAX_LENGTH},
+        ),
     ) -> TermsResponseBody:
         """Backend-ranked exact or fuzzy dictionary candidates for a query."""
         query = q.strip()

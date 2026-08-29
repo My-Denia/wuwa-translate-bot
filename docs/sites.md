@@ -68,10 +68,19 @@ wuwaterm-api on loopback behind the operator's reverse proxy
 ```
 
 Proxy hardening that is pinned by `site/tests/`: HTTPS only, exact host and
-`/wuwaterm-api/` mount, no redirect follow, 64 KiB body caps, strict JSON
-and field allowlists, and refusal to project the token, the base URL, or
-`Authorization` back to the browser. Meta and terms time out at 8 seconds;
-translations at 100 seconds.
+`/wuwaterm-api/` mount, no redirect follow, 65,536-byte streamed request and
+upstream-response caps, a 65,536-JavaScript-string-unit translation guard, a
+4,096-JavaScript-string-unit query guard, strict JSON and field allowlists,
+and refusal to project the token, the base URL, or `Authorization` back to the
+browser. Meta and terms time out at 8 seconds; translations at 100 seconds.
+
+Those Worker guards are resource and generic input ceilings, not an upstream
+acceptance promise. The API owns the domain checks after preparation/trim: its
+public client envelope is 2,000 prepared translation characters and 200
+trimmed query characters. The API request-body cap defaults to 32,768 bytes
+and is operator-configurable, so it may reject a body below the Worker's byte
+ceiling. The Site projects the API's stable
+`payload_too_large`, `input_too_long`, and `invalid_request` errors.
 
 Site success bodies are projected subsets of the published OpenAPI models.
 Site errors use `{ "status": "unavailable", "reason": "...", "request_id"? }`,
@@ -86,9 +95,10 @@ and proxy responses send `noindex`). That is not an access control.
    browser, out of `site/.openai/hosting.json`, and out of git.
 2. Pin `WUWATERM_API_ALLOWED_HOST` to the hostname the reverse proxy already
    serves for `/wuwaterm-api/`.
-3. Do not treat URL secrecy or a platform ACL as a substitute documented in
-   this repository. Nothing in `hosting.json` or the route handlers enforces
-   who may open the page.
+3. Visitor authorization is a separate Hosted-platform control. Set and
+   verify owner-only access in the platform control plane; do not treat URL
+   secrecy as access control. Nothing in `hosting.json` or the route handlers
+   enforces who may open the page.
 4. Revoking the device in `state-api/devices.db` turns the workbench's
    upstream calls into `401` without touching Telegram, the desktop client
    (if it uses another device), or `/wuwaterm-web`.
