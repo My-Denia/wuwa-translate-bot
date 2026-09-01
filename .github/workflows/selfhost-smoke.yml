@@ -62,7 +62,7 @@ jobs:
 
     steps:
       - name: Check out the source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Empty on a pull_request, where checkout uses the event's own ref.
           ref: ${{ inputs.ref }}
@@ -544,7 +544,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: selfhost-smoke-report
           path: ${{ runner.temp }}/selfhost-smoke-report.md

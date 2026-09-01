@@ -74,11 +74,11 @@ jobs:
       # the event already checked out. Every other job repeats this same
       # expression rather than checking out a resolved sha, because on a
       # pull_request the ref is a merge ref that checkout resolves itself.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -234,10 +234,10 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -U pip build twine
@@ -260,7 +260,7 @@ jobs:
           "$RUNNER_TEMP/venv-sdist/bin/python" -c "import wuwaterm_api"
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm" --help
           "$RUNNER_TEMP/venv-sdist/bin/wuwaterm-api" --help
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: python-package
           path: |
@@ -273,10 +273,10 @@ jobs:
     needs: preflight
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # build.ps1 refuses to fall back to a system interpreter, so the same
@@ -330,7 +330,7 @@ jobs:
             throw "the release zip is empty: $zip"
           }
           Write-Host "release zip: $($item.FullName) ($($item.Length) bytes)"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: client-zip
           path: client/dist/WuwaTerm-${{ needs.preflight.outputs.client_version }}-windows-x64.zip
@@ -354,10 +354,10 @@ jobs:
       runtime_tags: ${{ steps.build.outputs.runtime_tags }}
       builder_tags: ${{ steps.build.outputs.builder_tags }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build both image targets
         id: build
         env:
@@ -442,10 +442,10 @@ jobs:
       runtime_digest: ${{ steps.push.outputs.runtime_digest }}
       builder_digest: ${{ steps.push.outputs.builder_digest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: The tag must still be absent, checked here and not only in preflight
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
@@ -547,14 +547,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: python-package
           path: staging
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: client-zip
           path: staging
@@ -667,7 +667,7 @@ jobs:
             cat release-manifest.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: staging/
@@ -686,10 +686,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.target_commit }}
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: staging
