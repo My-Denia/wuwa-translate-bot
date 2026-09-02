@@ -401,6 +401,34 @@ surface then refuses the request as unavailable rather than pretending), and
 `error` can follow a provider call that was made, and charged, before it
 failed. What model spend actually is lives with the provider, not here.
 
+When a failed model outcome carries internal diagnostics, the HTTP adapter also
+writes a bounded warning tied to the same server-generated request ID:
+
+```text
+WARNING wuwaterm_api llm translation diagnostic request_id=<server-id> reason=invalid_response detail=missing_placeholder expected_count=1 actual_count=0
+```
+
+Join this line to the completion record by `request_id`. `detail` distinguishes
+`empty_output`, `non_text_output`, `missing_placeholder`, and
+`duplicate_placeholder`; `unspecified` covers errors without a finer diagnostic.
+The count fields describe only the **first** failing known placeholder check,
+not total missing terms. They are `-` when unavailable. Unknown categories and
+malformed counts are replaced with safe defaults, never stringified.
+
+These fields are internal logs only. They do not contain source text, translated
+text, placeholder tokens, credentials, request headers or provider addresses,
+and they do not appear in the HTTP response or OpenAPI schema. The existing
+`reason` and public error-code mappings remain distinct: a non-text provider
+response envelope remains `invalid_api_response`, while a custom translator's
+non-text output remains `invalid_response`. No fallback or retry is added.
+Failure to write this extra diagnostic cannot replace the request's original
+error. A diagnostic identifies a failed check, not model reliability or billing.
+Reading the diagnostic attribute is inside the same guard as writing the log.
+Business classification uses the original reason's plain string value, not the
+diagnostic record: string subclasses retain their meaning without calling custom
+hash/equality/string methods, while non-string or unreadable reasons become the
+existing `llm_unavailable` error.
+
 A request can therefore produce several lines in total, and a collector must
 select on `request complete` rather than assume every line has that record's
 fields. Every

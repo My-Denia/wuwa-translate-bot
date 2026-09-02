@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -21,6 +23,127 @@ from wuwaterm.sentence import (
     _call_llm_async,
     _llm_error_from_response,
 )
+
+
+def _llm_failure_diagnostic_type():
+    """Resolve the candidate type so RED is an assertion, not collection error."""
+    import wuwaterm.sentence as sentence_module
+
+    diagnostic_type = getattr(sentence_module, "LLMFailureDiagnostic", None)
+    assert diagnostic_type is not None, "LLMFailureDiagnostic candidate is missing"
+    return diagnostic_type
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "budget",
+        "rate_limit",
+        "upstream",
+        "timeout",
+        "connect",
+        "request",
+        "http",
+        "invalid_api_response",
+        "invalid_response",
+        "html_integrity",
+        "stale_before_llm",
+        "authorization_changed_before_llm",
+        "translation_unavailable",
+        "unknown",
+    ],
+)
+def test_llm_failure_diagnostic_keeps_only_known_reason_values(reason):
+    diagnostic_type = _llm_failure_diagnostic_type()
+
+    diagnostic = diagnostic_type(reason)
+
+    assert diagnostic.reason == reason
+    assert diagnostic.detail == "unspecified"
+    assert diagnostic.expected_count is None
+    assert diagnostic.actual_count is None
+
+
+def test_llm_failure_diagnostic_is_immutable_and_bounds_fields():
+    diagnostic_type = _llm_failure_diagnostic_type()
+
+    diagnostic = diagnostic_type(
+        "invalid_response",
+        detail="missing_placeholder",
+        expected_count=1,
+        actual_count=2_147_483_647,
+    )
+
+    assert diagnostic.reason == "invalid_response"
+    assert diagnostic.detail == "missing_placeholder"
+    assert diagnostic.expected_count == 1
+    assert diagnostic.actual_count == 2_147_483_647
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        diagnostic.detail = "duplicate_placeholder"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reason", "provider=https://llm.invalid/token=secret"),
+        ("reason", {"Authorization": "Bearer secret"}),
+        ("detail", "provider response contains secret"),
+        ("detail", ["missing_placeholder", "secret"]),
+        ("expected_count", -1),
+        ("expected_count", 2_147_483_648),
+        ("expected_count", True),
+        ("expected_count", 1.0),
+        ("expected_count", "1"),
+        ("actual_count", -1),
+        ("actual_count", 2_147_483_648),
+        ("actual_count", False),
+        ("actual_count", 1.0),
+        ("actual_count", "2"),
+    ],
+)
+def test_llm_failure_diagnostic_fails_closed_without_stringifying_malformed_fields(
+    field, value
+):
+    diagnostic_type = _llm_failure_diagnostic_type()
+    values = {
+        "reason": "upstream",
+        "detail": "unspecified",
+        "expected_count": None,
+        "actual_count": None,
+    }
+    values[field] = value
+
+    diagnostic = diagnostic_type(**values)
+
+    assert getattr(diagnostic, field) in (
+        None,
+        "unspecified",
+        "unknown",
+    )
+    assert "secret" not in repr(diagnostic)
+
+
+def test_llm_translation_error_exposes_safe_diagnostic_without_leaking_inputs():
+    secret = "Authorization=Bearer diagnostic-secret"
+
+    parameters = inspect.signature(LLMTranslationError).parameters
+    assert {"detail", "expected_count", "actual_count"}.issubset(parameters)
+
+    error = LLMTranslationError(
+        TRANSLATION_UNAVAILABLE_NOTICE,
+        reason=secret,
+        detail=secret,
+        expected_count=secret,
+        actual_count=True,
+    )
+
+    assert error.reason == secret
+    assert error.diagnostic.reason == "unknown"
+    assert error.diagnostic.detail == "unspecified"
+    assert error.diagnostic.expected_count is None
+    assert error.diagnostic.actual_count is None
+    assert secret not in repr(error)
+    assert secret not in str(error)
 
 
 def add_synthetic_terms(sample_db, records):
@@ -227,6 +350,35 @@ def test_malformed_api_envelope_maps_to_invalid_api_response(sample_db):
 
     assert excinfo.value.reason == "invalid_api_response"
     assert excinfo.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+
+
+def test_provider_non_text_content_stays_invalid_api_response(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None}}]},
+        )
+
+    enable_llm_env(monkeypatch)
+
+    async def run():
+        with pytest.raises(LLMTranslationError) as excinfo:
+            await _call_llm_async(
+                "hello",
+                (),
+                transport=httpx.MockTransport(handler),
+            )
+        return excinfo.value
+
+    error = asyncio.run(run())
+
+    assert len(calls) == 1
+    assert error.reason == "invalid_api_response"
+    assert error.diagnostic.detail == "unspecified"
+    assert error.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
 
 def test_sync_translate_logs_swallowed_llm_failure(monkeypatch, caplog, sample_db):
@@ -516,18 +668,50 @@ def test_restore_rejects_missing_duplicate_or_modified_placeholders(sample_db):
     with pytest.raises(LLMTranslationError) as all_missing:
         locked.restore("translated without locked terms")
     assert all_missing.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert all_missing.value.diagnostic.detail == "missing_placeholder"
+    assert all_missing.value.diagnostic.expected_count == 1
+    assert all_missing.value.diagnostic.actual_count == 0
 
     with pytest.raises(LLMTranslationError) as missing:
         locked.restore(placeholders[0])
     assert missing.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert missing.value.diagnostic.detail == "missing_placeholder"
+    assert missing.value.diagnostic.expected_count == 1
+    assert missing.value.diagnostic.actual_count == 0
 
     with pytest.raises(LLMTranslationError) as duplicate:
         locked.restore(f"{placeholders[0]} {placeholders[0]} {placeholders[1]}")
     assert duplicate.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert duplicate.value.diagnostic.detail == "duplicate_placeholder"
+    assert duplicate.value.diagnostic.expected_count == 1
+    assert duplicate.value.diagnostic.actual_count == 2
 
     with pytest.raises(LLMTranslationError) as modified:
         locked.restore(f"{placeholders[0].lower()} {placeholders[1]}")
     assert modified.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
+    assert modified.value.diagnostic.detail == "missing_placeholder"
+    assert modified.value.diagnostic.expected_count == 1
+    assert modified.value.diagnostic.actual_count == 0
+
+
+def test_restore_reports_the_first_placeholder_mismatch_in_lock_order(sample_db):
+    translator = SentenceTranslator(sample_db)
+    locked = translator.lock_terms("今汐说声骸")
+    placeholders = [placeholder for placeholder, _zh, _en in locked.locks]
+    assert len(placeholders) == 2
+
+    # The first lock is absent, even though the second one is duplicated. The
+    # existing fail-fast order must remain observable in the diagnostic.
+    with pytest.raises(LLMTranslationError) as first_missing:
+        locked.restore(f"{placeholders[1]} {placeholders[1]}")
+    assert first_missing.value.diagnostic.detail == "missing_placeholder"
+    assert first_missing.value.diagnostic.actual_count == 0
+
+    # A duplicate first lock must win over the later lock's missing count.
+    with pytest.raises(LLMTranslationError) as first_duplicate:
+        locked.restore(f"{placeholders[0]} {placeholders[0]}")
+    assert first_duplicate.value.diagnostic.detail == "duplicate_placeholder"
+    assert first_duplicate.value.diagnostic.actual_count == 2
 
 
 def test_equal_length_overlapping_terms_use_stable_order(sample_db):
@@ -919,6 +1103,38 @@ def test_async_llm_failures_have_one_unavailable_error(monkeypatch, transport):
         assert exc_info.value.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "llm_output,detail",
+    [(None, "non_text_output"), ("   ", "empty_output")],
+)
+def test_custom_translator_failures_get_content_diagnostics(
+    monkeypatch, sample_db, llm_output, detail
+):
+    enable_llm_env(monkeypatch)
+    calls = []
+
+    async def fake_call(*_args, **_kwargs):
+        calls.append(True)
+        return llm_output
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+    translator = SentenceTranslator(sample_db)
+
+    async def run():
+        with pytest.raises(LLMTranslationError) as excinfo:
+            await translator.translate_async(
+                "这是一个需要翻译的句子。", propagate_errors=True
+            )
+        return excinfo.value
+
+    error = asyncio.run(run())
+
+    assert calls == [True]
+    assert error.reason == "invalid_response"
+    assert error.diagnostic.detail == detail
+    assert error.user_message == TRANSLATION_UNAVAILABLE_NOTICE
 
 
 @pytest.mark.parametrize("llm_output", ["", "   ", "\n\n"])

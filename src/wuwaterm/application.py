@@ -36,7 +36,7 @@ import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Hashable
 
@@ -47,8 +47,10 @@ from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
     DEFAULT_LLM_TIMEOUT_SECONDS,
+    LLMFailureDiagnostic,  # Intentionally re-exported for adapters.
     LLMTranslationError,
     SentenceTranslator,
+    _safe_llm_failure_diagnostic,
     _llm_configured,
 )
 from .translation_policy import LLM_FAILURE_NOTICES, LLM_INPUT_CHAR_LIMIT
@@ -121,6 +123,19 @@ def error_code_for_llm_reason(reason: str | None) -> str:
     return ERROR_LLM_UNAVAILABLE
 
 
+def _safe_business_reason(value: object) -> str | None:
+    """Return a builtin string without custom hash/equality/string calls."""
+    try:
+        if not isinstance(value, str):
+            return None
+        # Calling the builtin directly bypasses a subclass's __str__. Only a
+        # plain string can reach set membership and its hash/equality methods.
+        normalized = str.__str__(value)
+        return normalized if type(normalized) is str else None
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------
 # Request / result models
 # --------------------------------------------------------------------------
@@ -155,6 +170,9 @@ class TranslationOutcome:
     dictionary_miss: bool = False
     markup_used: bool = False
     error_code: str | None = None
+    llm_failure: LLMFailureDiagnostic | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def direction(self) -> str:
@@ -366,15 +384,24 @@ def _dictionary_stage(
 def _llm_failure_outcome(
     exc: LLMTranslationError, to_chinese: bool
 ) -> TranslationOutcome:
-    reason = getattr(exc, "reason", "translation_unavailable")
-    # The pipeline swallows the exception by contract (callers get an outcome),
-    # so this is the only place the failure reason can reach the logs.
+    try:
+        raw_reason = getattr(exc, "reason", None)
+    except Exception:
+        raw_reason = None
+    business_reason = _safe_business_reason(raw_reason)
+    diagnostic = _safe_llm_failure_diagnostic(exc)
+    reason = diagnostic.reason
+    # The pipeline swallows the exception by contract (callers get an outcome).
+    # Keep the safe diagnostic on the outcome so an HTTP adapter can correlate
+    # it with its server-minted request id without exposing exception text.
     LOGGER.warning("llm translation failed reason=%s", reason)
     return TranslationOutcome(
         kind=KIND_ERROR,
         text=exc.user_message,
         to_chinese=to_chinese,
-        error_code=error_code_for_llm_reason(reason),
+        # Diagnostics cannot override the original reason's business meaning.
+        error_code=error_code_for_llm_reason(business_reason),
+        llm_failure=diagnostic,
     )
 
 

@@ -48,6 +48,7 @@ from wuwaterm.application import (
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
     KIND_LLM,
+    LLMFailureDiagnostic,
     LlmCallBudget,
     SlidingWindowRateLimiter,
     TranslationJob,
@@ -653,6 +654,31 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unset")
 
 
+def _log_llm_failure_diagnostic(request: Request, outcome: object) -> None:
+    """Add safe failure detail without allowing logging to replace the outcome."""
+    try:
+        diagnostic = getattr(outcome, "llm_failure", None)
+        if diagnostic is None:
+            return
+        # Do not interpolate arbitrary outcome metadata or its repr. The core
+        # record validates fixed categories and bounded counts on construction.
+        if type(diagnostic) is not LLMFailureDiagnostic:
+            diagnostic = LLMFailureDiagnostic(reason="unknown")
+        LOGGER.warning(
+            "llm translation diagnostic request_id=%s reason=%s detail=%s "
+            "expected_count=%s actual_count=%s",
+            _request_id(request),
+            diagnostic.reason,
+            diagnostic.detail,
+            diagnostic.expected_count if diagnostic.expected_count is not None else "-",
+            diagnostic.actual_count if diagnostic.actual_count is not None else "-",
+        )
+    except Exception:
+        # A failing logging sink must not turn an existing 503 into a 500, or
+        # emit exception text that could contain a sink's sensitive context.
+        pass
+
+
 class CredentialPoolClosed(RuntimeError):
     """The credential-store worker pool has been shut down (app teardown).
 
@@ -1188,6 +1214,7 @@ def _register_routes(app: FastAPI) -> None:
             _request_id(request),
         )
         if outcome.kind == KIND_ERROR:
+            _log_llm_failure_diagnostic(request, outcome)
             raise ApiError(outcome.error_code or ERROR_INTERNAL)
         if outcome.kind == KIND_LLM and not llm_configured():
             # With no model configured the pipeline returns the source text

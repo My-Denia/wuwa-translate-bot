@@ -163,6 +163,290 @@ EXPECTED_FIELDS = {
     "device",
 }
 
+DIAGNOSTIC_PREFIX = "llm translation diagnostic "
+DIAGNOSTIC_FIELDS = {
+    "request_id", "reason", "detail", "expected_count", "actual_count"
+}
+
+
+def diagnostic_fields(captured):
+    result = []
+    for message in captured.messages:
+        if not message.startswith(DIAGNOSTIC_PREFIX):
+            continue
+        pairs = [token.split("=", 1) for token in message[len(DIAGNOSTIC_PREFIX):].split()]
+        assert all(len(pair) == 2 for pair in pairs)
+        assert len(pairs) == len(DIAGNOSTIC_FIELDS)
+        record = dict(pairs)
+        assert set(record) == DIAGNOSTIC_FIELDS
+        result.append(record)
+    return result
+
+
+def enable_diagnostic_llm(monkeypatch, answer):
+    monkeypatch.setenv("WUWATERM_OPENAI_BASE_URL", "https://diagnostic-provider.invalid/v1")
+    monkeypatch.setenv("WUWATERM_OPENAI_API_KEY", TEST_SECRET)
+    monkeypatch.setenv("WUWATERM_OPENAI_MODEL", "diagnostic-model")
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", answer)
+
+
+@pytest.mark.parametrize(
+    "mode,detail,expected,actual",
+    [
+        ("empty", "empty_output", "-", "-"),
+        ("missing", "missing_placeholder", "1", "0"),
+        ("duplicate", "duplicate_placeholder", "1", "2"),
+        ("nontext", "non_text_output", "-", "-"),
+    ],
+)
+def test_llm_diagnostic_correlates_without_exposing_content(
+    tmp_path, sample_db, monkeypatch, mode, detail, expected, actual
+):
+    app, store = build_app(tmp_path, sample_db)
+    device, token = issue_device(store)
+    source = "今汐回应诊断示例中的一句话。"
+    output_marker = "synthetic-output-must-not-be-logged"
+    calls = []
+
+    async def answer(locked_text, locks, **kwargs):
+        calls.append(1)
+        assert locks
+        if mode == "empty":
+            return " \n "
+        if mode == "nontext":
+            return None
+        if mode == "missing":
+            return locked_text.replace(locks[0][0], "") + output_marker
+        return locked_text + locks[0][0] + output_marker
+
+    enable_diagnostic_llm(monkeypatch, answer)
+    with captured_records() as captured:
+        response = run(call(app, "POST", "/v1/translations", json={"text": source},
+                            headers={"Authorization": f"Bearer {token}",
+                                     "X-Request-Id": "caller-forged-diagnostic-id"}))
+    assert response.status_code == 503
+    assert set(response.json()) == {"error", "request_id"}
+    assert set(response.json()["error"]) == {"code", "message"}
+    assert response.json()["error"]["code"] == "llm_unavailable"
+    request_id = response.json()["request_id"]
+    assert response.headers["X-Request-Id"] == request_id
+    assert diagnostic_fields(captured) == [{
+        "request_id": request_id, "reason": "invalid_response", "detail": detail,
+        "expected_count": expected, "actual_count": actual,
+    }]
+    assert fields(captured.completions[0])["request_id"] == request_id
+    assert calls == [1]
+    stream = "\n".join(captured.messages)
+    for forbidden in (source, output_marker, TEST_SECRET, token, device.device_id,
+                      "diagnostic-provider.invalid", "caller-forged-diagnostic-id",
+                      "__WUWA_TERM_"):
+        assert forbidden not in stream
+        assert forbidden not in response.text
+
+
+def test_concurrent_llm_diagnostics_stay_with_their_request(
+    tmp_path, sample_db, monkeypatch
+):
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+    arrived = 0
+    ready = None
+
+    async def answer(locked_text, locks, **kwargs):
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            ready.set()
+        await asyncio.wait_for(ready.wait(), 5)
+        return " " if "第一个" in locked_text else locked_text + locks[0][0]
+
+    enable_diagnostic_llm(monkeypatch, answer)
+
+    async def exercise():
+        nonlocal ready
+        ready = asyncio.Event()
+        return await asyncio.gather(*[
+            call(app, "POST", "/v1/translations", json={"text": text},
+                 headers={"Authorization": f"Bearer {token}"})
+            for text in ("今汐说第一个诊断句子。", "今汐说第二个诊断句子。")
+        ])
+
+    with captured_records() as captured:
+        empty, duplicate = run(exercise())
+    assert empty.status_code == duplicate.status_code == 503
+    assert arrived == 2
+    by_id = {record["request_id"]: record for record in diagnostic_fields(captured)}
+    assert len(by_id) == 2
+    assert by_id[empty.json()["request_id"]]["detail"] == "empty_output"
+    assert by_id[duplicate.json()["request_id"]]["detail"] == "duplicate_placeholder"
+    assert set(by_id) == {fields(line)["request_id"] for line in captured.completions}
+
+
+def test_malformed_llm_diagnostic_is_not_a_log_or_response_channel(
+    tmp_path, sample_db, monkeypatch
+):
+    from types import SimpleNamespace
+    from wuwaterm.application import KIND_ERROR, ERROR_LLM_UNAVAILABLE
+
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+    marker = "sensitive-marker\nrequest_id=forged"
+
+    async def outcome(*args, **kwargs):
+        return SimpleNamespace(kind=KIND_ERROR, direction="en", text=marker,
+                               error_code=ERROR_LLM_UNAVAILABLE, llm_failure=marker)
+
+    monkeypatch.setattr("wuwaterm_api.app.translate_request_async", outcome)
+    with captured_records() as captured:
+        response = run(call(app, "POST", "/v1/translations", json={"text": "diagnostic"},
+                            headers={"Authorization": f"Bearer {token}"}))
+    assert response.status_code == 503
+    assert diagnostic_fields(captured) == [{
+        "request_id": response.json()["request_id"], "reason": "unknown",
+        "detail": "unspecified", "expected_count": "-", "actual_count": "-",
+    }]
+    assert marker not in "\n".join(captured.messages) + response.text
+
+
+def test_failed_llm_diagnostic_write_cannot_change_the_api_error(
+    tmp_path, sample_db, monkeypatch
+):
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+
+    async def answer(*args, **kwargs):
+        return " "
+
+    enable_diagnostic_llm(monkeypatch, answer)
+
+    class HostileDiagnostic(logging.Handler):
+        attempts = 0
+
+        def emit(self, record):
+            if record.getMessage().startswith(DIAGNOSTIC_PREFIX):
+                self.attempts += 1
+                raise RuntimeError(TEST_SECRET)
+
+    handler = HostileDiagnostic()
+    logging.getLogger().addHandler(handler)
+    try:
+        with captured_records() as captured:
+            response = run(call(app, "POST", "/v1/translations", json={"text": "空输出诊断句子。"},
+                                headers={"Authorization": f"Bearer {token}"}))
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert handler.attempts == 1
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"
+    assert TEST_SECRET not in "\n".join(captured.messages) + response.text
+
+
+def test_raising_llm_diagnostic_getter_cannot_replace_the_original_503(
+    tmp_path, sample_db, monkeypatch
+):
+    from wuwaterm.application import KIND_ERROR, ERROR_LLM_UNAVAILABLE
+
+    class HostileOutcome:
+        kind = KIND_ERROR
+        direction = "en"
+        error_code = ERROR_LLM_UNAVAILABLE
+
+        @property
+        def llm_failure(self):
+            raise RuntimeError(TEST_SECRET)
+
+    async def outcome(*args, **kwargs):
+        return HostileOutcome()
+
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+    monkeypatch.setattr("wuwaterm_api.app.translate_request_async", outcome)
+    with captured_records() as captured:
+        response = run(call(
+            app, "POST", "/v1/translations", json={"text": "diagnostic getter"},
+            headers={"Authorization": f"Bearer {token}"}, raise_app_exceptions=False,
+        ))
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"
+    assert set(response.json()) == {"error", "request_id"}
+    assert diagnostic_fields(captured) == []
+    assert fields(captured.completions[0])["request_id"] == response.json()["request_id"]
+    assert TEST_SECRET not in "\n".join(captured.messages) + response.text
+
+
+@pytest.mark.parametrize(
+    "case,expected_code",
+    [
+        ("dict", "llm_unavailable"),
+        ("list", "llm_unavailable"),
+        ("object", "llm_unavailable"),
+        ("hostile_budget", "llm_budget_exhausted"),
+        ("hostile_upstream", "llm_unavailable"),
+        ("raising_reason_getter", "llm_unavailable"),
+    ],
+)
+def test_hostile_business_reason_is_classified_without_calling_magic_methods(
+    tmp_path, sample_db, monkeypatch, case, expected_code
+):
+    from wuwaterm.sentence import LLMTranslationError, TRANSLATION_UNAVAILABLE_NOTICE
+
+    calls = []
+
+    class HostileReason(str):
+        def __hash__(self):
+            calls.append("hash")
+            raise RuntimeError(TEST_SECRET)
+
+        def __eq__(self, other):
+            calls.append("eq")
+            raise RuntimeError(TEST_SECRET)
+
+        def __str__(self):
+            calls.append("str")
+            raise RuntimeError(TEST_SECRET)
+
+    class HostileObject:
+        __hash__ = HostileReason.__hash__
+        __eq__ = HostileReason.__eq__
+        __str__ = HostileReason.__str__
+
+    class RaisingReasonError(LLMTranslationError):
+        def __init__(self):
+            RuntimeError.__init__(self, TRANSLATION_UNAVAILABLE_NOTICE)
+            self.user_message = TRANSLATION_UNAVAILABLE_NOTICE
+
+        @property
+        def reason(self):
+            raise RuntimeError(TEST_SECRET)
+
+    async def answer(*args, **kwargs):
+        if case == "raising_reason_getter":
+            raise RaisingReasonError()
+        if case == "dict":
+            reason = {"marker": TEST_SECRET}
+        elif case == "list":
+            reason = [TEST_SECRET]
+        elif case == "object":
+            reason = HostileObject()
+        else:
+            reason = HostileReason("budget" if case == "hostile_budget" else "upstream")
+        raise LLMTranslationError(TRANSLATION_UNAVAILABLE_NOTICE, reason=reason)
+
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+    enable_diagnostic_llm(monkeypatch, answer)
+    with captured_records() as captured:
+        response = run(call(
+            app, "POST", "/v1/translations", json={"text": "一个业务分类诊断句子。"},
+            headers={"Authorization": f"Bearer {token}"}, raise_app_exceptions=False,
+        ))
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == expected_code
+    assert set(response.json()) == {"error", "request_id"}
+    assert set(response.json()["error"]) == {"code", "message"}
+    assert calls == []
+    assert TEST_SECRET not in "\n".join(captured.messages) + response.text
+
 
 def fields(message: str) -> dict[str, str]:
     """Parse a record the way a log collector would: split, then partition.
