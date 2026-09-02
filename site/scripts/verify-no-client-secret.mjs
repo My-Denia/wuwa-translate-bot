@@ -45,8 +45,9 @@ for (const source of clientSources) {
 
 const clientComponent = readFileSync(join(root, 'app/components/translation-workbench.tsx'), 'utf8');
 assert.equal((clientComponent.match(/fetch\s*\(/gu) ?? []).length, 3, 'client must contain exactly three fetch calls');
-assert.equal(clientComponent.includes("fetch('/api/meta'"), true, 'meta fetch must be same-origin');
-assert.equal(clientComponent.includes('fetch(`/api/terms?q='), true, 'terms fetch must be same-origin');
+assert.equal(clientComponent.includes("fetch('/api/pool'"), true, 'pool status fetch must be same-origin and avoid upstream calls');
+assert.equal(clientComponent.includes("fetch('/api/meta'"), false, 'page load must not spend upstream quota');
+assert.equal(clientComponent.includes("fetch('/api/terms?q='"), true, 'terms fetch must be same-origin');
 assert.equal(clientComponent.includes("fetch('/api/translations'"), true, 'translation fetch must be same-origin');
 for (const forbidden of ['Authorization', 'Bearer ', '/wuwaterm-api/', 'WUWATERM_']) {
   assert.equal(clientComponent.includes(forbidden), false, `client contains ${forbidden}`);

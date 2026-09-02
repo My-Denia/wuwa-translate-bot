@@ -1,3 +1,4 @@
+import { createPool } from './helpers/pool-fixture.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -14,7 +15,11 @@ import {
 const TOKEN = 'SYNTHETIC_PRODUCT_TOKEN_61E8';
 const HOST = 'api.wuwaterm-test.net';
 const BASE_URL = `https://${HOST}/wuwaterm-api/`;
+// Fresh DB per projection fixture; shared contention is covered in shared-pool/D1 suites.
 const ENVIRONMENT = {
+  get DB() { return createPool(); },
+  WUWATERM_SHARED_POOL_ENABLED: 'true',
+  WUWATERM_TRANSLATION_ENABLED: 'true',
   WUWATERM_API_BASE_URL: BASE_URL,
   WUWATERM_API_ALLOWED_HOST: HOST,
   WUWATERM_SITE_DEVICE_TOKEN: TOKEN,
@@ -51,13 +56,8 @@ test('metadata projects the backend revision fields without exposing private con
   assert.equal(response.status, 200);
   assertSafeResponse(response);
   assert.deepEqual(await response.json(), {
-    api_version: 'v1',
-    service_version: '0.4.1',
     schema_version: '3.6.0',
-    source_profile: 'official',
-    source_commit: 'abc123',
     term_count: 12_345,
-    llm_configured: true,
     request_id: 'req-meta',
   });
 });
@@ -498,7 +498,7 @@ test('routes all delegate to the shared proxy and expose no environment names', 
 test('Product v1 UI uses only same-origin APIs and does not sort, filter, or deduplicate matches', () => {
   const componentPath = fileURLToPath(new URL('../app/components/translation-workbench.tsx', import.meta.url));
   const source = readFileSync(componentPath, 'utf8');
-  for (const endpoint of ['/api/meta', '/api/terms', '/api/translations']) {
+  for (const endpoint of ['/api/pool', '/api/terms', '/api/translations']) {
     assert.equal(source.includes(endpoint), true, `missing ${endpoint}`);
   }
   assert.equal(/https?:\/\//u.test(source), false);
@@ -514,7 +514,7 @@ test('Product v1 UI uses only same-origin APIs and does not sort, filter, or ded
   assert.match(source, /dictionary_miss/u);
   assert.equal(source.includes('dictionary hit'), false);
   assert.match(source, /转到整句翻译/u);
-  assert.match(source, /重试状态/u);
+  assert.match(source, /刷新额度/u);
   const transfer = source.slice(
     source.indexOf('function moveQueryToTranslation()'),
     source.indexOf('return (', source.indexOf('function moveQueryToTranslation()')),

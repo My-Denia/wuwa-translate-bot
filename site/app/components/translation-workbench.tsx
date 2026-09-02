@@ -2,338 +2,170 @@
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
-type Failure = { status: 'unavailable'; reason: string; request_id?: string };
-type Meta = {
-  api_version: string;
-  service_version: string;
-  schema_version: string | null;
-  source_profile: string | null;
-  source_commit: string | null;
-  term_count: number;
-  llm_configured: boolean;
-  request_id: string;
-};
+type Failure = { status: 'unavailable'; reason: string; request_id?: string; retry_after_seconds?: number };
+type Allowance = { used: number; limit: number; remaining: number };
+type Pool = { status: 'available'; translation_enabled: boolean; terms: Allowance; translations: Allowance; characters: Allowance; reset_at: string };
 type TermMatch = { zh: string; en: string; category: string; reason: string; score: number };
 type TermsResult = { query: string; matches: TermMatch[]; request_id: string };
-type TranslationResult = {
-  kind: 'noop' | 'exact' | 'fuzzy' | 'llm';
-  text: string;
-  direction: 'en' | 'zh';
-  dictionary_miss: boolean;
-  request_id: string;
-};
-type ResultState<T> =
-  | { kind: 'idle' }
-  | { kind: 'loading' }
-  | { kind: 'success'; data: T }
-  | { kind: 'error'; error: Failure }
-  | { kind: 'cancelled' };
-
-const FALLBACK_FAILURE: Failure = { status: 'unavailable', reason: 'site_response_invalid' };
-const FAILURE_MESSAGES: Record<string, string> = {
-  site_not_configured: '站点尚未完成服务配置，请联系管理员。',
-  site_invalid_request: '输入格式无法提交，请检查后重试。',
+type TranslationResult = { kind: 'noop' | 'exact' | 'fuzzy' | 'llm'; text: string; direction: 'en' | 'zh'; dictionary_miss: boolean; request_id: string };
+type State<T> = { kind: 'idle' | 'loading' | 'cancelled' } | { kind: 'success'; data: T } | { kind: 'error'; error: Failure };
+const FALLBACK: Failure = { status: 'unavailable', reason: 'site_response_invalid' };
+const MESSAGES: Record<string, string> = {
+  translation_disabled: '整句翻译暂未开放。你仍然可以查询术语。',
+  translation_pool_exhausted: '今日整句翻译共享额度已用完。术语查询有独立额度，可以继续使用。',
+  terms_pool_exhausted: '今日术语查询共享额度已用完，请在次日 UTC 00:00 后再来。',
+  shared_pool_busy: '共享公测池正在忙碌，请稍后再试。',
+  shared_pool_unavailable: '暂时无法确认共享额度，服务已暂停接收请求。请稍后重试。',
+  site_invalid_request: '请检查输入：术语不超过 200 字符，整句不超过 2,000 字符。',
   site_request_too_large: '输入内容过大，请缩短后重试。',
-  upstream_timeout: '服务响应超时，请稍后重试。',
-  upstream_unauthorized: '站点凭据无效，请联系管理员。',
-  upstream_forbidden: '站点凭据权限不足，请联系管理员。',
-  upstream_rate_limited: '请求过于频繁，请稍后重试。',
-  upstream_unavailable: '服务暂时不可用，请稍后重试。',
-  upstream_invalid_content_type: '上游响应格式异常，请联系管理员。',
-  upstream_response_too_large: '上游响应超出安全限制，请联系管理员。',
-  upstream_invalid_json: '上游返回了无法解析的响应，请联系管理员。',
-  upstream_schema_mismatch: '上游响应不符合当前 API 合同，请联系管理员。',
-  upstream_network_error: '无法连接翻译服务，请稍后重试。',
-  invalid_request: '输入不符合翻译服务要求，请修改后重试。',
-  payload_too_large: '输入内容过大，请缩短后重试。',
   input_too_long: '文本过长，请分段翻译。',
-  llm_unavailable: '整句翻译模型暂时不可用，请稍后重试。',
-  llm_budget_exhausted: '整句翻译额度暂时用尽，请稍后重试。',
-  site_response_invalid: '本站收到了无法识别的响应，请稍后重试。',
+  invalid_request: '输入格式有误，请修改后重试。',
+  upstream_timeout: '等待超时。已获准的请求可能仍在处理，本次额度不会返还。',
+  upstream_rate_limited: '服务繁忙，请稍后重试。',
+  llm_unavailable: '整句翻译暂不可用，术语查询仍可尝试。',
+  llm_budget_exhausted: '整句翻译暂时达到服务额度，术语查询仍可尝试。',
 };
-
-function isFailure(value: unknown): value is Failure {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<Failure>;
-  return item.status === 'unavailable' && typeof item.reason === 'string';
-}
-
-function isMeta(value: unknown): value is Meta {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<Meta>;
-  return typeof item.api_version === 'string'
-    && typeof item.service_version === 'string'
-    && (typeof item.schema_version === 'string' || item.schema_version === null)
-    && (typeof item.source_profile === 'string' || item.source_profile === null)
-    && (typeof item.source_commit === 'string' || item.source_commit === null)
-    && Number.isInteger(item.term_count)
-    && typeof item.llm_configured === 'boolean'
-    && typeof item.request_id === 'string';
-}
-
-function isTermsResult(value: unknown): value is TermsResult {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<TermsResult>;
-  return typeof item.query === 'string'
-    && typeof item.request_id === 'string'
-    && Array.isArray(item.matches)
-    && item.matches.every((match) => match && typeof match === 'object'
-      && typeof match.zh === 'string'
-      && typeof match.en === 'string'
-      && typeof match.category === 'string'
-      && typeof match.reason === 'string'
-      && typeof match.score === 'number');
-}
-
-function isTranslationResult(value: unknown): value is TranslationResult {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<TranslationResult>;
-  return ['noop', 'exact', 'fuzzy', 'llm'].includes(item.kind ?? '')
-    && typeof item.text === 'string'
-    && (item.direction === 'en' || item.direction === 'zh')
-    && typeof item.dictionary_miss === 'boolean'
-    && typeof item.request_id === 'string';
-}
-
-async function responsePayload(response: Response): Promise<unknown> {
-  try { return await response.json(); } catch { return FALLBACK_FAILURE; }
-}
+function failure(value: unknown): value is Failure { return !!value && typeof value === 'object' && (value as Failure).status === 'unavailable' && typeof (value as Failure).reason === 'string'; }
+async function payload(r: Response): Promise<unknown> { try { return await r.json(); } catch { return FALLBACK; } }
+function isTerms(v: unknown): v is TermsResult { const x = v as TermsResult; return !!x && typeof x.request_id === 'string' && Array.isArray(x.matches) && x.matches.every(m => typeof m.zh === 'string' && typeof m.en === 'string' && typeof m.category === 'string' && typeof m.reason === 'string' && typeof m.score === 'number'); }
+function isTranslation(v: unknown): v is TranslationResult { const x = v as TranslationResult; return !!x && typeof x.text === 'string' && typeof x.request_id === 'string' && ['noop', 'exact', 'fuzzy', 'llm'].includes(x.kind) && ['en', 'zh'].includes(x.direction) && typeof x.dictionary_miss === 'boolean'; }
+function isPool(v: unknown): v is Pool { const x = v as Pool; return !!x && x.status === 'available' && typeof x.translation_enabled === 'boolean' && [x.terms,x.translations,x.characters].every(a => a && Number.isInteger(a.remaining) && Number.isInteger(a.limit) && a.remaining >= 0 && a.limit >= a.remaining) && typeof x.reset_at === 'string'; }
 
 export function TranslationWorkbench() {
-  const [meta, setMeta] = useState<ResultState<Meta>>({ kind: 'loading' });
-  const [metaAttempt, setMetaAttempt] = useState(0);
+  const [pool, setPool] = useState<State<Pool>>({ kind: 'loading' });
+  const [poolAttempt, setPoolAttempt] = useState(0);
   const [query, setQuery] = useState('');
-  const [terms, setTerms] = useState<ResultState<TermsResult>>({ kind: 'idle' });
+  const [terms, setTerms] = useState<State<TermsResult>>({ kind: 'idle' });
   const [source, setSource] = useState('');
   const [target, setTarget] = useState<'auto' | 'en' | 'zh'>('auto');
-  const [translation, setTranslation] = useState<ResultState<TranslationResult>>({ kind: 'idle' });
+  const [translation, setTranslation] = useState<State<TranslationResult>>({ kind: 'idle' });
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const termsController = useRef<AbortController | null>(null);
   const translationController = useRef<AbortController | null>(null);
-  const translationInput = useRef<HTMLTextAreaElement | null>(null);
+  const translationInput = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch('/api/meta', {
-      headers: { accept: 'application/json' },
-      cache: 'no-store',
-      signal: controller.signal,
-    }).then(async (response) => ({ response, payload: await responsePayload(response) }))
-      .then(({ response, payload }) => {
-        if (response.ok && isMeta(payload)) setMeta({ kind: 'success', data: payload });
-        else setMeta({ kind: 'error', error: isFailure(payload) ? payload : FALLBACK_FAILURE });
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setMeta({ kind: 'error', error: FALLBACK_FAILURE });
-      });
+    void (async () => {
+      try {
+        const r = await fetch('/api/pool', { cache: 'no-store', signal: controller.signal });
+        const v = await payload(r);
+        if (!controller.signal.aborted) setPool(r.ok && isPool(v) ? { kind: 'success', data: v } : { kind: 'error', error: failure(v) ? v : FALLBACK });
+      } catch { if (!controller.signal.aborted) setPool({ kind: 'error', error: FALLBACK }); }
+    })();
     return () => controller.abort();
-  }, [metaAttempt]);
-
-  function retryMeta() {
-    setMeta({ kind: 'loading' });
-    setMetaAttempt((value) => value + 1);
-  }
+  }, [poolAttempt]);
+  useEffect(() => () => { termsController.current?.abort(); translationController.current?.abort(); }, []);
 
   async function lookup(event: FormEvent) {
-    event.preventDefault();
-    if (!query.trim()) return;
+    event.preventDefault(); if (!query.trim()) return;
+    termsController.current?.abort();
+    const controller = new AbortController(); termsController.current = controller;
     setTerms({ kind: 'loading' });
     try {
-      const response = await fetch(`/api/terms?q=${encodeURIComponent(query)}`, {
-        headers: { accept: 'application/json' },
-        cache: 'no-store',
-      });
-      const payload = await responsePayload(response);
-      if (response.ok && isTermsResult(payload)) setTerms({ kind: 'success', data: payload });
-      else setTerms({ kind: 'error', error: isFailure(payload) ? payload : FALLBACK_FAILURE });
-    } catch {
-      setTerms({ kind: 'error', error: FALLBACK_FAILURE });
-    }
+      const r = await fetch('/api/terms?q=' + encodeURIComponent(query.trim()), { cache: 'no-store', signal: controller.signal });
+      const v = await payload(r);
+      if (controller.signal.aborted || termsController.current !== controller) return;
+      setTerms(r.ok && isTerms(v) ? { kind: 'success', data: v } : { kind: 'error', error: failure(v) ? v : FALLBACK });
+      setPoolAttempt(n => n + 1);
+    } catch { if (!controller.signal.aborted) setTerms({ kind: 'error', error: FALLBACK }); }
+    finally { if (termsController.current === controller) termsController.current = null; }
   }
-
   async function translate(event: FormEvent) {
-    event.preventDefault();
-    if (!source.trim()) return;
+    event.preventDefault(); if (!source.trim()) return;
     translationController.current?.abort();
-    const controller = new AbortController();
-    translationController.current = controller;
-    setCopied(false);
-    setTranslation({ kind: 'loading' });
-    const body = target === 'auto' ? { text: source } : { text: source, to: target };
+    const controller = new AbortController(); translationController.current = controller;
+    setCopied(false); setCopyFailed(false); setTranslation({ kind: 'loading' });
     try {
-      const response = await fetch('/api/translations', {
-        method: 'POST',
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        cache: 'no-store',
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const payload = await responsePayload(response);
+      const r = await fetch('/api/translations', { method: 'POST', headers: { 'content-type': 'application/json' }, cache: 'no-store', body: JSON.stringify(target === 'auto' ? { text: source } : { text: source, to: target }), signal: controller.signal });
+      const v = await payload(r);
       if (controller.signal.aborted || translationController.current !== controller) return;
-      if (response.ok && isTranslationResult(payload)) {
-        setTranslation({ kind: 'success', data: payload });
-      } else {
-        setTranslation({ kind: 'error', error: isFailure(payload) ? payload : FALLBACK_FAILURE });
-      }
-    } catch {
-      if (!controller.signal.aborted && translationController.current === controller) {
-        setTranslation({ kind: 'error', error: FALLBACK_FAILURE });
-      }
-    } finally {
-      if (translationController.current === controller) translationController.current = null;
-    }
+      setTranslation(r.ok && isTranslation(v) ? { kind: 'success', data: v } : { kind: 'error', error: failure(v) ? v : FALLBACK });
+      setPoolAttempt(n => n + 1);
+    } catch { if (!controller.signal.aborted && translationController.current === controller) setTranslation({ kind: 'error', error: FALLBACK }); }
+    finally { if (translationController.current === controller) translationController.current = null; }
   }
-
-  function cancelTranslation() {
-    translationController.current?.abort();
-    translationController.current = null;
-    setTranslation({ kind: 'cancelled' });
-  }
-
-  async function copyTranslation() {
-    if (translation.kind !== 'success') return;
-    try {
-      await navigator.clipboard.writeText(translation.data.text);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-    }
-  }
-
   function moveQueryToTranslation() {
-    translationController.current?.abort();
-    translationController.current = null;
-    setSource(query);
-    setTranslation({ kind: 'idle' });
+    translationController.current?.abort(); translationController.current = null;
+    setSource(query); setTranslation({ kind: 'idle' }); setCopied(false);
     translationInput.current?.focus();
   }
-
-  return (
-    <div className="workbench">
-      <header className="workbench-header">
-        <div>
-          <p className="eyebrow">OWNER PRIVATE · PRODUCT V1</p>
-          <h1>可信术语与整句翻译，<span>一个工作台。</span></h1>
-          <p>浏览器只连接本站同源 API；查询、方向、排序与翻译决策均由 WuwaTerm 服务完成。</p>
-        </div>
-        <span className="private-badge"><span aria-hidden="true" />Owner only</span>
-      </header>
-
-      <section className="status-strip" aria-live="polite">
-        <StatusContent state={meta} onRetry={retryMeta} />
+  function cancelTranslation() {
+    translationController.current?.abort(); translationController.current = null;
+    setTranslation({ kind: 'cancelled' }); setPoolAttempt(n => n + 1);
+  }
+  async function copyTranslation() {
+    if (translation.kind !== 'success') return;
+    try { await navigator.clipboard.writeText(translation.data.text); setCopied(true); setCopyFailed(false); }
+    catch { setCopyFailed(true); }
+  }
+  const translationClosed = pool.kind === 'success' && (!pool.data.translation_enabled || pool.data.translations.remaining === 0 || pool.data.characters.remaining === 0);
+  const sourceLength = Array.from(source).length;
+  return <div className="workbench">
+    <header className="workbench-header">
+      <p className="eyebrow">WUTHERING WAVES · 中文 / ENGLISH</p>
+      <h1>让每一个鸣潮术语，<span>准确抵达。</span></h1>
+      <p>查找官方中英术语，翻译完整句子。字典优先，整句翻译保留术语。</p>
+    </header>
+    <aside className="pool-notice" aria-label="共享公测池说明">
+      <span className="notice-symbol" aria-hidden="true">↗</span>
+      <div><strong>共享公测池 · 先到先用</strong><p>所有人共用额度，一个访客也可能用完。没有个人或 IP 公平限额。</p></div>
+      <a href="/limits">了解额度 <span aria-hidden="true">↗</span></a>
+    </aside>
+    <section className="pool-strip" aria-live="polite" aria-label="共享额度">
+      {pool.kind === 'success' ? <>
+        <div><span>今日术语查询</span><strong>{pool.data.terms.remaining}<small> / {pool.data.terms.limit} 次</small></strong></div>
+        <div><span>今日整句翻译</span><strong>{pool.data.translation_enabled ? pool.data.translations.remaining : '暂未开放'}<small>{pool.data.translation_enabled ? ' / ' + pool.data.translations.limit + ' 次' : ''}</small></strong></div>
+        <div><span>翻译字符余量</span><strong>{pool.data.characters.remaining.toLocaleString('zh-CN')}<small> 字符</small></strong></div>
+        <p>UTC 00:00 重置（北京时间 08:00）。显示为快照，提交时重新核对。</p>
+      </> : <p>{pool.kind === 'loading' ? '正在读取共享额度…' : '额度状态暂不可用，请稍后重试。'}</p>}
+      <button className="text-button" type="button" onClick={() => setPoolAttempt(n => n + 1)}>刷新额度</button>
+    </section>
+    <div className="workspace-grid">
+      <section className="workspace-card terms-card" aria-labelledby="terms-title">
+        <div className="card-heading"><div><p className="section-kicker">01 / DICTIONARY</p><h2 id="terms-title">术语查询</h2></div><span className="tag">独立查询池</span></div>
+        <p className="card-intro">角色、武器、声骸、地点。官方叫法，一查就懂。</p>
+        <form onSubmit={lookup}>
+          <label htmlFor="term-query">中文或英文术语</label>
+          <div className="input-row"><input id="term-query" value={query} onChange={e => { setQuery(e.target.value); setTerms({ kind: 'idle' }); }} placeholder="例如：今汐 / Jinhsi" autoComplete="off" disabled={terms.kind === 'loading'} /><button type="submit" disabled={!query.trim() || Array.from(query.trim()).length > 200 || terms.kind === 'loading'}>{terms.kind === 'loading' ? '查询中…' : '查术语'}</button></div>
+          <p className="field-hint">最多 200 字符 · 查询不消耗整句翻译额度</p>
+        </form>
+        <TermsView state={terms} onTranslate={moveQueryToTranslation} />
       </section>
-
-      <div className="workspace-grid">
-        <section className="workspace-card terms-card" aria-labelledby="terms-title">
-          <div className="card-heading">
-            <div><p className="section-kicker">TERM LOOKUP</p><h2 id="terms-title">术语查询</h2></div>
-            <span>中文 ⇄ English</span>
-          </div>
-          <form onSubmit={lookup} className="lookup-form">
-            <label htmlFor="term-query">输入中文或英文术语</label>
-            <div className="input-row">
-              <input id="term-query" value={query} onChange={(event) => {
-                setQuery(event.target.value);
-                if (terms.kind !== 'loading') setTerms({ kind: 'idle' });
-              }} placeholder="例如：今汐 / Suisui" autoComplete="off" disabled={terms.kind === 'loading'} />
-              <button type="submit" disabled={!query.trim() || terms.kind === 'loading'}>{terms.kind === 'loading' ? '查询中…' : '查询'}</button>
-            </div>
-          </form>
-          <p className="guidance">需要翻译长句？直接使用整句翻译；本站不会自行猜测或裁剪术语结果。</p>
-          <TermsView state={terms} onTranslate={moveQueryToTranslation} />
-        </section>
-
-        <section className="workspace-card translation-card" aria-labelledby="translation-title">
-          <div className="card-heading">
-            <div><p className="section-kicker">SENTENCE TRANSLATION</p><h2 id="translation-title">整句翻译</h2></div>
-            <select aria-label="翻译方向" value={target} disabled={translation.kind === 'loading'} onChange={(event) => setTarget(event.target.value as 'auto' | 'en' | 'zh')}>
-              <option value="auto">自动方向</option>
-              <option value="en">中译英</option>
-              <option value="zh">英译中</option>
-            </select>
-          </div>
-          <form onSubmit={translate}>
-            <label htmlFor="translation-source">待翻译文本</label>
-            <textarea ref={translationInput} id="translation-source" value={source} disabled={translation.kind === 'loading'} onChange={(event) => {
-              setSource(event.target.value);
-              setTranslation({ kind: 'idle' });
-            }} placeholder="输入完整句子…" rows={7} />
-            <div className="actions">
-              <button type="submit" disabled={!source.trim() || translation.kind === 'loading'}>{translation.kind === 'loading' ? '翻译中…' : '翻译'}</button>
-              {translation.kind === 'loading' && <button className="secondary-button" type="button" onClick={cancelTranslation}>取消等待</button>}
-            </div>
-          </form>
-          <TranslationView state={translation} copied={copied} onCopy={copyTranslation} />
-        </section>
-      </div>
+      <section className="workspace-card translation-card" aria-labelledby="translation-title">
+        <div className="card-heading"><div><p className="section-kicker">02 / TRANSLATE</p><h2 id="translation-title">整句翻译</h2></div><span className="tag">术语优先</span></div>
+        <p className="card-intro">把想说的话译完整，让专有名词保持一致。</p>
+        {translationClosed && <p className="notice-state">{pool.kind === 'success' && !pool.data.translation_enabled ? MESSAGES.translation_disabled : MESSAGES.translation_pool_exhausted}</p>}
+        <form onSubmit={translate}>
+          <div className="label-row"><label htmlFor="translation-source">待翻译文本</label><select aria-label="翻译方向" value={target} disabled={translation.kind === 'loading'} onChange={e => setTarget(e.target.value as 'auto' | 'en' | 'zh')}><option value="auto">自动方向</option><option value="en">中译英</option><option value="zh">英译中</option></select></div>
+          <textarea ref={translationInput} id="translation-source" value={source} disabled={translation.kind === 'loading'} onChange={e => { setSource(e.target.value); setTranslation({ kind: 'idle' }); setCopied(false); }} placeholder="输入鸣潮相关的句子…" rows={5} />
+          <div className="field-hint"><span>请勿输入敏感或个人信息</span><span aria-live="polite">{sourceLength.toLocaleString()} / 2,000</span></div>
+          <div className="actions"><button type="submit" disabled={!source.trim() || sourceLength > 2000 || translation.kind === 'loading' || translationClosed}>{translation.kind === 'loading' ? '翻译中…' : '翻译整句'}</button>{translation.kind === 'loading' && <button className="secondary-button" type="button" onClick={cancelTranslation}>取消等待</button>}</div>
+        </form>
+        <TranslationView state={translation} copied={copied} copyFailed={copyFailed} onCopy={copyTranslation} />
+      </section>
     </div>
-  );
+    <div className="product-notes"><p><strong>字典优先</strong><span>优先使用官方中英对照，未命中时才尝试模型翻译。</span></p><p><strong>不保存历史</strong><span>结果仅在当前页面显示，刷新页面即清空。</span></p><p><strong>独立作品</strong><span>基于官方游戏术语，不是游戏官方运营的网站。</span></p></div>
+  </div>;
 }
-
-function StatusContent({ state, onRetry }: { state: ResultState<Meta>; onRetry: () => void }) {
-  if (state.kind === 'loading') return <p>正在读取服务状态…</p>;
-  if (state.kind === 'error') return <FailureView failure={state.error} action={<button type="button" className="text-button" onClick={onRetry}>重试状态</button>} />;
+function TermsView({ state, onTranslate }: { state: State<TermsResult>; onTranslate: () => void }) {
+  if (state.kind === 'idle') return <div className="empty-state"><span aria-hidden="true">文 ⇄ A</span><p>从一个术语开始。</p><small>中英对照与匹配说明会显示在这里。</small></div>;
+  if (state.kind === 'loading') return <p className="empty-state" role="status">正在查询术语…</p>;
+  if (state.kind === 'error') return <FailureView value={state.error} />;
   if (state.kind !== 'success') return null;
-  const data = state.data;
-  return (
-    <dl>
-      <div><dt>API</dt><dd>{data.api_version}</dd></div>
-      <div><dt>服务</dt><dd>{data.service_version}</dd></div>
-      <div><dt>术语</dt><dd>{data.term_count.toLocaleString('zh-CN')}</dd></div>
-      <div><dt>数据 revision</dt><dd title={data.source_commit ?? undefined}>{data.source_commit ?? data.schema_version ?? '未知'}</dd></div>
-      <div><dt>LLM</dt><dd>{data.llm_configured ? '已配置' : '不可用'}</dd></div>
-    </dl>
-  );
+  if (!state.data.matches.length) return <div className="empty-state"><p>暂未找到这个术语。</p><button className="text-button" type="button" onClick={onTranslate}>转到整句翻译</button></div>;
+  return <div className="terms-results" aria-live="polite"><p className="result-summary">找到 {state.data.matches.length} 条匹配</p>{state.data.matches.map((m,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{m.zh}</strong><span>{m.en}</span></div><dl><div><dt>类别</dt><dd>{m.category}</dd></div><div><dt>匹配方式</dt><dd>{m.reason}</dd></div><div><dt>匹配分数</dt><dd>{m.score}</dd></div></dl></article>)}<RequestId value={state.data.request_id} /></div>;
 }
-
-function TermsView({ state, onTranslate }: { state: ResultState<TermsResult>; onTranslate: () => void }) {
-  if (state.kind === 'idle') return <div className="empty-state">查询结果将按服务返回顺序完整显示。</div>;
-  if (state.kind === 'loading') return <div className="empty-state" aria-live="polite">正在查询官方术语…</div>;
-  if (state.kind === 'error') return <FailureView failure={state.error} action={<button type="button" className="text-button" onClick={onTranslate}>转到整句翻译</button>} />;
+function TranslationView({ state, copied, copyFailed, onCopy }: { state: State<TranslationResult>; copied: boolean; copyFailed: boolean; onCopy: () => void }) {
+  if (state.kind === 'idle') return <p className="translation-placeholder">译文会出现在这里。</p>;
+  if (state.kind === 'loading') return <p className="notice-state" role="status">正在翻译，请稍候。取消仅停止本页等待。</p>;
+  if (state.kind === 'cancelled') return <p className="notice-state" role="status">已停止本页等待；服务可能继续处理，已扣额度不会返还。</p>;
+  if (state.kind === 'error') return <FailureView value={state.error} />;
   if (state.kind !== 'success') return null;
-  if (state.data.matches.length === 0) return <div className="empty-state">未找到术语匹配。<button type="button" className="text-button" onClick={onTranslate}>转到整句翻译</button></div>;
-  return (
-    <div className="terms-results" aria-live="polite">
-      <p className="result-summary">服务返回 {state.data.matches.length} 条匹配</p>
-      <div className="term-list">
-        {state.data.matches.map((match, index) => (
-          <article className="term-result" key={`${state.data.request_id}-${index}`}>
-            <div className="term-pair"><strong>{match.zh}</strong><span>{match.en}</span></div>
-            <dl><div><dt>category</dt><dd>{match.category}</dd></div><div><dt>reason</dt><dd>{match.reason}</dd></div><div><dt>score</dt><dd>{match.score}</dd></div></dl>
-          </article>
-        ))}
-      </div>
-      <RequestId value={state.data.request_id} />
-    </div>
-  );
+  return <div className="translation-result" aria-live="polite"><div className="result-meta"><span>{({ exact: '官方术语精确匹配', fuzzy: '术语近似匹配', noop: '无需转换', llm: '模型翻译' })[state.data.kind]}</span><span>{state.data.direction === 'en' ? '英文' : '中文'}</span></div>{state.data.dictionary_miss && <p className="field-hint">未命中字典，译文请结合上下文核对。</p>}<p className="translated-text">{state.data.text}</p><button type="button" className="secondary-button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button>{copyFailed && <p role="status">复制未成功，请选择译文手动复制。</p>}<RequestId value={state.data.request_id} /></div>;
 }
-
-function TranslationView({ state, copied, onCopy }: { state: ResultState<TranslationResult>; copied: boolean; onCopy: () => void }) {
-  if (state.kind === 'idle') return <div className="empty-state">最终译文会显示在这里。</div>;
-  if (state.kind === 'loading') return <div className="empty-state" aria-live="polite">正在等待服务返回；可随时取消本页等待。</div>;
-  if (state.kind === 'cancelled') return <div className="notice-state" aria-live="polite">已停止本页等待。此操作仅停止本页等待；已开始的服务端 LLM 工作可能继续。</div>;
-  if (state.kind === 'error') return <FailureView failure={state.error} />;
-  return (
-    <div className="translation-result" aria-live="polite">
-      <div className="result-meta"><span>kind={state.data.kind}</span><span>目标：{state.data.direction === 'en' ? '英文' : '中文'}</span>{state.data.dictionary_miss && <span>dictionary miss</span>}</div>
-      {state.data.dictionary_miss && <p className="guidance">未命中官方术语；此结果来自服务端模型翻译。</p>}
-      <p>{state.data.text}</p>
-      <div className="result-actions"><button className="secondary-button" type="button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button></div>
-      <RequestId value={state.data.request_id} />
-    </div>
-  );
+function FailureView({ value }: { value: Failure }) {
+  return <div className="error-panel" role="status"><p>{MESSAGES[value.reason] ?? '服务暂时不可用，请稍后重试。'}</p>{value.retry_after_seconds !== undefined && <p>建议 {value.retry_after_seconds >= 3600 ? Math.ceil(value.retry_after_seconds / 3600) + ' 小时' : Math.ceil(value.retry_after_seconds) + ' 秒'}后重试。不会自动重发。</p>}{value.request_id && <RequestId value={value.request_id} />}</div>;
 }
-
-function FailureView({ failure, action }: { failure: Failure; action?: React.ReactNode }) {
-  return (
-    <div className="error-panel" role="status">
-      <p>{FAILURE_MESSAGES[failure.reason] ?? '服务返回异常，请稍后重试。'}</p>
-      <code>{failure.reason}</code>
-      {action}
-      {failure.request_id && <RequestId value={failure.request_id} />}
-    </div>
-  );
-}
-
-function RequestId({ value }: { value: string }) {
-  return <p className="request-id">request ID <code title={value}>{value}</code></p>;
-}
+function RequestId({ value }: { value: string }) { return <details className="request-id"><summary>问题反馈编号</summary><code>{value}</code></details>; }

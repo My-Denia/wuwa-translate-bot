@@ -1,5 +1,7 @@
+import { admitRequest } from './shared-pool.js';
+
 const MAX_UPSTREAM_BYTES = 65_536;
-const MAX_SITE_REQUEST_BYTES = 65_536;
+const MAX_SITE_REQUEST_BYTES = 32_768;
 const EXPECTED_API_MOUNT_PATH = '/wuwaterm-api/';
 
 const JSON_HEADERS = Object.freeze({
@@ -48,7 +50,7 @@ function errorResponse(reason, requestId) {
 }
 
 function nonEmptyString(value) {
-  return typeof value === 'string' && value.trim().length > 0;
+  return typeof value === 'string' && value.trim().length > 0 && !/[\uD800-\uDFFF]/u.test(value);
 }
 
 function boundedText(value, maxLength = 256) {
@@ -370,6 +372,9 @@ async function proxyRequest({
   const configured = configuredUpstream(environment);
   if (!configured || typeof fetchImpl !== 'function') return errorResponse('site_not_configured');
   const upstreamUrl = new URL(endpoint, configured.baseUrl);
+  const kind = endpoint === 'v1/translations' ? 'translations' : endpoint === 'v1/meta' ? 'meta' : 'terms';
+  const admission = await admitRequest(environment, kind, body ? Array.from(body.text).length : 0);
+  if (!admission.ok) return admission.response;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -426,7 +431,7 @@ async function proxyRequest({
     const clientBody = projector(upstreamBody);
     if (
       containsSensitiveValue(
-        clientBody,
+        upstreamBody,
         [configured.token],
         [
           configured.baseValue,
@@ -466,13 +471,8 @@ export async function proxyMetaRequest({
     method: 'GET',
     validator: validMetaBody,
     projector: (body) => ({
-      api_version: body.api_version,
-      service_version: body.service_version,
       schema_version: body.schema_version,
-      source_profile: body.source_profile,
-      source_commit: body.source_commit,
       term_count: body.term_count,
-      llm_configured: body.llm_configured,
       request_id: body.request_id,
     }),
     fetchImpl,
@@ -495,7 +495,7 @@ export async function proxyTermsRequest({
   fetchImpl = globalThis.fetch,
   timeoutMs = 8_000,
 } = {}) {
-  if (!nonEmptyString(query) || query.length > 4_096) return errorResponse('site_invalid_request');
+  if (!nonEmptyString(query) || Array.from(query.trim()).length > 200 || query.length > 4096) return errorResponse('site_invalid_request');
   const search = new URLSearchParams({ q: query });
   return proxyRequest({
     environment,
@@ -559,7 +559,7 @@ function validTranslationInput(value) {
     return false;
   }
   return nonEmptyString(value.text)
-    && value.text.length <= MAX_SITE_REQUEST_BYTES
+    && Array.from(value.text).length <= 2000
     && (value.to === undefined || value.to === 'en' || value.to === 'zh');
 }
 
@@ -574,7 +574,7 @@ export function parseTermsRequest(request) {
   } catch {
     query = null;
   }
-  if (!nonEmptyString(query) || query.length > 4_096) {
+  if (!nonEmptyString(query) || Array.from(query.trim()).length > 200 || query.length > 4096) {
     return { ok: false, response: errorResponse('site_invalid_request') };
   }
   return { ok: true, query };
