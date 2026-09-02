@@ -617,6 +617,16 @@ to pass, and the manifest and pointer to pass readback. An ordinary failure
 restores the previous pair and pointer. A recovery failure is reported as
 unresolved; it is never described as a successful rollback.
 
+When an orchestration wrapper advances the checkout, it must acquire that same
+root's `.deployments/.deployment.lock` **before** admission, fetch or fast-forward,
+and retain it through the updater's exit. Pass the locked open-file description
+as FD 9 to each source-mutating child and the updater. The supported shell entry
+validates an inherited FD 9 against the canonical root, regular-file type and
+device/inode, preserves it without reopening, and still performs nonblocking
+`flock`. Foreign or replaced descriptors are refused. With no inherited FD 9,
+the updater opens and acquires its own lock as usual. Do not release the wrapper's
+lock between checkout advancement and activation, or use a flag to skip locking.
+
 After an interrupted runtime-only transaction, use the explicit recovery entry:
 
 ```bash

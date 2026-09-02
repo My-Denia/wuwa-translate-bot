@@ -246,7 +246,8 @@ def _require_held_lock() -> None:
         lock_target = os.readlink("/proc/self/fd/9")
     except OSError:
         raise RuntimeUpdateError("deployment_lock_missing") from None
-    if not lock_target.endswith("/.deployments/.deployment.lock"):
+    expected_lock = str((ROOT / ".deployments" / ".deployment.lock").resolve())
+    if lock_target != expected_lock:
         raise RuntimeUpdateError("deployment_lock_missing")
 
 

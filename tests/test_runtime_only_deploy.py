@@ -249,6 +249,79 @@ def _run_full(root: Path, env: dict[str, str]):
     )
 
 
+@pytest.mark.parametrize("different_root", [False, True])
+def test_runtime_lock_is_bound_to_current_deployment_root(tmp_path, monkeypatch, different_root):
+    import scripts.runtime_update as runtime_update
+
+    root = tmp_path / "current"
+    other = tmp_path / "other"
+    monkeypatch.setattr(runtime_update, "ROOT", root)
+    lock_target = (other if different_root else root) / ".deployments" / ".deployment.lock"
+    monkeypatch.setattr(os, "readlink", lambda _path: str(lock_target))
+    if different_root:
+        with pytest.raises(runtime_update.RuntimeUpdateError, match="deployment_lock_missing"):
+            runtime_update._require_held_lock()
+    else:
+        runtime_update._require_held_lock()
+
+
+@pytest.mark.parametrize("lock_kind", ["current", "foreign", "replaced"])
+def test_runtime_entry_validates_and_preserves_inherited_lock(runtime_harness, lock_kind):
+    root, env, _old_hash, _new_hash = runtime_harness
+    before = _snapshot_database(root)
+    code = r'''
+import fcntl, os, pathlib, subprocess, sys
+root=pathlib.Path(sys.argv[1]); kind=sys.argv[2]
+lock=root/'.deployments/.deployment.lock'
+if kind=='foreign':
+    lock=root.parent/'foreign/.deployments/.deployment.lock'
+    lock.parent.mkdir(parents=True)
+fd=os.open(lock,os.O_RDWR|os.O_CREAT|os.O_APPEND,0o600)
+if fd!=9:
+    os.dup2(fd,9);os.close(fd)
+fcntl.flock(9,fcntl.LOCK_EX|fcntl.LOCK_NB)
+if kind=='replaced':
+    lock.unlink();lock.touch()
+try:
+    result=subprocess.run(['sh',str(root/'deploy/vps-update.sh'),'--runtime-only'],
+                          pass_fds=(9,),capture_output=True,text=True,timeout=30)
+    print(result.stdout,end='');print(result.stderr,end='',file=sys.stderr)
+    raise SystemExit(result.returncode)
+finally: os.close(9)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(root), lock_kind],
+        env=env, capture_output=True, text=True, timeout=40, check=False,
+    )
+    assert _snapshot_database(root) == before
+    if lock_kind == "current":
+        assert result.returncode == 0, result.stderr
+        assert (root / ".deploy_commit").read_text().strip() == NEW_COMMIT
+    else:
+        assert result.returncode != 0
+        assert not (root / "docker.log").exists()
+        assert (root / ".deploy_commit").read_text().strip() == OLD_COMMIT
+
+
+def test_source_handoff_competitor_cannot_rewrite_checkout(runtime_harness):
+    import fcntl
+
+    root, env, _old_hash, _new_hash = runtime_harness
+    marker = root / "checkout-marker"
+    marker.write_text("old")
+    lock = root / ".deployments/.deployment.lock"
+    with lock.open("a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            ["sh", "-c", 'exec 9>>.deployments/.deployment.lock; flock -n 9 || exit 75; '
+             'printf changed > checkout-marker; exec sh deploy/vps-update.sh --runtime-only'],
+            cwd=root, env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 75
+        assert marker.read_text() == "old"
+        assert not (root / "docker.log").exists()
+
+
 def test_runtime_execute_runs_a_real_lightweight_child(tmp_path):
     import scripts.runtime_update as runtime_update
 
@@ -270,8 +343,9 @@ def test_runtime_execute_runs_a_real_lightweight_child(tmp_path):
                 os.close(9)
             else:
                 os.dup2(saved_fd, 9)
-                os.close(saved_fd)
-            os.close(lock_fd)
+        if saved_fd is not None:
+            os.close(saved_fd)
+        os.close(lock_fd)
     assert returncode == 0
     assert stdout.strip() == "runtime execute ok"
     assert stderr == ""
