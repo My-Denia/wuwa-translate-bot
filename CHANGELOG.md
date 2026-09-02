@@ -15,6 +15,10 @@ does not distribute generated game data or generated SQLite databases.
 
 ### HTTP API
 
+- api: correlate internal LLM output-validation diagnostics with the existing
+  request ID, distinguishing empty output and missing or repeated term locks
+  without exposing text or changing the public error envelope or retry behavior.
+
 - api: `/v1/terms` now exposes the existing backend-ranked exact-to-fuzzy
   dictionary lookup instead of stopping after exact candidates. The backend
   still owns the five-result limit, ordering, category-aware exact handling,

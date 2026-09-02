@@ -8,6 +8,9 @@ mode) is covered by tests/test_bot.py.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import inspect
+import logging
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,7 @@ from wuwaterm.application import (
     ServiceMetadata,
     SlidingWindowRateLimiter,
     TranslationJob,
+    TranslationOutcome,
     build_term_service,
     build_translator,
     error_code_for_llm_reason,
@@ -70,6 +74,15 @@ def enable_mock_llm(monkeypatch, calls, response_factory) -> None:
         return response_factory(locked_text, locks)
 
     monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fake_call)
+
+
+def _llm_failure_diagnostic_type():
+    """Resolve the candidate type so RED is an assertion, not collection error."""
+    import wuwaterm.sentence as sentence_module
+
+    diagnostic_type = getattr(sentence_module, "LLMFailureDiagnostic", None)
+    assert diagnostic_type is not None, "LLMFailureDiagnostic candidate is missing"
+    return diagnostic_type
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +284,8 @@ def test_llm_failure_maps_to_stable_error_codes(monkeypatch, sample_db):
     )
     assert unavailable.kind == KIND_ERROR
     assert unavailable.error_code == ERROR_LLM_UNAVAILABLE
+    assert unavailable.llm_failure.reason == "upstream"
+    assert unavailable.llm_failure.detail == "unspecified"
 
     monkeypatch.setattr(
         "wuwaterm.sentence._call_llm_async",
@@ -283,12 +298,135 @@ def test_llm_failure_maps_to_stable_error_codes(monkeypatch, sample_db):
     )
     assert budget.kind == KIND_ERROR
     assert budget.error_code == ERROR_LLM_BUDGET_EXHAUSTED
+    assert budget.llm_failure.reason == "budget"
+    assert budget.llm_failure.detail == "unspecified"
+
+
+def test_translation_outcome_llm_failure_is_non_wire_metadata():
+    field_names = {field.name for field in dataclasses.fields(TranslationOutcome)}
+    assert "llm_failure" in field_names
+
+    diagnostic_type = _llm_failure_diagnostic_type()
+    diagnostic = diagnostic_type(
+        "invalid_response",
+        detail="missing_placeholder",
+        expected_count=1,
+        actual_count=0,
+    )
+    legacy = TranslationOutcome(
+        kind=KIND_ERROR,
+        text="temporarily unavailable",
+        to_chinese=True,
+        error_code=ERROR_LLM_UNAVAILABLE,
+    )
+    enriched = TranslationOutcome(
+        kind=KIND_ERROR,
+        text="temporarily unavailable",
+        to_chinese=True,
+        error_code=ERROR_LLM_UNAVAILABLE,
+        llm_failure=diagnostic,
+    )
+
+    assert enriched.llm_failure == diagnostic
+    assert enriched == legacy
+    assert "llm_failure" not in repr(enriched)
+
+
+def test_llm_failure_conversion_propagates_safe_diagnostic_and_log(
+    monkeypatch, caplog, sample_db
+):
+    service, translator = build_pair(sample_db)
+    enable_mock_llm(monkeypatch, [], lambda *_args: "unused")
+    secret = "provider=https://llm.invalid/token=diagnostic-secret"
+
+    parameters = inspect.signature(LLMTranslationError).parameters
+    assert {"detail", "expected_count", "actual_count"}.issubset(parameters)
+
+    async def fail(*_args, **_kwargs):
+        raise LLMTranslationError(
+            TRANSLATION_UNAVAILABLE_NOTICE,
+            reason=secret,
+            detail="empty_output",
+            expected_count=secret,
+            actual_count=True,
+        )
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fail)
+
+    with caplog.at_level(logging.WARNING, logger="wuwaterm.application"):
+        outcome = asyncio.run(
+            translate_request_async(
+                service,
+                translator,
+                TranslationJob(text="一个需要翻译的句子。"),
+            )
+        )
+
+    assert outcome.kind == KIND_ERROR
+    assert outcome.error_code == ERROR_LLM_UNAVAILABLE
+    assert outcome.llm_failure.reason == "unknown"
+    assert outcome.llm_failure.detail == "empty_output"
+    assert outcome.llm_failure.expected_count is None
+    assert outcome.llm_failure.actual_count is None
+    assert "llm translation failed reason=unknown" in caplog.text
+    assert secret not in caplog.text
+
+
+def test_llm_diagnostic_metadata_cannot_change_business_reason(
+    monkeypatch, sample_db
+):
+    service, translator = build_pair(sample_db)
+    enable_mock_llm(monkeypatch, [], lambda *_args: "unused")
+    diagnostic_type = _llm_failure_diagnostic_type()
+    error = LLMTranslationError(
+        TRANSLATION_UNAVAILABLE_NOTICE,
+        reason="upstream",
+    )
+    # A caller cannot use attached diagnostic metadata to reclassify the
+    # existing business failure as a budget exhaustion.
+    error.diagnostic = diagnostic_type("budget", detail="empty_output")
+
+    async def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fail)
+    outcome = asyncio.run(
+        translate_request_async(
+            service,
+            translator,
+            TranslationJob(text="一个需要翻译的句子。"),
+        )
+    )
+
+    assert outcome.error_code == ERROR_LLM_UNAVAILABLE
+    assert outcome.llm_failure.reason == "upstream"
+    assert outcome.llm_failure.detail == "unspecified"
 
 
 def test_error_code_for_llm_reason_defaults_to_unavailable():
     assert error_code_for_llm_reason("budget") == ERROR_LLM_BUDGET_EXHAUSTED
     for reason in ("timeout", "connect", "http", "rate_limit", None):
         assert error_code_for_llm_reason(reason) == ERROR_LLM_UNAVAILABLE
+
+
+def test_diagnostic_projection_does_not_replace_legacy_reason_mapping(
+    monkeypatch, sample_db
+):
+    class LegacyReason(str):
+        pass
+
+    service, translator = build_pair(sample_db)
+    enable_mock_llm(monkeypatch, [], lambda *_args: "unused")
+
+    async def fail(*args, **kwargs):
+        raise LLMTranslationError(BUDGET_EXHAUSTED_NOTICE, reason=LegacyReason("budget"))
+
+    monkeypatch.setattr("wuwaterm.sentence._call_llm_async", fail)
+    outcome = asyncio.run(translate_request_async(
+        service, translator, TranslationJob(text="一个需要翻译的诊断句子。")
+    ))
+    assert outcome.error_code == ERROR_LLM_BUDGET_EXHAUSTED
+    assert outcome.llm_failure.reason == "unknown"
 
 
 def test_sync_pipeline_matches_async_dictionary_stages(sample_db):

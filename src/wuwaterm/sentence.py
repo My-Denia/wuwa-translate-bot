@@ -43,11 +43,129 @@ SYNC_TRANSLATION_RUNNING_LOOP_ERROR = (
 )
 
 
+_LLM_FAILURE_REASONS = frozenset(
+    {
+        "budget",
+        "rate_limit",
+        "upstream",
+        "timeout",
+        "connect",
+        "request",
+        "http",
+        "invalid_api_response",
+        "invalid_response",
+        "html_integrity",
+        "stale_before_llm",
+        "authorization_changed_before_llm",
+        "translation_unavailable",
+        "unknown",
+    }
+)
+_LLM_FAILURE_DETAILS = frozenset(
+    {
+        "empty_output",
+        "non_text_output",
+        "missing_placeholder",
+        "duplicate_placeholder",
+        "unspecified",
+    }
+)
+_MAX_LLM_DIAGNOSTIC_COUNT = 2_147_483_647
+
+
+def _safe_diagnostic_value(value: object, allowed: frozenset[str], fallback: str) -> str:
+    # Require a builtin str so a hostile subclass cannot retain custom string
+    # behavior in an object that crosses into logging code.
+    if type(value) is str and value in allowed:
+        return value
+    return fallback
+
+
+def _safe_diagnostic_count(value: object) -> int | None:
+    # bool is an int subclass; the diagnostic contract accepts exact ints only.
+    if type(value) is int and 0 <= value <= _MAX_LLM_DIAGNOSTIC_COUNT:
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class LLMFailureDiagnostic:
+    """Safe, bounded metadata for one failed LLM translation attempt."""
+
+    reason: str
+    detail: str = "unspecified"
+    expected_count: int | None = None
+    actual_count: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "reason",
+            _safe_diagnostic_value(
+                self.reason, _LLM_FAILURE_REASONS, "unknown"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "detail",
+            _safe_diagnostic_value(
+                self.detail, _LLM_FAILURE_DETAILS, "unspecified"
+            ),
+        )
+        object.__setattr__(
+            self, "expected_count", _safe_diagnostic_count(self.expected_count)
+        )
+        object.__setattr__(
+            self, "actual_count", _safe_diagnostic_count(self.actual_count)
+        )
+
+
 class LLMTranslationError(RuntimeError):
-    def __init__(self, user_message: str, *, reason: str = "translation_unavailable"):
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        reason: str = "translation_unavailable",
+        detail: str = "unspecified",
+        expected_count: int | None = None,
+        actual_count: int | None = None,
+    ):
         super().__init__(user_message)
         self.user_message = user_message
+        self.diagnostic = LLMFailureDiagnostic(
+            reason,
+            detail=detail,
+            expected_count=expected_count,
+            actual_count=actual_count,
+        )
+        # Keep the legacy attribute's original semantics. Consumers that
+        # cross a logging or protocol boundary use ``diagnostic`` instead.
         self.reason = reason
+
+
+def _safe_llm_failure_diagnostic(exc: object) -> LLMFailureDiagnostic:
+    """Project an exception onto a safe diagnostic tied to its legacy reason."""
+
+    try:
+        original_reason = getattr(exc, "reason", "translation_unavailable")
+    except Exception:
+        original_reason = "translation_unavailable"
+    base = LLMFailureDiagnostic(original_reason)
+
+    try:
+        attached = getattr(exc, "diagnostic", None)
+        if type(attached) is not LLMFailureDiagnostic:
+            return base
+        if type(attached.reason) is not str or attached.reason != base.reason:
+            return base
+        return LLMFailureDiagnostic(
+            base.reason,
+            detail=attached.detail,
+            expected_count=attached.expected_count,
+            actual_count=attached.actual_count,
+        )
+    except Exception:
+        return base
 
 
 @dataclass(frozen=True)
@@ -58,9 +176,19 @@ class LockedSentence:
     def restore(self, translated: str, *, to_en: bool = True) -> str:
         result = translated
         for placeholder, zh, en in self.locks:
-            if result.count(placeholder) != 1:
+            actual_count = result.count(placeholder)
+            if actual_count != 1:
+                detail = (
+                    "missing_placeholder"
+                    if actual_count == 0
+                    else "duplicate_placeholder"
+                )
                 raise LLMTranslationError(
-                    TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_response"
+                    TRANSLATION_UNAVAILABLE_NOTICE,
+                    reason="invalid_response",
+                    detail=detail,
+                    expected_count=1,
+                    actual_count=actual_count,
                 )
             result = result.replace(placeholder, en if to_en else zh)
         return result
@@ -78,12 +206,16 @@ class _TermSpan:
 def _require_nonblank_llm_output(content: str) -> str:
     if not isinstance(content, str):
         raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_response"
+            TRANSLATION_UNAVAILABLE_NOTICE,
+            reason="invalid_response",
+            detail="non_text_output",
         )
     normalized = content.strip()
     if not normalized:
         raise LLMTranslationError(
-            TRANSLATION_UNAVAILABLE_NOTICE, reason="invalid_response"
+            TRANSLATION_UNAVAILABLE_NOTICE,
+            reason="invalid_response",
+            detail="empty_output",
         )
     return normalized
 
@@ -266,9 +398,10 @@ class SentenceTranslator:
             translated = _require_nonblank_llm_output(translated)
             return locked.restore(translated, to_en=not to_chinese)
         except LLMTranslationError as exc:
+            diagnostic = _safe_llm_failure_diagnostic(exc)
             LOGGER.warning(
                 "llm translation failed reason=%s",
-                getattr(exc, "reason", "translation_unavailable"),
+                diagnostic.reason,
             )
             return exc.user_message
 
@@ -312,9 +445,10 @@ class SentenceTranslator:
                 raise
             # Swallowed here by contract (caller gets the notice text), so
             # this is the only place the failure reason can reach the logs.
+            diagnostic = _safe_llm_failure_diagnostic(exc)
             LOGGER.warning(
                 "llm translation failed reason=%s",
-                getattr(exc, "reason", "translation_unavailable"),
+                diagnostic.reason,
             )
             return exc.user_message
 
