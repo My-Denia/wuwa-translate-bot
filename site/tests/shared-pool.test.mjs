@@ -110,3 +110,26 @@ test('independent callers share the same store and fixed window rollover has bou
   assert.equal(db.row().upstream_used,1);
   assert.ok(3*POOL_LIMITS.upstreamPerMinute < 30);
 });
+
+test('second-only contention retries in one second but translation minute exhaustion does not', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  assert.equal((await admitRequest(env, 'translations', 2)).ok, true);
+  const terms = await admitRequest(env, 'terms');
+  assert.equal(terms.response.headers.get('retry-after'), '1');
+  assert.equal((await terms.response.json()).reason, 'shared_pool_busy');
+  const translation = await admitRequest(env, 'translations', 2);
+  assert.equal(translation.response.headers.get('retry-after'), '60');
+  db.advance(1);
+  assert.equal((await admitRequest(env, 'terms')).ok, true);
+});
+
+test('meta daily exhaustion advertises UTC day reset, independently of the minute gate', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  for (let i = 0; i < POOL_LIMITS.metaPerDay; i++) { db.advance(61); assert.equal((await admitRequest(env, 'meta')).ok, true); }
+  const exhausted = await admitRequest(env, 'meta');
+  assert.equal(exhausted.response.status, 429);
+  assert.equal(exhausted.response.headers.get('retry-after'), String(86400 - 61 * POOL_LIMITS.metaPerDay));
+  assert.equal((await exhausted.response.json()).reason, 'meta_pool_exhausted');
+  db.advance(86400);
+  assert.equal((await admitRequest(env, 'meta')).ok, true);
+});

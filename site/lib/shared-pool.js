@@ -67,6 +67,8 @@ function validRow(row) {
 }
 
 async function bounded(operation) {
+  // This deadline bounds dispatch, not D1 cancellation. A late reservation may
+  // still commit after rejection; it stays charged, with no refund or retry.
   let timer;
   const started = performance.now();
   try {
@@ -115,7 +117,13 @@ export async function admitRequest(environment, kind, characters = 0) {
     const s = snapshot(current, environment); const untilDay = 86400 - current.clock % 86400;
     if (kind === 'translations' && (!s.translations.remaining || s.characters.remaining < characters)) return deny('translation_pool_exhausted', untilDay);
     if (kind === 'terms' && !s.terms.remaining) return deny('terms_pool_exhausted', untilDay);
-    return deny('shared_pool_busy', s.retry_after_seconds);
+    const sameDay = current.day_key === Math.floor(current.clock / 86400);
+    if (kind === 'meta' && sameDay && current.meta_used >= POOL_LIMITS.metaPerDay) return deny('meta_pool_exhausted', untilDay);
+    const minuteFull = current.minute_key === Math.floor(current.clock / 60)
+      && (current.upstream_used >= POOL_LIMITS.upstreamPerMinute
+        || (kind === 'translations' && current.translation_minute_used >= POOL_LIMITS.translationsPerMinute));
+    if (current.second_key > current.clock) return deny('shared_pool_unavailable');
+    return deny('shared_pool_busy', minuteFull ? s.retry_after_seconds : 1);
   } catch { return deny('shared_pool_unavailable'); }
 }
 

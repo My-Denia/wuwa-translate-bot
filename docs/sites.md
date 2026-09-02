@@ -48,7 +48,7 @@ Rejected requests do not count as admitted requests.
 Candidate ceilings reserve headroom against the separately verified upstream
 device contract, including adjacent fixed-window bursts and dispatch delay.
 The extra second gate reduces bursts. Network delay and other users of the
-same credential can still produce upstream429; upstream admission remains
+same credential can still produce upstream 429; upstream admission remains
 authoritative. Live observations belong in private operator evidence, not this
 public document. Candidate limits are not demonstrated sustainable throughput.
 
@@ -117,7 +117,7 @@ owner-only immediately on failure. If anonymous Hosted proof is required before
 any such transition, remain private rather than bypass authentication.
 
 Rollback: restore owner-only ACL first; restore prior runtime settings securely
-and privately redeploy the accepted clean version7/source tree. Leave new D1
+and privately redeploy the accepted clean version 7 source tree. Leave new D1
 tables unused rather than dropping them. Never clear live counters as a recovery
 shortcut. Turning off only translation preserves the independent lookup pool.
 
