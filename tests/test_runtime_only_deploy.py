@@ -251,6 +251,7 @@ def _run_full(root: Path, env: dict[str, str]):
 
 @pytest.mark.parametrize("different_root", [False, True])
 def test_runtime_lock_is_bound_to_current_deployment_root(tmp_path, monkeypatch, different_root):
+    import fcntl
     import scripts.runtime_update as runtime_update
 
     root = tmp_path / "current"
@@ -258,11 +259,47 @@ def test_runtime_lock_is_bound_to_current_deployment_root(tmp_path, monkeypatch,
     monkeypatch.setattr(runtime_update, "ROOT", root)
     lock_target = (other if different_root else root) / ".deployments" / ".deployment.lock"
     monkeypatch.setattr(os, "readlink", lambda _path: str(lock_target))
+    monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
     if different_root:
         with pytest.raises(runtime_update.RuntimeUpdateError, match="deployment_lock_missing"):
             runtime_update._require_held_lock()
     else:
         runtime_update._require_held_lock()
+
+
+@pytest.mark.parametrize("lock_mode", ["available", "inherited", "contended"])
+def test_runtime_helper_acquires_real_lock_before_admission(tmp_path, lock_mode):
+    import fcntl
+
+    root = tmp_path / "root"
+    lock = root / ".deployments" / ".deployment.lock"
+    lock.parent.mkdir(parents=True)
+    code = r'''
+import os, pathlib, sys
+import scripts.runtime_update as runtime
+root=pathlib.Path(sys.argv[1]); inherited=int(sys.argv[2])
+runtime.ROOT=root
+fd=inherited if inherited>=0 else os.open(root/'.deployments/.deployment.lock',os.O_RDWR)
+if fd!=9: os.dup2(fd,9)
+runtime._new_deployment=lambda: (print('admitted') or 0)
+raise SystemExit(runtime.main(['--runtime-only']))
+'''
+    with lock.open("a+") as held:
+        if lock_mode != "available":
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        inherited = held.fileno() if lock_mode == "inherited" else -1
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(root), str(inherited)],
+            pass_fds=(held.fileno(),) if inherited >= 0 else (),
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    if lock_mode == "contended":
+        assert result.returncode != 0
+        assert "admitted" not in result.stdout
+        assert "deployment_lock" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "admitted"
 
 
 @pytest.mark.parametrize("lock_kind", ["current", "foreign", "replaced"])

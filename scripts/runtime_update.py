@@ -249,6 +249,12 @@ def _require_held_lock() -> None:
     expected_lock = str((ROOT / ".deployments" / ".deployment.lock").resolve())
     if lock_target != expected_lock:
         raise RuntimeUpdateError("deployment_lock_missing")
+    try:
+        import fcntl
+
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        raise RuntimeUpdateError("deployment_lock_missing") from None
 
 
 def _fsync_directory(path: Path) -> None:
@@ -896,9 +902,9 @@ def _restore_old(
             _verify_pointer(journal["old_pointer"])
         _set_journal(journal, phase="rolled_back", status="rolled_back")
     except Exception:
-        # A rollback failure must never leave a partially restored surface
-        # serving. Persist unresolved intent, then make a best-effort final
-        # quiesce of both services. The caller retains the nonzero result.
+        # A rollback failure must never be reported as recovered. Persist
+        # unresolved intent, then make a best-effort final quiesce of both
+        # services. The caller retains the nonzero result.
         try:
             _set_journal(journal, phase="rollback_quiesce", status="unresolved")
         except Exception:
