@@ -29,6 +29,27 @@ Re-running the same source commit is accepted only when image/DB binding is
 byte-identical; different rebuilds need a new source commit rather than
 rewriting history manifests.
 
+### Runtime-only extension
+
+For a code-only update with an already compatible terminology database,
+`deploy/vps-update.sh --runtime-only` preserves that exact database file. It
+uses the shared deployment lock, read-only schema/provenance/integrity and
+identity checks, and an immutable runtime image for **both** serving containers.
+The existing single-image manifest continues to describe the complete runtime;
+an API-only mixed revision is not introduced.
+
+This path skips the builder, data refresh, candidate creation, DB promotion,
+state migration and new DB backup. A durable transaction record binds the old
+images/pointer and unchanged database to the target. New-deployment admission
+requires current `origin/main`; recovery instead uses the trusted local record
+and retained old images, so an interrupted update remains recoverable offline.
+Unresolved recovery blocks normal deployment. Recovery never rewrites a changed
+database or disguises an incomplete transition as success.
+
+The default updater retains the full candidate pipeline for an intentional
+data update. Runtime-only deployment adds an explicit operation with a stricter
+database-preservation contract; it does not weaken full deployment verification.
+
 ## Consequences
 
 - Positive: provenance is auditable; rollback path is scripted.

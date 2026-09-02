@@ -1,10 +1,123 @@
 #!/bin/sh
 set -eu
 
+mode="full"
+case "${1:-}" in
+  "")
+    ;;
+  --runtime-only)
+    mode="runtime-only"
+    shift
+    ;;
+  --recover-runtime)
+    mode="recover-runtime"
+    shift
+    ;;
+  *)
+    echo "unknown deployment option" >&2
+    exit 64
+    ;;
+esac
+if [ "$#" -ne 0 ]; then
+  echo "deployment option does not accept extra arguments" >&2
+  exit 64
+fi
+
 DEPLOY_ROOT="${WUWATERM_DEPLOY_ROOT:-/opt/wuwaterm/current}"
 FAIL_STEP="${WUWATERM_FAIL_STEP:-}"
 
 cd "$DEPLOY_ROOT"
+
+# One nonblocking lock covers both the legacy data deployment and the
+# runtime-only transaction. File descriptor 9 stays open through exec and is
+# explicitly inherited by the runtime helper's Docker children, so a parent
+# death cannot release the lock while an external mutation is still running.
+# Reject the metadata directory and lock path before opening either. `>>` then
+# avoids truncating an existing regular lock if another process races a failed
+# attempt; neither path may ever resolve through a symlink.
+if [ -L .deployments ] || {
+  [ -e .deployments ] && [ ! -d .deployments ]
+}; then
+  echo "refusing deployment: .deployments must be a regular directory" >&2
+  exit 1
+fi
+mkdir -p .deployments
+if [ -L .deployments ] || {
+  [ ! -d .deployments ]
+}; then
+  echo "refusing deployment: .deployments must be a regular directory" >&2
+  exit 1
+fi
+canonical_root="$(pwd -P)"
+canonical_lock="$canonical_root/.deployments/.deployment.lock"
+if [ -L "$canonical_lock" ] || {
+  [ -e "$canonical_lock" ] && [ ! -f "$canonical_lock" ]
+}; then
+  echo "refusing deployment: deployment lock must be a regular file" >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "refusing deployment: flock is required for the shared deployment lock" >&2
+  exit 1
+fi
+
+validate_lock_fd() {
+  lock_fd_target="$(readlink /proc/self/fd/9 2>/dev/null)" || {
+    echo "refusing deployment: inherited deployment lock is unreadable" >&2
+    exit 1
+  }
+  if [ "$lock_fd_target" != "$canonical_lock" ]; then
+    echo "refusing deployment: inherited deployment lock path mismatch" >&2
+    exit 1
+  fi
+  if [ ! -f /proc/self/fd/9 ] || [ ! -f "$canonical_lock" ]; then
+    echo "refusing deployment: deployment lock is not regular" >&2
+    exit 1
+  fi
+  fd_identity="$(LC_ALL=C stat -Lc '%d:%i' /proc/self/fd/9 2>/dev/null)" || {
+    echo "refusing deployment: inherited deployment lock identity is unreadable" >&2
+    exit 1
+  }
+  path_identity="$(LC_ALL=C stat -c '%d:%i' "$canonical_lock" 2>/dev/null)" || {
+    echo "refusing deployment: deployment lock identity is unreadable" >&2
+    exit 1
+  }
+  if [ "$fd_identity" != "$path_identity" ]; then
+    echo "refusing deployment: inherited deployment lock identity mismatch" >&2
+    exit 1
+  fi
+}
+
+if [ -L /proc/self/fd/9 ]; then
+  # An inherited descriptor is already part of the caller's transaction.
+  # Validate and preserve it; reopening here could detach the child from the
+  # parent's lock handoff or accept a foreign descriptor.
+  validate_lock_fd
+else
+  exec 9>>"$canonical_lock"
+  validate_lock_fd
+fi
+if ! flock -n 9; then
+  echo "deployment already in progress" >&2
+  exit 75
+fi
+
+case "$mode" in
+  runtime-only)
+    exec python3 scripts/runtime_update.py --runtime-only
+    ;;
+  recover-runtime)
+    exec python3 scripts/runtime_update.py --recover-runtime
+    ;;
+esac
+
+# A full data deployment must never run across an unresolved runtime-only
+# transaction. The helper validates the durable journal before any full-mode
+# Git, builder, candidate DB, or runtime mutation is reached.
+if ! python3 scripts/runtime_update.py --check-full-journal >/dev/null 2>&1; then
+  echo "refusing full deployment: runtime transaction requires recovery" >&2
+  exit 1
+fi
 
 compose() {
   SOURCE_COMMIT="${SOURCE_COMMIT:-unknown}" \

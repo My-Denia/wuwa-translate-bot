@@ -5,6 +5,14 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Operations
+
+- Add a transactional runtime-only deployment mode that keeps the existing
+  terminology database unchanged while updating bot and API to one verified
+  image. Shared locking, immutable database checks, durable recovery state and
+  old-image/pointer rollback protect interrupted updates. No data refresh or
+  candidate database is part of this mode.
+
 ### Sites
 
 - Add a shared beta candidate with atomic aggregate quotas, independent lookup
