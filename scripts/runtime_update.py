@@ -432,7 +432,10 @@ def _has_sidecars(path: Path) -> bool:
 
 
 def _database_snapshot() -> dict[str, Any]:
-    path = ROOT / "data" / "terms.db"
+    data_root = ROOT / "data"
+    if not data_root.is_dir() or data_root.is_symlink():
+        raise RuntimeUpdateError("invalid_database")
+    path = data_root / "terms.db"
     if not path.is_file() or path.is_symlink():
         raise RuntimeUpdateError("invalid_database")
     if _has_sidecars(path):
@@ -590,6 +593,16 @@ def _assert_services(
             expected_image_id=expected_image_id,
             expected_revision=expected_revision,
         )
+
+
+def _observed_service_ref(allowed_refs: set[str]) -> str:
+    refs = tuple(
+        _docker_inspect("{{.Config.Image}}", CONTAINERS[service])
+        for service in SERVICES
+    )
+    if len(set(refs)) != 1 or refs[0] not in allowed_refs:
+        raise RuntimeUpdateError("service_binding_mismatch")
+    return refs[0]
 
 
 def _assert_directories() -> None:
@@ -866,6 +879,52 @@ def _attempt_quiesce() -> bool:
         return False
 
 
+def _handle_pre_activation_failure(
+    journal: dict[str, Any],
+    db_snapshot: dict[str, Any],
+    old_manifest: dict[str, Any],
+    current_old_ref: str,
+) -> None:
+    """Close a failure before the first stop without restarting services."""
+
+    global _in_rollback, _termination_requested
+    previous_in_rollback = _in_rollback
+    previous_termination_requested = _termination_requested
+    _in_rollback = True
+    _termination_requested = False
+    try:
+        _assert_database_unchanged(db_snapshot)
+        if _pointer(ROOT / ".deploy_commit") != journal["old_pointer"]:
+            raise RuntimeUpdateError("pointer_changed")
+        current_manifest = _verify_existing_manifest(
+            ROOT / journal["old_manifest_path"],
+            source_commit=journal["old_pointer"],
+            db_path=ROOT / "data" / "terms.db",
+            immutable=True,
+        )
+        if current_manifest != old_manifest:
+            raise RuntimeUpdateError("manifest_changed")
+        _assert_services(
+            expected_ref=current_old_ref,
+            expected_image_id=journal["old_image_id"],
+            expected_revision=journal["old_pointer"],
+        )
+        _assert_database_unchanged(db_snapshot)
+        _set_journal(journal, phase="rolled_back", status="rolled_back")
+        return
+    except Exception:
+        # The old binding could not be proven unchanged. Stop both surfaces and
+        # leave an unresolved journal rather than recreating or claiming safety.
+        try:
+            _set_journal(journal, phase="unresolved", status="unresolved")
+        except Exception:
+            pass
+        _attempt_quiesce()
+    finally:
+        _in_rollback = previous_in_rollback
+        _termination_requested = previous_termination_requested
+
+
 def _restore_old(
     journal: dict[str, Any], db_snapshot: dict[str, Any], *, stop_first: bool
 ) -> None:
@@ -1007,7 +1066,7 @@ def _new_deployment() -> int:
         db_path=db_path,
         immutable=True,
     )
-    current_old_ref = old_manifest["image"]["ref"]
+    allowed_old_refs = {old_manifest["image"]["ref"]}
     if (
         existing is not None
         and existing["status"] == "rolled_back"
@@ -1015,7 +1074,8 @@ def _new_deployment() -> int:
         and existing["old_image_id"] == old_manifest["image"]["id"]
         and existing["old_image_ref"] == old_manifest["image"]["ref"]
     ):
-        current_old_ref = existing["rollback_image_ref"]
+        allowed_old_refs.add(existing["rollback_image_ref"])
+    current_old_ref = _observed_service_ref(allowed_old_refs)
     _assert_services(
         expected_ref=current_old_ref,
         expected_image_id=_image_id(old_manifest["image"]["id"]),
@@ -1033,6 +1093,7 @@ def _new_deployment() -> int:
         target_manifest=target_manifest,
     )
     _set_journal(journal, phase="prepared", status="active")
+    activation_attempted = False
     stop_completed = False
     new_started = False
     try:
@@ -1041,8 +1102,6 @@ def _new_deployment() -> int:
         if target_manifest is not None:
             target = _image_binding(journal["target_image_ref"])
         else:
-            target = _current_image_exists(journal["target_image_ref"])
-        if target is None:
             _set_journal(journal, phase="image_build")
             _compose("build", "wuwaterm", env=_runtime_env(journal["target_image_ref"]))
             target = _image_binding(journal["target_image_ref"])
@@ -1054,6 +1113,7 @@ def _new_deployment() -> int:
         journal["target_image_revision"] = target_revision
         _set_journal(journal, phase="image_ready")
         _set_journal(journal, phase="stopping")
+        activation_attempted = True
         _compose("stop", *SERVICES)
         stop_completed = True
         _assert_database_unchanged(db_snapshot)
@@ -1084,32 +1144,42 @@ def _new_deployment() -> int:
         _set_journal(journal, phase="committed", status="committed")
         return 0
     except RuntimeUpdateError:
-        try:
-            _restore_old(
-                journal,
-                db_snapshot,
-                stop_first=stop_completed or new_started,
+        if not activation_attempted:
+            _handle_pre_activation_failure(
+                journal, db_snapshot, old_manifest, current_old_ref
             )
-        except RuntimeUpdateError:
-            _set_journal(journal, phase="unresolved", status="unresolved")
-            raise
+        else:
+            try:
+                _restore_old(
+                    journal,
+                    db_snapshot,
+                    stop_first=stop_completed or new_started,
+                )
+            except RuntimeUpdateError:
+                _set_journal(journal, phase="unresolved", status="unresolved")
+                raise
         raise
     except Exception:
-        try:
-            _restore_old(
-                journal,
-                db_snapshot,
-                stop_first=stop_completed or new_started,
+        if not activation_attempted:
+            _handle_pre_activation_failure(
+                journal, db_snapshot, old_manifest, current_old_ref
             )
-        except Exception:
-            _set_journal(journal, phase="unresolved", status="unresolved")
-            raise RuntimeUpdateError("internal_error") from None
+        else:
+            try:
+                _restore_old(
+                    journal,
+                    db_snapshot,
+                    stop_first=stop_completed or new_started,
+                )
+            except Exception:
+                _set_journal(journal, phase="unresolved", status="unresolved")
+                raise RuntimeUpdateError("internal_error") from None
         raise RuntimeUpdateError("internal_error") from None
 
 
 def _recovery() -> int:
     journal = _load_journal()
-    if journal["status"] == "committed":
+    if journal["status"] in {"committed", "rolled_back"}:
         raise RuntimeUpdateError("no_recovery_needed")
     if _run_output(
         ["git", "status", "--porcelain", "--untracked-files=all"], allow_empty=True

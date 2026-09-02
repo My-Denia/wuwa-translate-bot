@@ -609,6 +609,8 @@ The new manifest records the unchanged database's actual hash and provenance;
 its backup field explicitly denotes that no new database backup was created.
 An already deployed identical commit is verified without rebuilding or replacing
 its immutable image binding.
+An existing local tag without an immutable manifest is rebuilt from the clean
+reviewed checkout; a revision label alone is not proof of source provenance.
 
 Full and runtime-only updates share one deployment lock. Runtime-only progress
 is recorded durably before operations that may partially succeed. Success
@@ -616,6 +618,10 @@ requires both containers to match the new image, readiness and database checks
 to pass, and the manifest and pointer to pass readback. An ordinary failure
 restores the previous pair and pointer. A recovery failure is reported as
 unresolved; it is never described as a successful rollback.
+Ordinary failures before the first service-stop attempt leave the old pair
+running only after its database, pointer, manifest and runtime binding are
+reverified unchanged. Partial stop failures still require rollback. A completed
+rollback journal cannot be replayed over a later full deployment.
 
 When an orchestration wrapper advances the checkout, it must acquire that same
 root's `.deployments/.deployment.lock` **before** admission, fetch or fast-forward,

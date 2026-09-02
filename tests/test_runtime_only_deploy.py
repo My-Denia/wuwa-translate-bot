@@ -93,12 +93,13 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "    case \"$ref\" in *rollback*) exit 46 ;; esac\n"
         "  fi\n"
         "  case \"$*\" in\n"
-        "    *Config.Labels*) printf '%s\\n' \"$revision\" ;;\n"
+        "    *Config.Labels*) if [ \"${RUNTIME_FAKE_LABEL_FAIL:-0}\" = 1 ]; then case \"$ref\" in *\"$target_commit\") exit 54 ;; esac; fi; printf '%s\\n' \"$revision\" ;;\n"
         "    *) printf '%s\\n' \"$image_id\" ;;\n"
         "  esac\n"
         "  exit 0\n"
         "fi\n"
         "if [ \"${1:-}\" = image ] && [ \"${2:-}\" = tag ]; then\n"
+        "  if [ \"${RUNTIME_FAKE_TAG_FAIL:-0}\" = 1 ]; then exit 53; fi\n"
         "  if [ \"${RUNTIME_FAKE_BLOCK_PHASE:-}\" = tag ]; then\n"
         "    if [ -n \"${RUNTIME_FAKE_CHILD_PID_FILE:-}\" ]; then printf '%s' \"$$\" > \"$RUNTIME_FAKE_CHILD_PID_FILE\"; fi\n"
         "    printf ready > \"${RUNTIME_FAKE_BLOCK_FILE:?}\"\n"
@@ -126,6 +127,8 @@ def _write_runtime_fake_docker(root: Path) -> None:
         "      printf 'false\\n' > \"$FAKE_DEPLOY_ROOT/api-running\"\n"
         "      ;;\n"
         "    *' build '*wuwaterm*)\n"
+        "      if [ \"${RUNTIME_FAKE_BUILD_CHANGE_DB:-0}\" = 1 ]; then printf external-build-change >> \"$FAKE_DEPLOY_ROOT/data/terms.db\"; fi\n"
+        "      if [ \"${RUNTIME_FAKE_BUILD_FAIL:-0}\" = 1 ]; then exit 51; fi\n"
         "      printf 'built\\n' > \"$FAKE_DEPLOY_ROOT/runtime-built\"\n"
         "      printf done > \"$FAKE_DEPLOY_ROOT/target-image-created\"\n"
         "      ;;\n"
@@ -498,6 +501,110 @@ def test_runtime_only_builds_cached_runtime_target_when_missing(runtime_harness)
     assert (root / "target-image-created").exists()
 
 
+def test_review_unmanifested_target_tag_is_rebuilt(runtime_harness):
+    root, env, _old_hash, _new_hash = runtime_harness
+    before = _snapshot_database(root)
+    # The fake daemon reports an existing tag with the expected revision label,
+    # but there is deliberately no immutable manifest binding it to a build.
+    result = _run_runtime(root, env)
+    assert result.returncode == 0, result.stderr
+    assert " build wuwaterm" in (root / "actions.log").read_text()
+    assert _snapshot_database(root) == before
+
+
+@pytest.mark.parametrize("failure", ["TAG", "BUILD", "LABEL"])
+def test_review_pre_activation_failure_preserves_old_services_and_retries(runtime_harness, failure):
+    root, env, _old_hash, _new_hash = runtime_harness
+    env["RUNTIME_FAKE_TARGET_IMAGE_MISSING"] = "1"
+    env[f"RUNTIME_FAKE_{failure}_FAIL"] = "1"
+    before = _snapshot_database(root)
+    serving = {p: _snapshot_file(root / p) for p in (
+        "bot-image", "bot-ref", "bot-running", "api-image", "api-ref", "api-running")}
+    failed = _run_runtime(root, env)
+    assert failed.returncode != 0
+    actions = (root / "actions.log").read_text()
+    assert " stop wuwaterm" not in actions
+    assert " up -d " not in actions
+    assert {p: _snapshot_file(root / p) for p in serving} == serving
+    assert _snapshot_database(root) == before
+    journal = json.loads((root / ".deployments/.runtime-transaction.json").read_text())
+    assert journal["status"] == "rolled_back"
+    env.pop(f"RUNTIME_FAKE_{failure}_FAIL")
+    retried = _run_runtime(root, env)
+    assert retried.returncode == 0, retried.stderr
+    assert _snapshot_database(root) == before
+
+
+def test_review_pre_activation_database_drift_still_quiesces(runtime_harness):
+    root, env, _old_hash, _new_hash = runtime_harness
+    env.update(RUNTIME_FAKE_TARGET_IMAGE_MISSING="1", RUNTIME_FAKE_BUILD_FAIL="1",
+               RUNTIME_FAKE_BUILD_CHANGE_DB="1")
+    before = (root / "data/terms.db").read_bytes()
+    result = _run_runtime(root, env)
+    assert result.returncode != 0
+    assert (root / "data/terms.db").read_bytes() == before + b"external-build-change"
+    assert (root / "bot-running").read_text().strip() == "false"
+    assert (root / "api-running").read_text().strip() == "false"
+    journal = json.loads((root / ".deployments/.runtime-transaction.json").read_text())
+    assert journal["status"] == "unresolved"
+
+
+def test_review_closed_rollback_cannot_stop_later_full_deployment(runtime_harness):
+    root, env, _old_hash, _new_hash = runtime_harness
+    env["RUNTIME_FAKE_START"] = "api"
+    assert _run_runtime(root, env).returncode != 0
+    env.pop("RUNTIME_FAKE_START")
+    journal_path = root / ".deployments/.runtime-transaction.json"
+    assert json.loads(journal_path.read_text())["status"] == "rolled_back"
+    # Simulate a subsequent authorized full deployment at the same source SHA.
+    with sqlite3.connect(root / "data/terms.db") as connection:
+        connection.execute("UPDATE terms SET priority = priority + 1")
+    manifest = build_manifest(
+        source_commit=NEW_COMMIT, image_ref=f"wuwaterm-runtime:{NEW_COMMIT}",
+        image_id=NEW_RUNTIME_IMAGE_ID, image_digest=NEW_RUNTIME_IMAGE_ID,
+        image_revision=NEW_COMMIT, db_path=root / "data/terms.db",
+        db_display_path="data/terms.db", backup_path="full-deployment-fixture",
+        deployment_utc="2026-01-01T00:00:00Z",
+    )
+    write_manifest(root / ".deployments" / f"{NEW_COMMIT}.json", manifest)
+    publish_commit_pointer(root / ".deploy_commit", NEW_COMMIT)
+    for service in ("bot", "api"):
+        (root / f"{service}-image").write_text(NEW_RUNTIME_IMAGE_ID + "\n")
+        (root / f"{service}-ref").write_text(f"wuwaterm-runtime:{NEW_COMMIT}\n")
+        (root / f"{service}-running").write_text("true\n")
+    db_before = _snapshot_database(root)
+    journal_before = journal_path.read_bytes()
+    log_before = (root / "docker.log").read_bytes()
+    result = _run_runtime(root, env, recover=True)
+    assert result.returncode != 0
+    assert "no_recovery_needed" in result.stderr
+    assert (root / "docker.log").read_bytes() == log_before
+    assert journal_path.read_bytes() == journal_before
+    assert _snapshot_database(root) == db_before
+    assert (root / "bot-running").read_text().strip() == "true"
+    assert (root / "api-running").read_text().strip() == "true"
+
+
+@pytest.mark.parametrize("entry", ["snapshot", "shell"])
+def test_review_database_parent_symlink_is_rejected_before_open(runtime_harness, monkeypatch, entry):
+    import scripts.runtime_update as runtime_update
+
+    root, env, _old_hash, _new_hash = runtime_harness
+    outside = root.parent / "outside-data"
+    (root / "data").rename(outside)
+    (root / "data").symlink_to(outside, target_is_directory=True)
+    before = _snapshot_file(outside / "terms.db")
+    if entry == "snapshot":
+        monkeypatch.setattr(runtime_update, "ROOT", root)
+        with pytest.raises(runtime_update.RuntimeUpdateError):
+            runtime_update._database_snapshot()
+    else:
+        result = _run_runtime(root, env)
+        assert result.returncode != 0
+        assert not (root / "docker.log").exists()
+    assert _snapshot_file(outside / "terms.db") == before
+
+
 def test_runtime_only_rejects_extra_arguments_before_mutation(runtime_harness):
     root, env, old_hash, _new_hash = runtime_harness
     before = _snapshot_database(root)
@@ -773,10 +880,13 @@ def test_runtime_only_sigterm_leaves_recoverable_journal(runtime_harness):
 def test_runtime_only_recovery_does_not_require_fresh_main(runtime_harness):
     root, env, _old_hash, _new_hash = runtime_harness
     env["RUNTIME_FAKE_START"] = "api"
+    env["RUNTIME_FAKE_ROLLBACK_READINESS_FAIL"] = "1"
     failed = _run_runtime(root, env)
     assert failed.returncode != 0
+    assert json.loads((root / ".deployments/.runtime-transaction.json").read_text())["status"] == "unresolved"
     env["FAKE_GIT_REMOTE_UNREACHABLE"] = "1"
     env["RUNTIME_FAKE_START"] = ""
+    env.pop("RUNTIME_FAKE_ROLLBACK_READINESS_FAIL")
 
     recovered = _run_runtime(root, env, recover=True)
 
@@ -823,11 +933,14 @@ def test_runtime_only_recovery_then_same_commit_retry_reuses_immutable_manifest(
 ):
     root, env, _old_hash, _new_hash = runtime_harness
     env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
+    env["RUNTIME_FAKE_ROLLBACK_READINESS_FAIL"] = "1"
     failed = _run_runtime(root, env)
     assert failed.returncode != 0
+    assert json.loads((root / ".deployments/.runtime-transaction.json").read_text())["status"] == "unresolved"
     target_manifest = root / ".deployments" / f"{NEW_COMMIT}.json"
     before_manifest = target_manifest.read_bytes()
 
+    env.pop("RUNTIME_FAKE_ROLLBACK_READINESS_FAIL")
     recovered = _run_runtime(root, env, recover=True)
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
 
@@ -847,8 +960,11 @@ def test_runtime_only_ignores_stale_rolled_back_journal_after_new_binding(
 ):
     root, env, _old_hash, _new_hash = runtime_harness
     env["FAKE_POINTER_DURABILITY_FAILURE"] = "1"
+    env["RUNTIME_FAKE_ROLLBACK_READINESS_FAIL"] = "1"
     failed = _run_runtime(root, env)
     assert failed.returncode != 0
+    assert json.loads((root / ".deployments/.runtime-transaction.json").read_text())["status"] == "unresolved"
+    env.pop("RUNTIME_FAKE_ROLLBACK_READINESS_FAIL")
     recovered = _run_runtime(root, env, recover=True)
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr
 
