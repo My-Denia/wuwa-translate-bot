@@ -32,8 +32,11 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.34",
+    "drizzle-kit": "0.31.10",
+    "drizzle-orm": "0.45.2",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.2",
+    "miniflare": "5.20260820.0-alpha",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
@@ -41,5 +44,10 @@
     "vite": "8.2.2",
     "wrangler": "4.125.0"
   },
-  "type": "module"
+  "type": "module",
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.25.12"
+    }
+  }
 }

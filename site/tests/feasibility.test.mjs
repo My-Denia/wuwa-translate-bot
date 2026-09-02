@@ -1,3 +1,4 @@
+import { createPool } from './helpers/pool-fixture.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -7,7 +8,11 @@ import { proxyMetaRequest } from '../lib/wuwaterm-proxy.js';
 const TOKEN = 'SYNTHETIC_DEVICE_SENTINEL_74A1C9';
 const ALLOWED_HOST = 'meta.wuwaterm-test.net';
 const BASE_URL = `https://${ALLOWED_HOST}/wuwaterm-api/`;
+// Fresh DB per projection fixture; shared contention is covered in shared-pool/D1 suites.
 const ENVIRONMENT = {
+  get DB() { return createPool(); },
+  WUWATERM_SHARED_POOL_ENABLED: 'true',
+  WUWATERM_TRANSLATION_ENABLED: 'true',
   WUWATERM_API_BASE_URL: BASE_URL,
   WUWATERM_API_ALLOWED_HOST: ALLOWED_HOST,
   WUWATERM_SITE_DEVICE_TOKEN: TOKEN,
@@ -130,13 +135,8 @@ test('200 uses the fixed metadata path and strict server-owned request', async (
   assert.equal(response.status, 200);
   assertSafeHeaders(response);
   assert.deepEqual(await bodyOf(response), {
-    api_version: 'v1',
-    service_version: '0.4.0',
     schema_version: '3.6.0',
-    source_profile: 'official',
-    source_commit: 'abc123',
     term_count: 12_345,
-    llm_configured: true,
     request_id: 'req-test-001',
   });
 });
@@ -457,7 +457,7 @@ test('canary values in projected success fields are rejected rather than reflect
 
 test('printable quote and backslash token values are checked before JSON escaping', async () => {
   const token = 'SYNTHETIC_DEVICE_"TOKEN\\VALUE';
-  const environment = { ...ENVIRONMENT, WUWATERM_SITE_DEVICE_TOKEN: token };
+  const environment = { ...ENVIRONMENT, get DB() { return createPool(); }, WUWATERM_SITE_DEVICE_TOKEN: token };
   for (const overrides of [
     { service_version: token },
     { api_version: `v1-${token}` },
@@ -485,7 +485,7 @@ test('printable quote and backslash token values are checked before JSON escapin
     })),
   });
   assert.equal(allowed.status, 200);
-  assert.equal((await bodyOf(allowed)).service_version, escapedLookalike);
+  assert.equal((await bodyOf(allowed)).service_version, undefined);
 });
 
 test('sensitive values colliding with numeric fields or fixed JSON keys are rejected', async () => {

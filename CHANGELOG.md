@@ -5,6 +5,13 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Sites
+
+- Add a shared beta candidate with atomic aggregate quotas, independent lookup
+  and translation budgets, public-facing copy and privacy/limit guidance.
+  Hosted access remains owner-only pending private acceptance; no public launch
+  is announced. The Site does not process visitor IPs or promise personal fairness.
+
 ### HTTP API
 
 - api: `/v1/terms` now exposes the existing backend-ranked exact-to-fuzzy
