@@ -579,6 +579,66 @@ The worst case for the host is the SUM of the two, never one shared ceiling.
 Nothing in either process coordinates with the other; if a single global budget
 is ever needed, that is a new mechanism, not a configuration change.
 
+## Runtime-only updates
+
+Use the runtime-only transaction when the application changes but the existing
+terminology database already matches the reviewed source's schema and data pin:
+
+```bash
+sh deploy/vps-update.sh --runtime-only
+```
+
+Run this from the normal deployment checkout after reviewing and merging the
+change. The updater requires a clean checkout at freshly fetched `origin/main`.
+It updates **both** serving containers to one immutable image, so the existing
+manifest's single source/image identity continues to describe the bot and API.
+Both services are briefly stopped during the transition. It does not change
+Telegram configuration or send a Telegram test message.
+
+Admission requires an existing, consistent pointer, immutable manifest, running
+bot/API pair, and read-only data mounts. It rejects missing or mismatched state,
+an unsupported database, symlinked database paths, and SQLite journal sidecars.
+Database validation uses immutable read-only SQLite access, schema/provenance
+and integrity checks, and file identity plus SHA-256 comparisons. The same
+database must remain unchanged through activation and recovery.
+
+This mode never runs the builder, refreshes source data, creates a candidate
+database, promotes a database, migrates legacy state, or creates a new database
+backup. It retains old image identities and the old pointer for recovery.
+The new manifest records the unchanged database's actual hash and provenance;
+its backup field explicitly denotes that no new database backup was created.
+An already deployed identical commit is verified without rebuilding or replacing
+its immutable image binding.
+
+Full and runtime-only updates share one deployment lock. Runtime-only progress
+is recorded durably before operations that may partially succeed. Success
+requires both containers to match the new image, readiness and database checks
+to pass, and the manifest and pointer to pass readback. An ordinary failure
+restores the previous pair and pointer. A recovery failure is reported as
+unresolved; it is never described as a successful rollback.
+
+After an interrupted runtime-only transaction, use the explicit recovery entry:
+
+```bash
+sh deploy/vps-update.sh --recover-runtime
+```
+
+Recovery validates the saved transaction, trusted local tool/Compose binding,
+old manifest and images, and unchanged database. It can handle stopped or
+partially switched containers; it does not require network access or the latest
+remote `main`. Keep the trusted deployment checkout and recovery images intact.
+Normal deployment refuses an unresolved transaction until recovery succeeds.
+Uncatchable termination or host power loss is not an atomic Docker operation:
+the durable record makes the unfinished transition explicit and recoverable.
+
+Recovery never restores or rewrites `terms.db`. If another process changed it,
+or the journal/image binding cannot be trusted, stop and resolve that condition
+before serving. Do not delete the journal, rewrite a manifest, or manually tag
+another image merely to make a precondition pass.
+
+This path activates reviewed runtime code; it does not prove a translation
+provider is reliable or establish the cause of an earlier LLM failure.
+
 ## State Migration
 
 Older deployments stored `chat_settings.json` and `channel_replies.json` in

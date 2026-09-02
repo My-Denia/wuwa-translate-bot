@@ -663,6 +663,10 @@ def test_read_db_provenance_closes_database_connection(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def deploy_harness(tmp_path):
+    return _make_deploy_harness(tmp_path)
+
+
+def _make_deploy_harness(tmp_path):
     root = tmp_path / "deploy-root"
     (root / "deploy").mkdir(parents=True)
     (root / "scripts").mkdir()
@@ -678,6 +682,9 @@ def deploy_harness(tmp_path):
         "scripts/verify_db.py",
     ):
         shutil.copy2(ROOT / relative, root / relative)
+    runtime_helper = ROOT / "scripts" / "runtime_update.py"
+    if runtime_helper.is_file():
+        shutil.copy2(runtime_helper, root / "scripts" / runtime_helper.name)
     env_file = root / ".env"
     env_file.write_text("TELEGRAM_BOT_TOKEN=not-loaded-by-builder\n", encoding="utf-8")
     env_file.chmod(0o600)

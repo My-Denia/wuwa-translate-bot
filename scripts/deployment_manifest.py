@@ -90,13 +90,24 @@ PROVENANCE_KEYS = (
 
 
 def read_db_provenance(
-    path: Path, *, require_active_profile: bool = True
+    path: Path, *, require_active_profile: bool = True, immutable: bool = False
 ) -> dict[str, str]:
     if not path.is_file():
         raise ManifestError(f"database is missing: {path}")
+    if immutable and path.is_symlink():
+        raise ManifestError(f"database must not be a symlink: {path}")
+    if immutable and any(
+        path.with_name(path.name + suffix).exists()
+        or path.with_name(path.name + suffix).is_symlink()
+        for suffix in ("-wal", "-shm", "-journal")
+    ):
+        raise ManifestError(f"database sidecar exists: {path}")
+    database_uri = f"{path.resolve().as_uri()}?mode=ro"
+    if immutable:
+        database_uri += "&immutable=1"
     try:
         with closing(
-            sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+            sqlite3.connect(database_uri, uri=True)
         ) as conn:
             rows = conn.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
     except sqlite3.Error as exc:
@@ -159,6 +170,7 @@ def build_manifest(
     db_display_path: str,
     backup_path: str,
     deployment_utc: str,
+    immutable: bool = False,
 ) -> dict[str, Any]:
     if not COMMIT_RE.fullmatch(source_commit):
         raise ManifestError("source commit must be a 40-character lowercase hex SHA")
@@ -169,7 +181,7 @@ def build_manifest(
     if not image_ref or not image_id or not image_digest:
         raise ManifestError("image ref, id and digest must be non-empty")
     _validate_timestamp(deployment_utc)
-    metadata = read_db_provenance(db_path)
+    metadata = read_db_provenance(db_path, immutable=immutable)
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "source_commit": source_commit,
@@ -206,6 +218,7 @@ def verify_manifest(
     image_id: str,
     image_digest: str | None,
     db_path: Path,
+    immutable: bool = False,
 ) -> dict[str, Any]:
     payload = _load_manifest(path)
     required_top = {
@@ -240,7 +253,7 @@ def verify_manifest(
     if database["sha256"] != sha256_file(db_path):
         raise ManifestError("manifest database hash mismatch")
     if database["provenance"] != read_db_provenance(
-        db_path, require_active_profile=False
+        db_path, require_active_profile=False, immutable=immutable
     ):
         raise ManifestError("manifest database provenance mismatch")
     return payload
@@ -309,6 +322,7 @@ def main() -> int:
     create.add_argument("--db-display-path", default="data/terms.db")
     create.add_argument("--backup-path", required=True)
     create.add_argument("--deployment-utc", required=True)
+    create.add_argument("--immutable", action="store_true")
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--path", required=True, type=Path)
@@ -316,6 +330,7 @@ def main() -> int:
     verify.add_argument("--image-id", required=True)
     verify.add_argument("--image-digest")
     verify.add_argument("--db", required=True, type=Path)
+    verify.add_argument("--immutable", action="store_true")
 
     publish_pointer = subparsers.add_parser("publish-pointer")
     publish_pointer.add_argument("--path", required=True, type=Path)
@@ -345,6 +360,7 @@ def main() -> int:
                 db_display_path=args.db_display_path,
                 backup_path=args.backup_path,
                 deployment_utc=args.deployment_utc,
+                immutable=args.immutable,
             )
             if args.path.exists():
                 verify_manifest(
@@ -353,6 +369,7 @@ def main() -> int:
                     image_id=args.image_id,
                     image_digest=args.image_digest,
                     db_path=args.db,
+                    immutable=args.immutable,
                 )
             else:
                 write_manifest(args.path, payload)
@@ -363,6 +380,7 @@ def main() -> int:
                 image_id=args.image_id,
                 image_digest=args.image_digest,
                 db_path=args.db,
+                immutable=args.immutable,
             )
         elif args.command == "publish-pointer":
             publish_commit_pointer(args.path, args.source_commit)
