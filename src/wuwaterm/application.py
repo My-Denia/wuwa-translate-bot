@@ -583,6 +583,7 @@ def build_translator(
     *,
     timeout: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
+    en_zh_protocol: bool = False,
 ) -> SentenceTranslator:
     """Create a term-locking translator with adapter-owned LLM budgets.
 
@@ -593,6 +594,7 @@ def build_translator(
         db_path,
         llm_timeout_seconds=timeout,
         llm_max_concurrency=max_concurrency,
+        en_zh_protocol=en_zh_protocol,
     )
 
 

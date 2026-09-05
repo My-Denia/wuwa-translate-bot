@@ -23,6 +23,11 @@ does not distribute generated game data or generated SQLite databases.
 
 ### HTTP API
 
+- api: make English-to-Chinese placeholder protocol instructions explicit so
+  the model keeps locked tokens for server-side official-term restoration.
+  Integrity checks, error responses and retry behavior are unchanged; default
+  bot/CLI and HTML translation prompts are not changed.
+
 - api: correlate internal LLM output-validation diagnostics with the existing
   request ID, distinguishing empty output and missing or repeated term locks
   without exposing text or changing the public error envelope or retry behavior.
