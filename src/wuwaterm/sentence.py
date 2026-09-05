@@ -258,11 +258,13 @@ class SentenceTranslator:
         llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
         llm_max_concurrency: int = DEFAULT_LLM_MAX_CONCURRENCY,
         llm_transport: httpx.AsyncBaseTransport | None = None,
+        en_zh_protocol: bool = False,
     ):
         self.service = TermService(db_path)
         self.llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self.llm_max_concurrency = max(1, int(llm_max_concurrency))
         self._llm_transport = llm_transport
+        self._en_zh_protocol = en_zh_protocol
         self._llm_slots: asyncio.Semaphore | None = None
         self._llm_slots_loop: asyncio.AbstractEventLoop | None = None
         self._llm_client: httpx.AsyncClient | None = None
@@ -531,6 +533,7 @@ class SentenceTranslator:
             for name, value in (
                 ("html_mode", html_mode),
                 ("to_chinese", to_chinese),
+                ("en_zh_protocol", self._en_zh_protocol),
                 ("timeout_seconds", self.llm_timeout_seconds),
                 ("client", client),
             ):
@@ -556,6 +559,7 @@ class SentenceTranslator:
         for name, value in (
             ("html_mode", html_mode),
             ("to_chinese", to_chinese),
+            ("en_zh_protocol", self._en_zh_protocol),
             ("timeout_seconds", self.llm_timeout_seconds),
         ):
             if name in supported:
@@ -716,6 +720,7 @@ def _call_llm(
     html_mode: bool = False,
     to_chinese: bool = False,
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
+    en_zh_protocol: bool = False,
 ) -> str:
     _ensure_sync_llm_outside_running_loop()
     return asyncio.run(
@@ -725,6 +730,7 @@ def _call_llm(
             html_mode=html_mode,
             to_chinese=to_chinese,
             timeout_seconds=timeout_seconds,
+            **({"en_zh_protocol": True} if en_zh_protocol else {}),
         )
     )
 
@@ -737,6 +743,7 @@ async def _call_llm_async(
     timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     transport: httpx.AsyncBaseTransport | None = None,
     client: httpx.AsyncClient | None = None,
+    en_zh_protocol: bool = False,
 ) -> str:
     if client is not None:
         return await _call_llm_async_with_client(
@@ -745,6 +752,7 @@ async def _call_llm_async(
             locks,
             html_mode=html_mode,
             to_chinese=to_chinese,
+            en_zh_protocol=en_zh_protocol,
         )
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds), transport=transport
@@ -755,6 +763,7 @@ async def _call_llm_async(
             locks,
             html_mode=html_mode,
             to_chinese=to_chinese,
+            en_zh_protocol=en_zh_protocol,
         )
 
 
@@ -764,6 +773,7 @@ async def _call_llm_async_with_client(
     locks: tuple[tuple[str, str, str], ...],
     html_mode: bool = False,
     to_chinese: bool = False,
+    en_zh_protocol: bool = False,
 ) -> str:
     base_url = (
         os.getenv("WUWATERM_OPENAI_BASE_URL")
@@ -782,11 +792,20 @@ async def _call_llm_async_with_client(
     official_index = 1 if to_chinese else 2
     lock_lines = "\n".join(f"{lock[0]} = {lock[official_index]}" for lock in locks)
     if to_chinese:
+        placeholder_instruction = "Keep all placeholders exactly unchanged. "
+        if en_zh_protocol and not html_mode:
+            placeholder_instruction = (
+                "Placeholder tokens are mandatory protocol syntax, not natural-language output. "
+                "Copy every placeholder byte-for-byte exactly once even though all other output "
+                "must be Simplified Chinese. Never replace a placeholder with the official term "
+                "shown under Locked terms; the server validates and restores official terms after "
+                "your response.\n"
+            )
         system_content = (
             "Translate English Wuthering Waves text into Simplified Chinese. "
             + _UNTRUSTED_SOURCE_INSTRUCTION
-            + "Keep all placeholders exactly unchanged. "
-            "Do not paraphrase locked official terms. Return Chinese only.\n"
+            + placeholder_instruction
+            + "Do not paraphrase locked official terms. Return Chinese only.\n"
         )
         if html_mode:
             system_content += _HTML_MODE_INSTRUCTION_ZH

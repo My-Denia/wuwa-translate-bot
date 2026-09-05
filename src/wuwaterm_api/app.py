@@ -1027,6 +1027,7 @@ def create_app(
         resolved.db_path,
         timeout=resolved.llm_timeout_seconds,
         max_concurrency=resolved.llm_max_concurrency,
+        en_zh_protocol=True,
     )
     app.state.rate_limiter = SlidingWindowRateLimiter(
         limit=resolved.rate_limit_per_minute
