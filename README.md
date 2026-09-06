@@ -1,8 +1,12 @@
 简体中文 | [English](README.en.md)
 
-# WuWa Term Bot
+# WuwaTerm
 
-自建的《鸣潮》官方本地化翻译服务：中文术语译为官方英文，英文亦可反向译回中文，并支持两个方向的术语锁定整句翻译。一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的 owner 工作台：浏览器只打同源 `/api/*`，由服务端代理持有设备凭据再访问已发布的 `/v1`；它不是进程内 `/wuwaterm-web`，也不是第三条翻译流水线（[Sites 工作台](docs/sites.md)）。
+> **匿名公开公测：** [立即使用 WuwaTerm](https://wuwaterm.denia-official.chatgpt.site) — 无需账户，可查询中英官方术语，并做中英双向整句翻译。全站共享一份先到先用的公测额度；单个访客可能耗尽额度，服务也可能繁忙或偶发失败，**无 SLA**。
+
+WuwaTerm 是面向《鸣潮》的中英术语与翻译工具：中文术语查询官方英文，英文亦可反向查询中文，并支持两个方向的术语锁定整句翻译。它是非官方的独立个人开源项目，并非 Kuro Games 官方网站，与 Kuro Games **无隶属、授权或背书关系**。
+
+一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的匿名公开公测入口：浏览器只打同源 `/api/*`，由服务端代理持有设备凭据再访问已发布的 `/v1`；它不是进程内 `/wuwaterm-web`，也不是第三条翻译流水线（[公开公测 Site](docs/sites.md)）。
 
 服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
 
@@ -10,11 +14,12 @@
 
 ## 从这里开始
 
+- **先试再装**：打开[匿名公开公测站](https://wuwaterm.denia-official.chatgpt.site)。没有账户或登录；查词与整句翻译额度全站共享，提交前请先读[额度与隐私边界](docs/sites.md)。
 - **桌面用户**：从 [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases) 下载 Windows 客户端 zip（自 v0.4.0 起提供），用法见[桌面客户端](client/README.md)。
 - **Telegram 群管理员**：命令、授权与频道自动翻译见 [Telegram 行为](docs/telegram-behavior.md)。
 - **自建部署者**：从零把服务跑起来见[自建部署指南](docs/self-hosting.md)。
 - **贡献者**：先读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地校验只有一个入口 `python scripts/validate.py`。
-- **owner 生产运维**：这台机器上的事务式更新流程见[部署](docs/deployment.md)。Sites 工作台的环境变量、信任边界与校验见[Sites 工作台](docs/sites.md)。
+- **owner 生产运维**：这台机器上的事务式更新流程见[部署](docs/deployment.md)。公开 Site 的环境变量、共享额度、信任边界与校验见[公开公测 Site](docs/sites.md)。
 
 平台与版本的支持范围见[支持矩阵](docs/support-matrix.md)。
 
@@ -25,7 +30,7 @@
 - **第三个表示层 owner 私有 web**：`src/wuwaterm_api/web/` 是一个供 owner 从手机使用的移动端网页界面，跑在 API 进程内部而不是独立服务。它由 `WUWATERM_API_WEB_ENABLED` 控制，**默认关闭**：开关关闭时既没有路由，也没有子应用，已发布的 API 契约里同样没有它的任何条目（[web 表示层](docs/web-presentation-layer.md)、[ADR 0014](docs/adr/0014-private-web-presentation-layer.md)）。
 - **device-principal 设备主体认证**：所有 `/v1` 路由都要求设备凭据。凭据可单独吊销，不涉及 Telegram bot 自身的访问控制；凭据存储中只保存加盐 scrypt 校验值（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
 - **Windows 桌面客户端**：`client/` 下的客户端有意不作为 adapter，而是 API 已发布契约的消费方，自身不含任何翻译逻辑。它经由 HTTPS 访问服务（[ADR 0011](docs/adr/0011-pc-client-stack.md)、[ADR 0012](docs/adr/0012-client-transport-selection.md)）。
-- **Sites 私有工作台**：`site/` 是独立的 Hosted / Cloudflare Worker 产品，不是 API 进程的一部分。浏览器不持有设备凭据；访问者鉴权不在应用代码里。不要把它和默认关闭的 `/wuwaterm-web` 当成同一条表面（[Sites 工作台](docs/sites.md)）。
+- **匿名公开公测 Site**：`site/` 是独立的 Hosted / Cloudflare Worker 产品，不是 API 进程的一部分。访客无需 WuwaTerm 账户；浏览器不持有设备凭据，服务端代理代表全站以一个设备主体访问 VPS 上的权威 `/v1` 后端。不要把它和默认关闭的 owner 私有 `/wuwaterm-web` 当成同一条表面（[公开公测 Site](docs/sites.md)）。
 - **已发布契约**：API 契约快照提交在 [`docs/api/openapi.json`](docs/api/openapi.json)，由 `scripts/check_api_contract.py` 做漂移门禁。
 
 合起来是：两个 presentation adapter，加上一个跑在 API 进程内、默认关闭的 owner 私有表示层，加上两个 API 消费方（桌面客户端，以及 `site/` 上的服务端代理）。0.3.0 的发布说明将这一步描述为「API-first release: the Telegram-only bot becomes a multi-adapter system」（[更新日志](CHANGELOG.md)）。以上各点的决策依据见 [ADR 索引](docs/adr/README.md)；模块、请求流与信任边界的维护者地图见 [架构文档](docs/architecture.md)。
@@ -148,7 +153,7 @@ Telegram 命令示例：
 - [桌面客户端](client/README.md)：HTTP API 的 Windows 客户端，含技术栈、设置、凭据处理与构建方式。
 - [隐私与 LLM](docs/privacy-and-llm.md)：dictionary-first 隐私边界、LLM 配置、提示注入防护、占位符完整性、fail-closed 设置与密钥处理。
 - [web 表示层](docs/web-presentation-layer.md)：跑在 API 进程内、默认关闭的 owner 私有网页界面，含开关、路由与边界。
-- [Sites 工作台](docs/sites.md)：独立托管的同源代理工作台；不是 `/wuwaterm-web`。
+- [公开公测 Site](docs/sites.md)：匿名公开入口、共享额度、隐私边界与独立托管的同源代理；不是 `/wuwaterm-web`。
 - [校验](docs/validation.md)：离线校验命令、线上冒烟的注意事项与 Windows 参考命令。
 - [发布检查单](docs/release-checklist.md)：发布元数据、校验、隐私说明、分发边界与发布说明模板。
 
@@ -194,7 +199,7 @@ WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
 
 ## 维护
 
-这是个人业余项目，按尽力而为的方式维护。不保证会回应 issue 或 pull request。
+这是个人业余项目，按尽力而为的方式维护。不保证会回应 issue 或 pull request。匿名公开公测站同样不承诺固定可用性、响应时间或单访客公平；详见[支持说明](SUPPORT.md)。
 
 提问、报告问题与提交改动的去处，以及能期待什么、不能期待什么，写在[支持说明](SUPPORT.md)里；安全问题的报告方式见[安全策略](SECURITY.md)；改动的提交流程见 [CONTRIBUTING.md](CONTRIBUTING.md)；被测试覆盖的平台与版本范围见[支持矩阵](docs/support-matrix.md)。
 

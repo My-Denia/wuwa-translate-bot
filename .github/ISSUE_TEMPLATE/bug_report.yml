@@ -34,6 +34,7 @@ body:
       label: Which surface
       description: Where the wrong behaviour appears. Pick the one closest to it.
       options:
+        - Public beta Site
         - Telegram bot
         - HTTP API (/v1)
         - Private web presentation layer

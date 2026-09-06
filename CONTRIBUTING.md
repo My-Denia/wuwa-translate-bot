@@ -10,6 +10,10 @@ adds one will be rejected no matter how well it is written.
 
 - Bug reports and questions: [SUPPORT.md](SUPPORT.md).
 - Vulnerabilities: [SECURITY.md](SECURITY.md) — never a public issue.
+- Try the current no-account public beta:
+  <https://wuwaterm.denia-official.chatgpt.site>. It is best-effort, uses one
+  shared pool, and is a useful reproduction surface but not an SLA-backed test
+  environment.
 
 ## What This Repository Contains
 
@@ -21,9 +25,9 @@ adapters):
 - an owner-private web presentation layer that lives inside the API process and
   is off by default,
 - a Windows desktop client under `client/`, which only calls the API,
-- an owner workbench under `site/`, a separately hosted same-origin proxy.
+- an anonymous public beta under `site/`, a separately hosted same-origin proxy.
   It is not the in-process `/wuwaterm-web` layer; see
-  [Sites Workbench](docs/sites.md).
+  [Public Beta Site](docs/sites.md).
 
 Terminology comes from a pinned upstream game-data repository and is built into
 a local SQLite dictionary. Wuthering Waves game data and terminology are

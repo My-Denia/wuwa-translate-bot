@@ -1,9 +1,10 @@
 # Security Policy
 
 WuwaTerm is a personal, MIT-licensed hobby project maintained by one person.
-The project provides no public hosted service: every running instance belongs
-to whoever deployed it, including an owner's private Hosted Sites Worker.
-Security reports are read and handled best-effort — please read
+The project provides a no-account public beta at
+<https://wuwaterm.denia-official.chatgpt.site>; it uses one shared, first-come
+quota pool and has no SLA. Self-hosted instances still belong to whoever
+deployed them. Security reports are read and handled best-effort — please read
 [What To Expect](#what-to-expect) before depending on a reply.
 
 ## Supported Versions
@@ -49,8 +50,8 @@ takes no details, and it carries a required acknowledgement that you have put
 none there. Everything about the finding waits for the private channel.
 
 A useful report says what an attacker gains, what access they need to start,
-which surface it goes through (Telegram bot, HTTP API, private web layer,
-Sites workbench under `site/`, desktop client, or the data build), and the
+which surface it goes through (public beta Site under `site/`, Telegram bot,
+HTTP API, private web layer, desktop client, or the data build), and the
 smallest sequence that shows it.
 
 ## What Not To Put In A Report
@@ -77,7 +78,7 @@ for you — the redaction is yours to do.
 In scope:
 
 - The code in this repository: the Telegram bot, the HTTP API under `/v1`, the
-  owner-private web presentation layer, the Sites workbench under `site/`, the
+  owner-private web presentation layer, the public beta Site under `site/`, the
   desktop client under `client/`, the data-build scripts, and the packaging
   and deployment material under `deploy/`.
 - The deployment guidance this project publishes, when following it as written
@@ -138,10 +139,10 @@ it:
   it from the store afterwards.
 - The web presentation layer is off by default and is owner-private when on. It
   is not a public front end and turning it on does not make it one.
-- The Sites workbench under `site/` is a separate Hosted proxy. It is not the
+- The public beta Site under `site/` is a separate Hosted proxy. It is not the
   in-process web layer. Application code does not authenticate the visitor;
   the Worker holds a device token that can spend `/v1` quota. See
-  [Sites Workbench](docs/sites.md).
+  [Public Beta Site](docs/sites.md).
 - Nothing in this repository distributes generated databases, upstream game
   text, or runtime state. If your deployment is committing any of those, that is
   a local misconfiguration. `python scripts/validate.py` catches most of it —

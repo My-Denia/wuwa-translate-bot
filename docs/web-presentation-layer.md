@@ -8,10 +8,12 @@ HTTP API; linked-channel posts retain their specialized orchestration. It runs
 for that, and the cost it carries, are recorded in
 [ADR 0014](adr/0014-private-web-presentation-layer.md).
 
-**This is not `site/`.** The Hosted / Cloudflare workbench is a separately
-deployed same-origin proxy with no visitor gate in application code. Do not
+**This is not `site/`.** The anonymous public beta Site is a separately
+deployed Hosted / Cloudflare same-origin proxy with no visitor account or gate
+in application code. Do not
 copy these `WUWATERM_API_WEB_*` settings or the Caddy `basic_auth` / edge
-marker recipe onto that product. That surface is [sites.md](sites.md).
+marker recipe onto that product. That surface is the
+[Public Beta Site](sites.md).
 
 This document extends [deployment.md](deployment.md); the route below is a
 second block in the same site that already carries the API route, and every

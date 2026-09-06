@@ -398,7 +398,9 @@ databases, generated TextMap files, or Wuthering Waves game data.
 
 ### Known Limitations
 
-- Self-hosted; no public hosted service is provided.
+- Release artifacts remain self-hosting inputs. The separate anonymous public
+  beta is at https://wuwaterm.denia-official.chatgpt.site; it uses one shared,
+  first-come pool and has no SLA or per-visitor fairness guarantee.
 - Live Telegram operation requires maintainer-provided credentials and chat
   configuration.
 - Free-text sentence translation requires an external OpenAI-compatible

@@ -1,17 +1,37 @@
-# WuwaTerm Sites shared beta candidate
+# WuwaTerm anonymous public beta Site
 
-As of 2026-09-02, this checkout contains a shared-pool public product **candidate**.
-The Hosted Site remains owner-only on the previously accepted clean version.
-Local code, a saved version, an access policy, and a successful public production
-deployment are separate facts. This document does not announce a public launch.
+The current public entry is
+<https://wuwaterm.denia-official.chatgpt.site>. It is anonymously reachable,
+requires no WuwaTerm account, and offers Chinese-English official-term lookup
+plus bidirectional, term-locked sentence translation through one shared public
+beta pool. It is a best-effort hobby service: one visitor can exhaust the pool,
+requests can be busy or fail, and there is no SLA.
 
-The browser calls only same-origin `/api/pool`, `/api/terms` and
-`/api/translations`. Initial rendering reads aggregate pool status without
-contacting the VPS. Optional `/api/meta` remains gated and exposes only term
-count, data version and the existing request correlation ID. The server-only
-proxy uses the existing dedicated device credential and authoritative VPS
-pipeline. Dictionary lookup, ranking, direction, term locking and model calls
-remain on the VPS. The Telegram bot, Windows client and API contract are unchanged.
+## Evidence boundaries
+
+- **Repository fact:** `site/` is a separately built Hosted / Cloudflare Worker
+  BFF. The browser calls only same-origin `/api/pool`, `/api/terms` and
+  `/api/translations`; the server-side proxy holds the device credential and
+  calls the published `/v1` contract. There is no visitor account system in
+  this application code.
+- **Hosted platform control:** the hosting platform owns deployment versions,
+  resources and any platform-level access control. Those values are not encoded
+  by the application tree. Anonymous reachability does not prove a particular
+  ACL value or immutable deployed-version identity.
+- **VPS fact:** the supported production topology keeps dictionary lookup,
+  ranking, direction detection, term locking and model calls on the authoritative
+  VPS API. The Site contains no second translation pipeline. A documentation
+  check or public response is not a fresh attestation of a particular VPS
+  process, container or commit.
+- **Current production observation (2026-09-06):** cookie-free requests reached
+  the public pages and same-origin API; exact lookup and one tested sentence in
+  each direction succeeded, while another admitted translation first returned a
+  busy response and later succeeded after the suggested wait. This establishes
+  the tested behavior, not universal model accuracy or future availability.
+
+Optional `/api/meta` exposes only term count, data schema version and the existing
+request correlation ID. The Telegram bot, Windows client and API contract are
+separate surfaces and are unchanged by public Site access.
 
 ## Shared pool contract
 
@@ -23,7 +43,7 @@ accounts or history. No cleanup scheduler is required: the row is overwritten
 as active windows advance; inactive old aggregate windows can remain until
 another admission. This is not a time-based deletion promise.
 
-| Boundary | Candidate ceiling |
+| Boundary | Public beta ceiling |
 | --- | --- |
 | All upstream routes combined | 6 admissions / fixed UTC minute; 1 / UTC second |
 | Translation | 1 admission / fixed UTC minute |
@@ -45,12 +65,12 @@ DB response or upstream timeout. Missing/invalid settings, missing D1, failed
 queries and acquisition exceeding 1s fail closed, with no upstream call.
 Rejected requests do not count as admitted requests.
 
-Candidate ceilings reserve headroom against the separately verified upstream
+Public beta ceilings reserve headroom against the upstream
 device contract, including adjacent fixed-window bursts and dispatch delay.
 The extra second gate reduces bursts. Network delay and other users of the
 same credential can still produce upstream 429; upstream admission remains
-authoritative. Live observations belong in private operator evidence, not this
-public document. Candidate limits are not demonstrated sustainable throughput.
+authoritative. The values shown by the live Site are a changing snapshot, not
+demonstrated sustainable throughput or an availability promise.
 
 The pool limits admitted upstream work and translation input. It does not
 guarantee a currency bill, fairness, availability, DDoS resistance, bounded
@@ -69,8 +89,8 @@ them in hosting metadata, browser code, source control, evidence or URLs.
 | `WUWATERM_API_ALLOWED_HOST` | Existing exact lower-case hostname; unchanged |
 | `WUWATERM_SITE_DEVICE_TOKEN` | Existing dedicated device; unchanged |
 | `WUWATERM_SHARED_POOL_ENABLED` | Must explicitly equal `true`; otherwise all upstream requests fail closed |
-| `WUWATERM_TRANSLATION_ENABLED` | Explicit `false` initially; `true` only after acceptance and owner decision |
-| `WUWATERM_PUBLIC_ORIGIN` | Absent until separately approved public gate; exact HTTPS Sites origin with no trailing slash, credentials, path, port or query |
+| `WUWATERM_TRANSLATION_ENABLED` | `true` enables the current public translation surface; `false` pauses translations while preserving the independent lookup pool |
+| `WUWATERM_PUBLIC_ORIGIN` | Exact approved HTTPS Sites origin with no trailing slash, credentials, path, port or query; enables canonical/OG/robots/sitemap metadata |
 
 `.openai/hosting.json` declares logical `DB` only; no real database ID or
 secret. `db/schema.ts`, `drizzle.config.ts` and generated `drizzle/` migrations
@@ -79,11 +99,11 @@ resources and applies migrations. A failed deployment can leave migrations
 applied: inspect the applied boundary before retrying and never edit applied
 migration history.
 
-Public SEO is disabled by default. A validated operator origin enables canonical,
-robots and sitemap metadata; it never derives from request or forwarded hosts.
-All API responses remain no-store/noindex and public UI errors use fixed copy.
+The current public origin publishes canonical, robots and sitemap metadata. The
+origin never derives from request or forwarded hosts. All API responses remain
+no-store/noindex and public UI errors use fixed copy.
 
-## Validation and publication gates
+## Validation and operations
 
 From `site/`:
 
@@ -96,30 +116,19 @@ npm run build
 npm run verify:no-client-secret
 ~~~
 
-Tests include existing proxy failure/secret contracts, real SQLite boundary
-fixtures and a genuine local Cloudflare D1/Worker concurrency test using a
-synthetic upstream. They do not prove Hosted anonymous dispatch or production
-request correlation. Browser acceptance uses the candidate UI and BFF with
-local D1 and synthetic results; test harnesses are excluded from the production
-entrypoint.
+Tests include proxy failure/secret contracts, real SQLite boundary fixtures and
+a genuine local Cloudflare D1/Worker concurrency test using a synthetic upstream.
+They do not prove a current Hosted deployment, physical VPS binding, model
+reliability or public uptime. Browser acceptance and live probes are separate
+evidence and must be labelled with their observation time.
 
-Before public access, independently authorize and verify the exact source
-commit/push, D1/environment, saved version and private deployment. Complete
-owner-session acceptance, failure recovery, secret projection, a real successful
-VPS request-ID correlation and rollback readiness. Verify owner/custom ACL with
-exactly one account and no groups or external visitors immediately before staging.
-Public slug and public ACL are separate final owner decisions.
+Any later change to the public slug, platform access control, D1/environment,
+saved version, credentials, translation switch or deployment remains a separate
+owner-authorized action. Read the exact current object before changing it and
+retain rollback/readback evidence. Turning off translation preserves the
+independent lookup pool; never clear live counters as a recovery shortcut.
 
-Private ACL deliberately rejects signed-out traffic. Local anonymous handler
-tests cannot be called Hosted anonymous acceptance. Final signed-out production
-smoke requires an explicitly authorized controlled public transition; restore
-owner-only immediately on failure. If anonymous Hosted proof is required before
-any such transition, remain private rather than bypass authentication.
-
-Rollback: restore owner-only ACL first; restore prior runtime settings securely
-and privately redeploy the accepted clean version 7 source tree. Leave new D1
-tables unused rather than dropping them. Never clear live counters as a recovery
-shortcut. Turning off only translation preserves the independent lookup pool.
-
-The prior trusted-IP design and M0 failure remain historical evidence, not an
-implementation route. See [shared-only design](superpowers/specs/2026-09-02-wuwaterm-shared-beta.md).
+Historical owner-only, M0, runner-blocked and private-acceptance records remain
+historical evidence. The current public beta does not rewrite them into success
+or prove steps that those runs left unresolved. See the original
+[shared-only design](superpowers/specs/2026-09-02-wuwaterm-shared-beta.md).
