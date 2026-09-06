@@ -6,9 +6,12 @@ time to answer them, and some will not be answered at all. That is the honest
 version, and it is better to say it here than to leave you waiting on a promise
 that was never made.
 
-There is **no project-provided public hosted service**. Every running instance
-is somebody's own deployment — including an owner-private Hosted Sites Worker,
-or yours if you are running one.
+The project provides a no-account, shared public beta at
+<https://wuwaterm.denia-official.chatgpt.site>. It is a best-effort entry for
+term lookup and bidirectional sentence translation, not a managed commercial
+service: the whole site shares one first-come pool, one visitor can exhaust it,
+requests may be busy or fail, and there is **no SLA**. Self-hosted deployments
+remain separately operated by whoever runs them.
 
 There is **no private support channel**: no support mailbox, no chat, no direct
 messages. Everything happens in public issues, with one exception, which is
@@ -21,7 +24,8 @@ Everything starts here:
 
 | If | Use |
 |---|---|
-| Something behaves wrongly — a wrong translation path, a wrong response, a crash, a surface that misbehaves | **Bug report** |
+| The public beta is reachable but behaves wrongly — a wrong lookup/translation path, a broken page, or a repeatable error | **Bug report**; choose **Public beta Site** and include the on-screen request ID if one was shown, but never paste input containing personal or sensitive data |
+| A self-hosted surface behaves wrongly — a wrong response, a crash, or a surface that misbehaves | **Bug report** |
 | You cannot install it, build the dictionary, start a service, issue a device credential, or get the desktop client to talk to the API | **Installation or setup problem** |
 | You want the project to do something it does not do | **Feature request** — read the non-goals in [CONTRIBUTING.md](CONTRIBUTING.md#non-goals) first |
 | You found a vulnerability | **Not an issue.** Follow [SECURITY.md](SECURITY.md) — report it privately through the Security tab, which is enabled. If that form is unavailable to you, the **Security contact request** form asks the maintainer to open a private channel and deliberately takes no details |
@@ -58,6 +62,8 @@ A good share of what gets asked is already documented:
   does not respond to.
 - [docs/privacy-and-llm.md](docs/privacy-and-llm.md) — what leaves the host and
   when.
+- [docs/sites.md](docs/sites.md) — the anonymous public beta, shared quota,
+  Hosted/VPS trust boundary, privacy limits and current service caveats.
 - [docs/web-presentation-layer.md](docs/web-presentation-layer.md) — the
   owner-private web layer, which is off by default.
 - [docs/data-refresh.md](docs/data-refresh.md) — refreshing the dictionary from
@@ -69,12 +75,14 @@ A good share of what gets asked is already documented:
 The issue forms ask for these because a report without them usually cannot be
 acted on:
 
-- **Version or tag** you are running — a release tag such as `v0.3.0`, or the
-  commit if you are on `main`.
-- **Which surface**: the Telegram bot, the HTTP API, the private web layer, the
-  desktop client, or the data build.
-- **Environment**: operating system, Python version, and whether you installed
-  from source or run the containers.
+- **Version, tag, or observation time** — for the public beta Site, give the
+  date and approximate UTC time you observed the problem; for self-hosting,
+  give the release tag or commit you are running.
+- **Which surface**: the public beta Site, Telegram bot, HTTP API, private web
+  layer, desktop client, or data build.
+- **Environment or browser**: for the public beta Site, give the operating
+  system and browser version; for self-hosting, give the operating system,
+  Python version, and whether you installed from source or run the containers.
 - **Steps** that lead to it, in order, small enough to follow.
 - **Expected versus actual** — both, explicitly. "It does not work" names
   neither.
@@ -102,6 +110,10 @@ These are not things this project can help with:
 - **LLM provider problems.** Free-text sentence translation calls an
   OpenAI-compatible endpoint only if an operator configures one. Its quota,
   billing, latency, model behaviour and outages belong to that provider.
+- **Guaranteed public-beta capacity or correctness.** Shared limits bound
+  aggregate use, not individual access. They do not promise fairness, uptime,
+  latency or that every model translation is correct; report a repeatable
+  project defect, but do not treat the beta as an SLA-backed service.
 - **Operating somebody's deployment for them.** Nobody here has access to your
   host, your tokens or your logs, and no one will ask for them. Help looks like
   a documented answer, not a remote hand.

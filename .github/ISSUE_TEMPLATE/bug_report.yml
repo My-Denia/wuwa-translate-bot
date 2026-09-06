@@ -19,12 +19,16 @@ body:
         credentials, real Telegram ids and `.env` contents from everything you
         include.
 
+        **Public beta reports:** Never paste submitted text or model output if
+        it contains personal or sensitive data. Reduce it to a non-sensitive
+        example, or describe the behaviour without quoting that content.
+
   - type: input
     id: version
     attributes:
-      label: Version
-      description: The release tag you are running, or the commit if you are on `main`.
-      placeholder: "v0.3.0, or commit 0f48e39"
+      label: Version or observation time
+      description: For self-hosting, give the release tag or commit. For the public beta Site, give the date and approximate UTC time you observed the problem.
+      placeholder: "v0.4.0 / commit 0f48e39, or public beta at 2026-09-06 13:45 UTC"
     validations:
       required: true
 
@@ -34,6 +38,7 @@ body:
       label: Which surface
       description: Where the wrong behaviour appears. Pick the one closest to it.
       options:
+        - Public beta Site
         - Telegram bot
         - HTTP API (/v1)
         - Private web presentation layer
@@ -46,12 +51,11 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Environment
-      description: Operating system, Python version, and how it is installed.
+      label: Environment or browser
+      description: For self-hosting, give the operating system, Python version, and installation method. For the public beta Site, give the operating system and browser version.
       placeholder: |
-        OS: Ubuntu 24.04
-        Python: 3.12.7
-        Install: source (uv sync --locked --extra dev)  /  containers (deploy/docker-compose.yml)
+        Public beta: Windows 11, Firefox 142
+        Self-hosted: Ubuntu 24.04, Python 3.12.7, source (uv sync --locked --extra dev)
     validations:
       required: true
 

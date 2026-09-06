@@ -1,18 +1,24 @@
 [简体中文](README.md) | English
 
-# WuWa Term Bot
+# WuwaTerm
 
-Self-hosted Wuthering Waves official localization service: Chinese terms to
-exact official English and the reverse, with term-locked sentence translation
-in both directions. One protocol-neutral application pipeline serves Telegram
+> **Anonymous public beta:** [Use WuwaTerm now](https://wuwaterm.denia-official.chatgpt.site) — no account required, with official Chinese↔English term lookup and Chinese↔English sentence translation. Everyone shares one first-come beta pool; one visitor can exhaust it, the service can be busy or fail occasionally, and there is **no SLA**.
+
+WuwaTerm is a Chinese-English terminology and translation tool for Wuthering
+Waves: Chinese terms resolve to official English and English terms back to
+Chinese, with term-locked sentence translation in both directions. It is an
+independent personal open-source project, not an official Kuro Games site and
+**not affiliated with, authorized by, or endorsed by Kuro Games**.
+
+One protocol-neutral application pipeline serves Telegram
 command routes, a versioned HTTP API, and an owner-private web presentation
 layer that runs inside the API process and is off by default. Linked-channel
 posts keep channel-specific orchestration while sharing the same term and
 sentence primitives. A Windows desktop client consumes the API. `site/` is a
-separately hosted owner workbench: the browser only calls same-origin
+separately hosted anonymous public beta: the browser only calls same-origin
 `/api/*`, and a server-side proxy holds the device credential for the
 published `/v1` contract. It is not the in-process `/wuwaterm-web` layer and
-not a third translation pipeline ([Sites Workbench](docs/sites.md)).
+not a third translation pipeline ([Public Beta Site](docs/sites.md)).
 
 The service is dictionary-first. An exact database hit returns the official
 string from the local SQLite database byte-for-byte and does not call the LLM.
@@ -28,6 +34,10 @@ artifact; the upstream licence boundary is in
 
 ## Start Here
 
+- **Try it before installing.** Open the
+  [anonymous public beta](https://wuwaterm.denia-official.chatgpt.site). There
+  is no account or login; term lookup and sentence-translation capacity are
+  shared site-wide, so read the [limits and privacy boundary](docs/sites.md).
 - **Desktop user.** Download the Windows client zip from
   [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases)
   (from v0.4.0 onward); usage is in
@@ -39,9 +49,9 @@ artifact; the upstream licence boundary is in
 - **Contributor.** Read [CONTRIBUTING.md](CONTRIBUTING.md); local validation has
   exactly one entry point, `python scripts/validate.py`.
 - **Owner production operations.** The transactional update flow for this
-  particular host is [Deployment](docs/deployment.md). The Sites workbench
+  particular host is [Deployment](docs/deployment.md). The public Site
   environment, trust boundary and checks are in
-  [Sites Workbench](docs/sites.md).
+  [Public Beta Site](docs/sites.md).
 
 Which platforms and versions are covered is in
 [Support Matrix](docs/support-matrix.md).
@@ -76,11 +86,12 @@ Which platforms and versions are covered is in
   translation logic. It reaches the service over HTTPS
   ([ADR 0011](docs/adr/0011-pc-client-stack.md),
   [ADR 0012](docs/adr/0012-client-transport-selection.md)).
-- **Sites private workbench.** `site/` is a separate Hosted / Cloudflare
-  Worker product, not part of the API process. The browser does not hold a
-  device credential; visitor authentication is not in the application code.
+- **Anonymous public beta Site.** `site/` is a separate Hosted / Cloudflare
+  Worker product, not part of the API process. Visitors need no WuwaTerm
+  account; the browser does not hold a device credential, and the server-side
+  proxy reaches the authoritative VPS `/v1` backend as one device principal.
   Do not treat it as the same surface as the off-by-default `/wuwaterm-web`
-  layer ([Sites Workbench](docs/sites.md)).
+  layer ([Public Beta Site](docs/sites.md)).
 - **Published contract.** The API contract snapshot is committed at
   [`docs/api/openapi.json`](docs/api/openapi.json) and drift-gated by
   `scripts/check_api_contract.py`.
@@ -262,8 +273,9 @@ details.
 - [Web Presentation Layer](docs/web-presentation-layer.md): the owner-private
   browser interface inside the API process — the switch, the route, and the
   boundaries it keeps. Off by default.
-- [Sites Workbench](docs/sites.md): the separately hosted same-origin proxy
-  workbench. It is not `/wuwaterm-web`.
+- [Public Beta Site](docs/sites.md): the anonymous public entry, shared limits,
+  privacy boundary and separately hosted same-origin proxy. It is not
+  `/wuwaterm-web`.
 - [Validation](docs/validation.md): offline validation commands, live smoke
   caveats, and Windows reference commands.
 - [Release Checklist](docs/release-checklist.md): release metadata, validation,
@@ -346,11 +358,13 @@ scope and live Telegram smoke caveats.
 ## Maintenance
 
 This is a personal hobby project, maintained on a best-effort basis. There is no
-guarantee of responses to issues or pull requests.
+guarantee of responses to issues or pull requests. The anonymous public beta
+likewise promises no fixed availability, response time, or per-visitor fairness;
+see [Support](SUPPORT.md).
 
 Where to ask a question, report a problem, or send a change — and what to expect
-and not expect — is in [SUPPORT.md](SUPPORT.md). How to report a security issue
-is in [SECURITY.md](SECURITY.md). How to send a change is in
+and not expect — is in [Support](SUPPORT.md). How to report a security issue
+is in [Security](SECURITY.md). How to send a change is in
 [CONTRIBUTING.md](CONTRIBUTING.md). Which platforms and versions are actually
 covered by tests is in [Support Matrix](docs/support-matrix.md).
 

@@ -15,6 +15,29 @@ Generated TextMap data, SQLite DBs, runtime settings, channel reply indexes,
 tokens, API keys, and real Telegram chat/user/message ids must stay out of
 commits and public logs.
 
+## Anonymous Public Beta Site
+
+The no-account public beta is
+<https://wuwaterm.denia-official.chatgpt.site>. Its browser sends terms and
+sentences only to same-origin `/api/*`; the Hosted server-side proxy forwards
+them to the authoritative VPS `/v1` API with a credential that never enters the
+browser. Dictionary-first processing and term locking remain backend behavior,
+not a second implementation in the Site.
+
+The WuwaTerm application does not create visitor profiles or history and does
+not read, parse, store or infer visitor IP addresses. Its shared-pool row stores
+aggregate time windows, admitted request counts and translation input-character
+totals — not input, output, request IDs, browser identifiers or per-person
+allowances. Results remain only in the current page and are cleared by refresh.
+
+That application boundary is not a promise that every infrastructure layer has
+zero logs or retention. Hosting, network transport and the configured model
+provider may process technical data for operation, security or fault diagnosis.
+Do not submit personal information, passwords, tokens or other sensitive text.
+The shared beta is first-come, has no per-visitor fairness guarantee and no SLA;
+see [Public Beta Site](sites.md) and the live
+[privacy notice](https://wuwaterm.denia-official.chatgpt.site/privacy).
+
 ## LLM Configuration
 
 Optional LLM environment variables:

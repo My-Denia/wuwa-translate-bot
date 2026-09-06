@@ -3,8 +3,8 @@
 Maintainer entry for the **current** system: Telegram command routes, an HTTP
 API and its in-process web layer use the shared application pipeline;
 linked-channel posts retain specialized channel orchestration. A desktop
-client and a separately hosted Sites workbench consume the API. Claims map to
-source, tests, deploy scripts, and Compose topology. This is not an
+client and a separately hosted anonymous public beta Site consume the API.
+Claims map to source, tests, deploy scripts, and Compose topology. This is not an
 aspirational redesign.
 
 Operational detail lives in sibling guides. Decision rationale lives in
@@ -56,7 +56,7 @@ Three presentation adapters, one application layer, two consumers:
 | HTTP API | Presentation adapter: versioned routes, device authentication, one error envelope, plain text | `src/wuwaterm_api/` |
 | Private web layer | Presentation adapter: two owner-facing HTML views, rendered server-side, mounted inside the API process | `src/wuwaterm_api/web/` |
 | Desktop client | **Not** an adapter — a consumer of the API's published contract, holding no translation logic | `client/` |
-| Sites workbench | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that proxies `/v1` with a server-side device token | `site/` |
+| Public beta Site | **Not** an adapter and **not** `/wuwaterm-web` — a Hosted / Cloudflare Worker BFF that anonymously exposes same-origin `/api/*` and proxies `/v1` with a server-side device token | `site/` |
 
 The desktop client is deliberately outside the service: it renders answers the
 API produced, and every rule the API applies is applied whether the caller is
@@ -89,12 +89,13 @@ exemption either: a browser request is still resolved to a device principal and
 still passes the same scope check, per-device rate limit and revocation
 re-checks the `/v1` routes apply.
 
-The Sites workbench is the other consumer, and it is the opposite of the
+The public beta Site is the other consumer, and it is the opposite of the
 in-process web layer in every way that matters for trust: it runs outside
 this Compose topology, holds `WUWATERM_SITE_DEVICE_TOKEN` on the Worker, and
-has **no visitor authentication in application code**. UI labels that call it
-private are not a gate. Details, environment, and the operator checklist are
-in [sites.md](sites.md). Do not add Sites setup to
+has **no visitor account or authentication in application code**. It currently
+serves anonymous visitors from the public URL documented in [sites.md](sites.md),
+under one site-wide first-come quota pool. Details, environment, and the
+operator checklist are in [sites.md](sites.md). Do not add Sites setup to
 [web-presentation-layer.md](web-presentation-layer.md).
 
 ### Users and actors
@@ -107,7 +108,7 @@ in [sites.md](sites.md). Do not add Sites setup to
 | Linked channel posts | Auto-translated into the discussion group when gated | `channel.py` `channel_post_handler`; single channel auto-forward listener pin in `bot.py` |
 | API device principal | Any registered, unrevoked device: translate and dictionary reads over HTTP | `src/wuwaterm_api/auth.py`, [ADR 0010](adr/0010-device-principal-authentication.md) |
 | Owner at a browser | The private web layer's two views (lookup, sentence translation), only when it is switched on and only through the proxy | `src/wuwaterm_api/web/app.py`, [ADR 0014](adr/0014-private-web-presentation-layer.md) |
-| Anyone who can reach the Sites URL | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | `site/`, [sites.md](sites.md) |
+| Anonymous public beta visitor | Same-origin `/api/*` on the Hosted origin; the Worker then calls `/v1` as one device | `site/`, [sites.md](sites.md) |
 | Operator on VPS | Deploy, data refresh, Compose up/down, device issuance and revocation | `deploy/vps-update.sh`, `docs/deployment.md` |
 
 ### External systems
@@ -196,7 +197,7 @@ from the store in the right-hand column, so `wuwaterm-api device revoke` turns
 that surface off without touching the edge, the desktop client or any chat
 ([ADR 0014](adr/0014-private-web-presentation-layer.md)).
 
-The Sites workbench is a third *credential location*, not a third control in
+The public beta Site is a third *credential location*, not a third control in
 the table: `WUWATERM_SITE_DEVICE_TOKEN` lives in the Hosted runtime. Revoking
 that device stops the Worker the same way it stops any other `/v1` caller.
 It does not authenticate the person who opened the Sites URL.
@@ -235,7 +236,7 @@ independent budgets whose worst case is their sum.
 Sites traffic lands in the API process as one device principal. It shares
 that device's sliding window and the API process's model budget with every
 other caller of the same token. A dedicated Sites device keeps the
-workbench from starving the desktop client; sharing one token does the
+public Site from starving the desktop client; sharing one token does the
 opposite. The bot process is still a separate summand.
 
 The API's other limits are its own too, and none of them are model budgets:

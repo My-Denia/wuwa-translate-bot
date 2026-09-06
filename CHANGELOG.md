@@ -15,10 +15,14 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Sites
 
-- Add a shared beta candidate with atomic aggregate quotas, independent lookup
-  and translation budgets, public-facing copy and privacy/limit guidance.
-  Hosted access remains owner-only pending private acceptance; no public launch
-  is announced. The Site does not process visitor IPs or promise personal fairness.
+- Open the shared beta at
+  <https://wuwaterm.denia-official.chatgpt.site> for anonymous, no-account
+  access to official-term lookup and bidirectional term-locked sentence
+  translation. Quotas are site-wide and first-come: one visitor can exhaust
+  them, admitted failures may still count, and the best-effort service has no
+  SLA. The WuwaTerm application does not process visitor IPs or promise
+  personal fairness; hosting, network and model providers may still process
+  technical data under their own operation.
 - Remove temporary private acceptance controls from the final shared-pool product.
 
 ### HTTP API
@@ -82,6 +86,11 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Documentation
 
+- docs: make the anonymous public beta a first-class repository entry; align
+  both READMEs, architecture, Sites, privacy, support, security, contribution,
+  issue and future-release copy with the live shared-pool state. This changes
+  public documentation and repository metadata only, not translation logic,
+  the `/v1` contract, D1, Telegram, the client, terminology data or a release.
 - docs: name `site/` as a fifth surface in both READMEs, CONTRIBUTING, the
   architecture map, the support matrix, and the validation job list; put it
   in SECURITY.md scope; correct the supported-release table from 0.3.x to

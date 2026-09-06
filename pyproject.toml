@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wuwaterm"
 version = "0.4.1"
-description = "Dictionary-first Telegram bot for Wuthering Waves Chinese terms to official English localization."
+description = "WuwaTerm: dictionary-first Wuthering Waves Chinese-English terminology and term-locked translation service."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
