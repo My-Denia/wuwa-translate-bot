@@ -75,12 +75,14 @@ A good share of what gets asked is already documented:
 The issue forms ask for these because a report without them usually cannot be
 acted on:
 
-- **Version or tag** you are running — a release tag such as `v0.3.0`, or the
-  commit if you are on `main`.
+- **Version, tag, or observation time** — for the public beta Site, give the
+  date and approximate UTC time you observed the problem; for self-hosting,
+  give the release tag or commit you are running.
 - **Which surface**: the public beta Site, Telegram bot, HTTP API, private web
   layer, desktop client, or data build.
-- **Environment**: operating system, Python version, and whether you installed
-  from source or run the containers.
+- **Environment or browser**: for the public beta Site, give the operating
+  system and browser version; for self-hosting, give the operating system,
+  Python version, and whether you installed from source or run the containers.
 - **Steps** that lead to it, in order, small enough to follow.
 - **Expected versus actual** — both, explicitly. "It does not work" names
   neither.
