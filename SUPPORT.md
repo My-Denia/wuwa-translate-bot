@@ -24,7 +24,7 @@ Everything starts here:
 
 | If | Use |
 |---|---|
-| The public beta is reachable but behaves wrongly — a wrong lookup/translation path, a broken page, or a reproducible error | **Bug report**; choose **Public beta Site** and include the on-screen request ID if one was shown, but never paste input containing personal or sensitive data |
+| The public beta is reachable but behaves wrongly — a wrong lookup/translation path, a broken page, or a repeatable error | **Bug report**; choose **Public beta Site** and include the on-screen request ID if one was shown, but never paste input containing personal or sensitive data |
 | A self-hosted surface behaves wrongly — a wrong response, a crash, or a surface that misbehaves | **Bug report** |
 | You cannot install it, build the dictionary, start a service, issue a device credential, or get the desktop client to talk to the API | **Installation or setup problem** |
 | You want the project to do something it does not do | **Feature request** — read the non-goals in [CONTRIBUTING.md](CONTRIBUTING.md#non-goals) first |
@@ -110,7 +110,7 @@ These are not things this project can help with:
   billing, latency, model behaviour and outages belong to that provider.
 - **Guaranteed public-beta capacity or correctness.** Shared limits bound
   aggregate use, not individual access. They do not promise fairness, uptime,
-  latency or that every model translation is correct; report a reproducible
+  latency or that every model translation is correct; report a repeatable
   project defect, but do not treat the beta as an SLA-backed service.
 - **Operating somebody's deployment for them.** Nobody here has access to your
   host, your tokens or your logs, and no one will ask for them. Help looks like
