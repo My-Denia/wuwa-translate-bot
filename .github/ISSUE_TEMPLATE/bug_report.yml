@@ -19,6 +19,10 @@ body:
         credentials, real Telegram ids and `.env` contents from everything you
         include.
 
+        **Public beta reports:** Never paste submitted text or model output if
+        it contains personal or sensitive data. Reduce it to a non-sensitive
+        example, or describe the behaviour without quoting that content.
+
   - type: input
     id: version
     attributes:
