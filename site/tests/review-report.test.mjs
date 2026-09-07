@@ -121,9 +121,17 @@ test('a late generation N-1 report is not 当前已核', async () => {
 test('review UI imports the report module and does not insert manuscripts as HTML', () => {
   const component = readFileSync(fileURLToPath(new URL('../app/components/review-workbench.tsx', import.meta.url)), 'utf8');
   const page = readFileSync(fileURLToPath(new URL('../app/page.tsx', import.meta.url)), 'utf8');
+  const translation = readFileSync(fileURLToPath(new URL('../app/components/translation-workbench.tsx', import.meta.url)), 'utf8');
   assert.match(component, /review-report\.js/u);
   assert.match(page, /ReviewWorkbench/u);
   assert.equal(component.includes('dangerouslySetInnerHTML'), false);
   assert.equal(component.includes('innerHTML'), false);
   assert.equal(page.includes('dangerouslySetInnerHTML'), false);
+  assert.match(component, /discardInFlight/u);
+  assert.match(component, /setHistory\(\[\]\)/u);
+  assert.match(component, /setResolutions\(\[\]\)/u);
+  assert.match(component, /target_span\.text === expected/u);
+  assert.match(component, /原文 \{sourceLength\.toLocaleString\(\)\} \/ 2,000/u);
+  assert.match(component, /x\.findings\.every\(isFinding\)/u);
+  assert.match(translation, /const result = state\.data/u);
 });

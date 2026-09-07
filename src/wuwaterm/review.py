@@ -290,15 +290,23 @@ def _candidates_for(entries: Sequence[TermEntry]) -> tuple[ReviewCandidate, ...]
 def _sentence_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     start = 0
-    for match in _SENTENCE_END.finditer(text):
-        end = match.end()
-        if start < end:
-            ranges.append((start, end))
-        start = end
-    if start < len(text):
-        ranges.append((start, len(text)))
+    index = 0
+    length = len(text)
+    while index < length:
+        if _SENTENCE_END.match(text[index]):
+            end = index + 1
+            while end < length and _SENTENCE_END.match(text[end]):
+                end += 1
+            if start < end:
+                ranges.append((start, end))
+            start = end
+            index = end
+            continue
+        index += 1
+    if start < length:
+        ranges.append((start, length))
     if not ranges and text:
-        ranges.append((0, len(text)))
+        ranges.append((0, length))
     return ranges
 
 
@@ -348,11 +356,19 @@ def _elsewhere_has_form(
     return False
 
 
+def _spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _span_available(span: tuple[int, int], used: set[tuple[int, int]]) -> bool:
+    return all(not _spans_overlap(span, taken) for taken in used)
+
+
 def _next_unused(
     occurrences: Sequence[tuple[int, int]], used: set[tuple[int, int]]
 ) -> tuple[int, int] | None:
     for span in occurrences:
-        if span not in used:
+        if _span_available(span, used):
             return span
     return None
 
@@ -426,7 +442,7 @@ def _judge_mention(
         local = []
         for start, end in _find_occurrences(region, form):
             absolute = (lo + start, lo + end)
-            if absolute not in used_target:
+            if _span_available(absolute, used_target):
                 local.append(absolute)
         in_region[form] = local
         if local:
@@ -456,7 +472,7 @@ def _judge_mention(
         target_span = (
             _span_at(target, mismatch[0], mismatch[1])
             if mismatch is not None
-            else _span_at(target, lo, hi)
+            else None
         )
         return ReviewFinding(
             id=finding_id,

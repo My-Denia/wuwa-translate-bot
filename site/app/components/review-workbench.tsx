@@ -54,10 +54,24 @@ function failure(value: unknown): value is Failure {
 async function payload(r: Response): Promise<unknown> {
   try { return await r.json(); } catch { return FALLBACK; }
 }
+function isSpan(value: unknown): value is ReviewSpan {
+  const x = value as ReviewSpan;
+  return !!x && Number.isInteger(x.start) && Number.isInteger(x.end) && typeof x.text === 'string';
+}
+function isFinding(value: unknown): value is ReviewFinding {
+  const x = value as ReviewFinding;
+  return !!x && typeof x.id === 'string' && typeof x.verdict === 'string' && typeof x.rule_id === 'string'
+    && (x.source_span === null || isSpan(x.source_span))
+    && (x.target_span === null || isSpan(x.target_span))
+    && Array.isArray(x.candidates)
+    && x.candidates.every((candidate) => !!candidate && typeof candidate.zh === 'string' && typeof candidate.en === 'string' && typeof candidate.category === 'string' && Array.isArray(candidate.sources))
+    && typeof x.candidates_truncated === 'boolean';
+}
 function isReport(value: unknown): value is ReviewReport {
   const x = value as ReviewReport;
-  return !!x && typeof x.request_id === 'string' && Array.isArray(x.findings) && typeof x.truncated === 'boolean'
-    && x.coverage && typeof x.coverage.not_evaluated === 'number';
+  return !!x && typeof x.request_id === 'string' && Array.isArray(x.findings) && x.findings.every(isFinding)
+    && typeof x.truncated === 'boolean'
+    && !!x.coverage && typeof x.coverage.not_evaluated === 'number';
 }
 
 export function ReviewWorkbench() {
@@ -72,15 +86,25 @@ export function ReviewWorkbench() {
   const [copied, setCopied] = useState(false);
   const controller = useRef<AbortController | null>(null);
 
+  function discardInFlight() {
+    controller.current?.abort();
+    controller.current = null;
+    generationRef.current += 1;
+    setGeneration(generationRef.current);
+    setState({ kind: 'idle' });
+    setResolutions([]);
+    setHistory([]);
+    setCopied(false);
+  }
+
   useEffect(() => {
     function onDraft(event: Event) {
       const detail = (event as CustomEvent<{ source?: string; target?: string; direction?: 'en' | 'zh' }>).detail;
       if (!detail) return;
+      discardInFlight();
       if (typeof detail.source === 'string') setSource(detail.source);
       if (typeof detail.target === 'string') setTarget(detail.target);
       if (detail.direction === 'en' || detail.direction === 'zh') setDirection(detail.direction);
-      setState({ kind: 'idle' });
-      setResolutions([]);
     }
     window.addEventListener('wuwaterm-send-review', onDraft);
     return () => window.removeEventListener('wuwaterm-send-review', onDraft);
@@ -140,11 +164,12 @@ export function ReviewWorkbench() {
       const rest = current.filter((item) => item.mention_id !== finding.id);
       return [...rest, { mention_id: finding.id, choice: 'official_pair', zh, en }];
     });
-    if (finding.target_span) {
+    const expected = direction === 'en' ? en : zh;
+    if (finding.target_span && finding.target_span.text === expected) {
       const segments = highlightSegments(target, finding.target_span);
       if (segments) {
         setHistory((stack) => [...stack, target]);
-        setTarget(segments.before + (direction === 'en' ? en : zh) + segments.after);
+        setTarget(segments.before + expected + segments.after);
         setState({ kind: 'idle' });
       }
     }
@@ -205,11 +230,11 @@ export function ReviewWorkbench() {
     <div className="card-heading"><div><p className="section-kicker">03 / REVIEW</p><h2 id="review-title">译文审校</h2></div><span className="tag">术语依据</span></div>
     <p className="card-intro">粘贴原文和已有译文，核对词典依据。不调用整句翻译模型，也不消耗翻译额度。</p>
     <form onSubmit={submit}>
-      <div className="label-row"><label htmlFor="review-source">原文</label><select aria-label="译文语言" value={direction} disabled={state.kind === 'loading'} onChange={e => setDirection(e.target.value as 'en' | 'zh')}><option value="en">译文为英文</option><option value="zh">译文为中文</option></select></div>
-      <textarea id="review-source" value={source} disabled={state.kind === 'loading'} onChange={e => { setSource(e.target.value); setState({ kind: 'idle' }); }} rows={4} placeholder="粘贴需要核对的原文…" />
+      <div className="label-row"><label htmlFor="review-source">原文</label><select aria-label="译文语言" value={direction} disabled={state.kind === 'loading'} onChange={e => { setDirection(e.target.value as 'en' | 'zh'); setState({ kind: 'idle' }); }}><option value="en">译文为英文</option><option value="zh">译文为中文</option></select></div>
+      <textarea id="review-source" value={source} disabled={state.kind === 'loading'} onChange={e => { setSource(e.target.value); setState({ kind: 'idle' }); setResolutions([]); }} rows={4} placeholder="粘贴需要核对的原文…" />
       <label htmlFor="review-target">已有译文</label>
       <textarea id="review-target" value={target} disabled={state.kind === 'loading'} onChange={e => { setTarget(e.target.value); setState({ kind: 'idle' }); }} rows={4} placeholder="粘贴已有译文…" />
-      <div className="field-hint"><span>请勿输入敏感或个人信息</span><span>{sourceLength.toLocaleString()} + {targetLength.toLocaleString()} / 2,000</span></div>
+      <div className="field-hint"><span>请勿输入敏感或个人信息</span><span>原文 {sourceLength.toLocaleString()} / 2,000 · 译文 {targetLength.toLocaleString()} / 2,000</span></div>
       <div className="actions">
         <button type="submit" disabled={!source.trim() || !target.trim() || sourceLength > 2000 || targetLength > 2000 || state.kind === 'loading'}>{state.kind === 'loading' ? '核对中…' : '核对术语'}</button>
         {state.kind === 'loading' && <button className="secondary-button" type="button" onClick={cancel}>取消等待</button>}
