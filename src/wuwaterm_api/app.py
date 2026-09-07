@@ -285,9 +285,15 @@ class ReviewRequestBody(BaseModel):
 
 class ReviewSpanBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    start: int
-    end: int
-    text: str
+    start: int = Field(
+        description="Half-open start offset in Unicode scalars of the submitted side."
+    )
+    end: int = Field(
+        description="Half-open end offset in Unicode scalars of the submitted side."
+    )
+    text: str = Field(
+        description="Exact substring covering [start, end) on the submitted side."
+    )
 
 
 class ReviewSourceBody(BaseModel):

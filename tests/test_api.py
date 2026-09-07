@@ -957,6 +957,11 @@ def test_openapi_documents_conservative_client_limits():
     ]
     assert review_properties["source"]["maxLength"] == MAX_SIDE_SCALARS
     assert review_properties["target"]["maxLength"] == MAX_SIDE_SCALARS
+    span_properties = document["components"]["schemas"]["ReviewSpanBody"]["properties"]
+    assert "Unicode scalars" in span_properties["start"]["description"]
+    assert "Half-open" in span_properties["start"]["description"]
+    assert "Unicode scalars" in span_properties["end"]["description"]
+    assert "Half-open" in span_properties["end"]["description"]
 
 
 def test_openapi_limit_postprocessor_handles_pydantic1_shapes():

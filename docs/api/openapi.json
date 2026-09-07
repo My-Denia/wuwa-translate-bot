@@ -476,14 +476,17 @@
         "additionalProperties": false,
         "properties": {
           "end": {
+            "description": "Half-open end offset in Unicode scalars of the submitted side.",
             "title": "End",
             "type": "integer"
           },
           "start": {
+            "description": "Half-open start offset in Unicode scalars of the submitted side.",
             "title": "Start",
             "type": "integer"
           },
           "text": {
+            "description": "Exact substring covering [start, end) on the submitted side.",
             "title": "Text",
             "type": "string"
           }

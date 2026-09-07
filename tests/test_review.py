@@ -301,6 +301,24 @@ def test_leading_sentence_terminators_do_not_shift_alignment(sample_db):
     assert _finding(report, "今汐").verdict == VERDICT_VERIFIED
 
 
+def test_whitespace_between_sentences_does_not_shift_alignment(sample_db):
+    assert _sentence_ranges("前言。\r\n今汐。") == [(0, 3), (5, 8)]
+    assert _sentence_ranges("Preface.\nJinhsi.") == [(0, 9), (9, 16)]
+    report = review_pair(
+        _service(sample_db),
+        "前言。\r\n今汐。",
+        "Preface.\nJinhsi.",
+        "en",
+    )
+    assert _finding(report, "今汐").verdict == VERDICT_VERIFIED
+
+
+def test_separator_only_text_has_no_sentence_range():
+    assert _sentence_ranges("...") == []
+    assert _sentence_ranges("？！") == []
+    assert _sentence_ranges("hello") == [(0, 5)]
+
+
 def test_overlapping_target_spans_are_not_reused():
     used = {(0, 14)}
     assert _next_unused([(0, 5)], used) is None
