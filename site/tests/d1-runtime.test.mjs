@@ -32,7 +32,10 @@ test('0000 then 0001 D1 admits mixed traffic, keeps review off the translation c
     const table = await db.prepare('PRAGMA table_info(shared_pool)').all();
     assert.deepEqual(table.results.map(r => r.name), ['id','second_key','minute_key','day_key','upstream_used','translation_minute_used','terms_used','translation_used','character_used','meta_used','review_used']);
     const other = await mf.getWorker('second');
-    const results = await Promise.all(Array.from({ length: 40 }, (_, i) => (i % 2 ? other.fetch.bind(other) : mf.dispatchFetch)('http://site.test/api/' + (i % 2 ? 'terms?q=今汐' : 'meta'))));
+    const results = await Promise.all(Array.from({ length: 40 }, async (_, i) => {
+      const response = await (i % 2 ? other.fetch.bind(other) : mf.dispatchFetch)('http://site.test/api/' + (i % 2 ? 'terms?q=今汐' : 'meta'));
+      return { status: response.status, body: await response.text() };
+    }));
     const admitted = results.filter(r => r.status === 200).length;
     assert.ok(admitted >= 1 && admitted <= 6);
     assert.ok(results.every(r => [200, 429].includes(r.status)));
@@ -43,7 +46,7 @@ test('0000 then 0001 D1 admits mixed traffic, keeps review off the translation c
     assert.equal(row.review_used, 0);
     assert.equal((await db.prepare('SELECT count(*) n FROM shared_pool').first()).n, 1);
     for (const r of results) {
-      const body = await r.text();
+      const body = r.body;
       for (const secret of ['SYNTHETIC_PRODUCT_TOKEN_61E8','api.wuwaterm-test.net','Authorization','Bearer ']) assert.equal(body.includes(secret), false);
       if (r.status === 200) assert.equal(JSON.parse(body).request_id, 'synthetic-correlation-1');
     }

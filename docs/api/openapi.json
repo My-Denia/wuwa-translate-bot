@@ -382,12 +382,14 @@
           },
           "source": {
             "description": "Submitted source text. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
             "minLength": 1,
             "title": "Source",
             "type": "string"
           },
           "target": {
             "description": "Submitted translation. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
             "minLength": 1,
             "title": "Target",
             "type": "string"

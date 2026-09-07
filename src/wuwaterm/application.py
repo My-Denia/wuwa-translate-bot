@@ -45,6 +45,7 @@ from .lookup import TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
 from .review import (
+    MAX_SIDE_SCALARS,
     ReviewReport,
     ReviewRequestError,
     review_pair as _review_pair,
@@ -691,6 +692,7 @@ REVIEW_MAX_FINDINGS = 32
 REVIEW_MAX_CANDIDATES = 8
 REVIEW_MAX_SOURCES = 8
 REVIEW_MAX_JSON_BYTES = 65536
+REVIEW_MAX_SIDE_SCALARS = MAX_SIDE_SCALARS
 
 
 def review_pair(

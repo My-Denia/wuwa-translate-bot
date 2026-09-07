@@ -287,6 +287,10 @@ def _candidates_for(entries: Sequence[TermEntry]) -> tuple[ReviewCandidate, ...]
     return tuple(candidates)
 
 
+def _separator_only(text: str, start: int, end: int) -> bool:
+    return start < end and all(_SENTENCE_END.match(char) for char in text[start:end])
+
+
 def _sentence_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     start = 0
@@ -297,13 +301,13 @@ def _sentence_ranges(text: str) -> list[tuple[int, int]]:
             end = index + 1
             while end < length and _SENTENCE_END.match(text[end]):
                 end += 1
-            if start < end:
+            if start < end and not _separator_only(text, start, end):
                 ranges.append((start, end))
             start = end
             index = end
             continue
         index += 1
-    if start < length:
+    if start < length and not _separator_only(text, start, length):
         ranges.append((start, length))
     if not ranges and text:
         ranges.append((0, length))

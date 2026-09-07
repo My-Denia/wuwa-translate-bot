@@ -289,6 +289,18 @@ def test_consecutive_sentence_terminators_do_not_shift_alignment(sample_db):
     assert _finding(report, "声骸").verdict == VERDICT_VERIFIED
 
 
+def test_leading_sentence_terminators_do_not_shift_alignment(sample_db):
+    assert _sentence_ranges("\n今汐。") == [(1, 4)]
+    assert _sentence_ranges("Jinhsi.") == [(0, 7)]
+    report = review_pair(
+        _service(sample_db),
+        "\n今汐。",
+        "Jinhsi.",
+        "en",
+    )
+    assert _finding(report, "今汐").verdict == VERDICT_VERIFIED
+
+
 def test_overlapping_target_spans_are_not_reused():
     used = {(0, 14)}
     assert _next_unused([(0, 5)], used) is None

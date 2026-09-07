@@ -48,6 +48,7 @@ from wuwaterm.application import (
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
     KIND_LLM,
+    REVIEW_MAX_SIDE_SCALARS,
     LLMFailureDiagnostic,
     LlmCallBudget,
     ReviewRequestError,
@@ -1013,6 +1014,9 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     text_schema = document["components"]["schemas"]["TranslationRequestBody"][
         "properties"
     ]["text"]
+    review_properties = document["components"]["schemas"]["ReviewRequestBody"][
+        "properties"
+    ]
     parameters = document["paths"][f"/{API_VERSION}/terms"]["get"]["parameters"]
     try:
         query_schema = next(
@@ -1024,6 +1028,8 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     for schema, limit in (
         (text_schema, LLM_INPUT_CHAR_LIMIT),
         (query_schema, TERM_QUERY_MAX_LENGTH),
+        (review_properties["source"], REVIEW_MAX_SIDE_SCALARS),
+        (review_properties["target"], REVIEW_MAX_SIDE_SCALARS),
     ):
         nested = schema.get("json_schema_extra")
         if isinstance(nested, dict) and "maxLength" in nested:

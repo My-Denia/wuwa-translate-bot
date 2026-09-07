@@ -22,6 +22,7 @@ import pytest
 from wuwaterm.application import ERROR_INPUT_TOO_LONG
 from wuwaterm.db import connect, insert_records
 from wuwaterm.models import TermRecord
+from wuwaterm.review import MAX_SIDE_SCALARS
 from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 from wuwaterm_api import TERM_QUERY_MAX_LENGTH
 from wuwaterm_api.app import create_app
@@ -951,6 +952,11 @@ def test_openapi_documents_conservative_client_limits():
 
     assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
+    review_properties = document["components"]["schemas"]["ReviewRequestBody"][
+        "properties"
+    ]
+    assert review_properties["source"]["maxLength"] == MAX_SIDE_SCALARS
+    assert review_properties["target"]["maxLength"] == MAX_SIDE_SCALARS
 
 
 def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
@@ -969,7 +975,13 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
                             },
                         }
                     }
-                }
+                },
+                "ReviewRequestBody": {
+                    "properties": {
+                        "source": {"type": "string"},
+                        "target": {"type": "string"},
+                    }
+                },
             }
         },
         "paths": {
@@ -1002,6 +1014,12 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
     assert text_schema["json_schema_extra"] == {"x-preserved": "body"}
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     assert query_schema["json_schema_extra"] == {"x-preserved": "query"}
+    assert result["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert result["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
@@ -1012,7 +1030,13 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
             "schemas": {
                 "TranslationRequestBody": {
                     "properties": {"text": {"type": "string", "maxLength": 7}}
-                }
+                },
+                "ReviewRequestBody": {
+                    "properties": {
+                        "source": {"type": "string", "maxLength": 9},
+                        "target": {"type": "string", "maxLength": 9},
+                    }
+                },
             }
         },
         "paths": {
@@ -1037,6 +1061,12 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
     assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"][
         "maxLength"
     ] == TERM_QUERY_MAX_LENGTH
+    assert document["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert document["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 @pytest.mark.parametrize(
@@ -1078,6 +1108,12 @@ def test_openapi_schema_cache_uses_postprocessed_document(tmp_path, sample_db):
         for parameter in first["paths"]["/v1/terms"]["get"]["parameters"]
         if parameter["name"] == "q"
     ) == TERM_QUERY_MAX_LENGTH
+    assert first["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert first["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 API_NUMERIC_SETTING_CASES = (

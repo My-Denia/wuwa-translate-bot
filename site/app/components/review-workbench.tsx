@@ -236,7 +236,7 @@ export function ReviewWorkbench() {
       <div className="label-row"><label htmlFor="review-source">原文</label><select aria-label="译文语言" value={direction} disabled={state.kind === 'loading'} onChange={e => { discardInFlight(); setDirection(e.target.value as 'en' | 'zh'); }}><option value="en">译文为英文</option><option value="zh">译文为中文</option></select></div>
       <textarea id="review-source" value={source} disabled={state.kind === 'loading'} onChange={e => { setSource(e.target.value); setState({ kind: 'idle' }); setResolutions([]); }} rows={4} placeholder="粘贴需要核对的原文…" />
       <label htmlFor="review-target">已有译文</label>
-      <textarea id="review-target" value={target} disabled={state.kind === 'loading'} onChange={e => { setTarget(e.target.value); setState({ kind: 'idle' }); }} rows={4} placeholder="粘贴已有译文…" />
+      <textarea id="review-target" value={target} disabled={state.kind === 'loading'} onChange={e => { setTarget(e.target.value); setState({ kind: 'idle' }); setHistory([]); }} rows={4} placeholder="粘贴已有译文…" />
       <div className="field-hint"><span>请勿输入敏感或个人信息</span><span>原文 {sourceLength.toLocaleString()} / 2,000 · 译文 {targetLength.toLocaleString()} / 2,000</span></div>
       <div className="actions">
         <button type="submit" disabled={!source.trim() || !target.trim() || sourceLength > 2000 || targetLength > 2000 || state.kind === 'loading'}>{state.kind === 'loading' ? '核对中…' : '核对术语'}</button>
