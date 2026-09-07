@@ -13,4 +13,5 @@ export const sharedPool = sqliteTable('shared_pool', {
   translationUsed: integer('translation_used').notNull(),
   characterUsed: integer('character_used').notNull(),
   metaUsed: integer('meta_used').notNull(),
+  reviewUsed: integer('review_used').notNull().default(0),
 }, table => [check('singleton', sql`${table.id} = 1`), check('nonnegative', sql`${table.secondKey} >= 0 AND ${table.minuteKey} >= 0 AND ${table.dayKey} >= 0 AND ${table.upstreamUsed} >= 0 AND ${table.translationMinuteUsed} >= 0 AND ${table.termsUsed} >= 0 AND ${table.translationUsed} >= 0 AND ${table.characterUsed} >= 0 AND ${table.metaUsed} >= 0`)]);

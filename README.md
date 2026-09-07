@@ -6,7 +6,7 @@
 
 WuwaTerm 是面向《鸣潮》的中英术语与翻译工具：中文术语查询官方英文，英文亦可反向查询中文，并支持两个方向的术语锁定整句翻译。它是非官方的独立个人开源项目，并非 Kuro Games 官方网站，与 Kuro Games **无隶属、授权或背书关系**。
 
-一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的匿名公开公测入口：浏览器只打同源 `/api/*`，由服务端代理持有设备凭据再访问已发布的 `/v1`；它不是进程内 `/wuwaterm-web`，也不是第三条翻译流水线（[公开公测 Site](docs/sites.md)）。
+一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的匿名公开公测入口：浏览器只打同源 `/api/*`（含查词、翻译与审校），由服务端代理持有设备凭据再访问已发布的 `/v1`；审校在 VPS 上做词典核对，不是第三条翻译流水线，也不是进程内 `/wuwaterm-web`（[公开公测 Site](docs/sites.md)）。
 
 服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
 

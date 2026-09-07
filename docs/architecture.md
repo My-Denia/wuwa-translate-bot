@@ -255,7 +255,7 @@ Telegram is one UI and transport, not the domain model.
 | Linked channel | Admission, translate, deliver/edit, flood retry | `src/wuwaterm/channel.py` |
 | HTML/text helpers | Protect/validate Telegram HTML; chunk limits | `telegram_html.py`, `telegram_text.py` |
 
-Domain (`lookup`, `normalize`, `models`, term-lock policy in `sentence`) and
+Domain (`lookup`, `normalize`, `models`, `review`, term-lock policy in `sentence`) and
 storage (`db` reads, `settings`, `channel_reply_index`) must remain usable from
 CLI and tests without a live Telegram session. See [ADR 0001](adr/0001-telegram-as-presentation-layer.md).
 
@@ -267,7 +267,7 @@ translation logic of its own.
 
 | Presentation | Responsibility | Module |
 |--------------|----------------|--------|
-| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
+| Routes and models | `/v1/translations`, `/v1/terms`, `/v1/meta`, `/v1/reviews`, `/healthz`, `/readyz` | `src/wuwaterm_api/app.py` |
 | Middleware | Server-minted request id, body size/arrival cap, request time budget | `src/wuwaterm_api/app.py` |
 | Identity | Device store, scopes, revocation, credential pool | `src/wuwaterm_api/auth.py` |
 | Error vocabulary | Enumerated codes and their HTTP statuses | `src/wuwaterm_api/errors.py` |
@@ -286,7 +286,7 @@ Intended layers (modular monolith — [ADR 0002](adr/0002-modular-monolith.md)):
 cli (bootstrap)                    wuwaterm_api (separate top-level package)
   |-> bot / channel                  |-> app / auth / errors / settings / cli / web
   |     |-> application  <-----------'        (allowlisted imports only)
-  |     |     |-> lookup / sentence / normalize / translation_policy   domain
+  |     |     |-> lookup / review / sentence / normalize / translation_policy   domain
   |     |-> settings / channel_reply_* / channel_runtime         local infra
   |     |-> telegram_html / telegram_text                 presentation helpers
   |-> builder / data_source / db (write) / build_pinyin          builder path
@@ -295,7 +295,7 @@ cli (bootstrap)                    wuwaterm_api (separate top-level package)
 
 | Layer | Modules | Must not import |
 |-------|---------|-----------------|
-| Domain core | `lookup`, `normalize`, `models` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
+| Domain core | `lookup`, `normalize`, `models`, `review` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules; `sentence` |
 | Domain + provider | `sentence` | `bot`, `channel` (may use `telegram_html` for HTML term-lock); builder-only modules |
 | Application | `application` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
 | Shared policy | `translation_policy`, `runtime_keys`, `constants` | presentation / Telegram SDK (including under `TYPE_CHECKING`); builder-only modules |
@@ -430,7 +430,7 @@ Channel path is always auto-detected direction; it does not accept command
 |------|-----|
 | Exact dictionary hit (`lookup_exact` + early returns in the shared pipeline, channel exact branch) | Official string from SQLite |
 | Fuzzy dictionary short answers (`_fuzzy_dictionary_answer`) | DB-only |
-| `GET /v1/terms`, `GET /v1/meta`, `/healthz`, `/readyz` | Dictionary reads and probes only |
+| `GET /v1/terms`, `GET /v1/meta`, `POST /v1/reviews`, `/healthz`, `/readyz` | Dictionary reads, pair review, and probes only |
 | Invalid leading `--to` | Usage reply only |
 | Unauthorized / rate-limited / silent reject (either surface) | No translation work |
 | Channel below CJK/Latin thresholds, stale posts, admission reject, kill switch off | Skipped before translate |

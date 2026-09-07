@@ -1,3 +1,4 @@
+import { ReviewWorkbench } from './components/review-workbench';
 import { TranslationWorkbench } from './components/translation-workbench';
 
 export default function Home() {
@@ -11,6 +12,7 @@ export default function Home() {
         <div className="nav-links"><a href="/limits">共享额度</a><a href="/privacy">隐私说明</a><span className="beta-badge">匿名公测</span></div>
       </nav>
       <TranslationWorkbench />
+      <ReviewWorkbench />
       <footer><p>WuwaTerm · 为鸣潮玩家搭建的中英语言工具</p><div><a href="/limits">使用与限额</a><a href="/privacy">隐私说明</a></div></footer>
     </main>
   );

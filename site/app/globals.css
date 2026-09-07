@@ -78,6 +78,14 @@ form button:not(.secondary-button):hover:not(:disabled) { background:#d5f5de; }
 .request-id { margin-top:16px; color:var(--muted); font-size:10px; }
 .request-id summary { cursor:pointer; }
 .request-id code { display:block; margin-top:8px; overflow-wrap:anywhere; }
+.review-card { width:min(1180px,100%); margin:0 auto 36px; }
+.review-summary { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:8px; font-size:13px; line-height:1.8; }
+.review-summary p { margin:0 0 8px; }
+.review-current { color:var(--accent); }
+.review-stale { color:var(--danger); }
+.review-excerpt { font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
+.review-excerpt mark { background:#2a4636; color:var(--accent); padding:0 2px; }
+.review-findings { margin-top:12px; }
 .translation-result { margin-top:20px; padding-top:20px; border-top:1px solid var(--line); }
 .result-meta { display:flex; gap:10px; color:var(--accent); font-size:11px; }
 .translated-text { font-size:16px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; margin:15px 0; }

@@ -31,6 +31,7 @@ HTTP error envelopes) stays in the adapter; this layer returns a stable
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -43,6 +44,11 @@ from typing import Deque, Hashable
 from .lookup import TermService
 from .models import LookupCandidate
 from .normalize import has_cjk, normalize_ascii
+from .review import (
+    ReviewReport,
+    ReviewRequestError,
+    review_pair as _review_pair,
+)
 from .sentence import (
     BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_LLM_MAX_CONCURRENCY,
@@ -675,6 +681,136 @@ def probe_database(service: TermService) -> bool:
         LOGGER.warning("dictionary readiness probe failed")
         return False
     return True
+
+
+# --------------------------------------------------------------------------
+# Pair review (dictionary constraints; no LLM)
+# --------------------------------------------------------------------------
+
+REVIEW_MAX_FINDINGS = 32
+REVIEW_MAX_CANDIDATES = 8
+REVIEW_MAX_SOURCES = 8
+REVIEW_MAX_JSON_BYTES = 65536
+
+
+def review_pair(
+    service: TermService,
+    source: str,
+    target: str,
+    direction: str,
+    resolutions: Sequence[object] = (),
+) -> ReviewReport:
+    """Unique application entry for pair review. Adapters must not import review."""
+    try:
+        return _review_pair(service, source, target, direction, resolutions)
+    except ReviewRequestError:
+        raise
+
+
+def _review_span_to_wire(span: object) -> dict[str, object] | None:
+    if span is None:
+        return None
+    return {"start": span.start, "end": span.end, "text": span.text}
+
+
+def _review_finding_to_wire(finding: object) -> dict[str, object]:
+    candidates_truncated = bool(finding.candidates_truncated)
+    wire_candidates: list[dict[str, object]] = []
+    if len(finding.candidates) > REVIEW_MAX_CANDIDATES:
+        candidates_truncated = True
+    for candidate in finding.candidates[:REVIEW_MAX_CANDIDATES]:
+        sources = candidate.sources
+        if len(sources) > REVIEW_MAX_SOURCES:
+            candidates_truncated = True
+            sources = sources[:REVIEW_MAX_SOURCES]
+        wire_candidates.append(
+            {
+                "zh": candidate.zh,
+                "en": candidate.en,
+                "category": candidate.category,
+                "sources": [
+                    {"source_file": source.source_file, "source_id": source.source_id}
+                    for source in sources
+                ],
+            }
+        )
+    return {
+        "id": finding.id,
+        "verdict": finding.verdict,
+        "rule_id": finding.rule_id,
+        "source_span": _review_span_to_wire(finding.source_span),
+        "target_span": _review_span_to_wire(finding.target_span),
+        "candidates": wire_candidates,
+        "candidates_truncated": candidates_truncated,
+    }
+
+
+def _review_json_bytes(body: dict[str, object]) -> bytes:
+    return json.dumps(
+        body, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _trim_finding_payload(finding: dict[str, object]) -> bool:
+    """Drop one candidate/source from the end. Does not shorten text fields."""
+    candidates = finding["candidates"]
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    last = candidates[-1]
+    sources = last.get("sources")
+    if isinstance(sources, list) and sources:
+        sources.pop()
+        finding["candidates_truncated"] = True
+        if not sources:
+            candidates.pop()
+        return True
+    candidates.pop()
+    finding["candidates_truncated"] = True
+    return True
+
+
+def project_review_report(report: ReviewReport, request_id: str) -> dict[str, object]:
+    """Project a review report to the published HTTP exact-key document."""
+    ordered = sorted(
+        report.findings,
+        key=lambda item: (item.source_span.start, -item.source_span.end, item.id),
+    )
+    truncated = bool(report.truncated)
+    if len(ordered) > REVIEW_MAX_FINDINGS:
+        ordered = ordered[:REVIEW_MAX_FINDINGS]
+        truncated = True
+    body: dict[str, object] = {
+        "request_id": request_id,
+        "source_revision": report.source_revision,
+        "target_revision": report.target_revision,
+        "rule_version": report.rule_version,
+        "dictionary": {
+            "schema_version": report.dictionary.schema_version,
+            "source_commit": report.dictionary.source_commit,
+            "term_count": report.dictionary.term_count,
+        },
+        "coverage": {
+            "evaluated": report.coverage.evaluated,
+            "not_evaluated": report.coverage.not_evaluated,
+            "rules": list(report.coverage.rules),
+        },
+        "findings": [_review_finding_to_wire(item) for item in ordered],
+        "truncated": truncated,
+    }
+    while len(_review_json_bytes(body)) > REVIEW_MAX_JSON_BYTES:
+        findings = body["findings"]
+        if not isinstance(findings, list) or not findings:
+            break
+        if len(findings) > 1:
+            findings.pop()
+            body["truncated"] = True
+            continue
+        if _trim_finding_payload(findings[0]):
+            continue
+        findings.pop()
+        body["truncated"] = True
+    return body
+
 
 
 # --------------------------------------------------------------------------

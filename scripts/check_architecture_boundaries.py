@@ -3,7 +3,7 @@
 
 Intended layers (must stay aligned with docs/architecture.md):
 
-  domain core:     lookup, normalize, models
+  domain core:     lookup, normalize, models, review
   domain+LLM:      sentence  (may use telegram_html; must not import bot/channel)
   application:     application  (protocol-neutral command/API/web pipeline;
                    must not import any presentation module, the Telegram SDK,
@@ -93,7 +93,7 @@ STALE_CONTRACT_FRAGMENTS = tuple(
     )
 )
 
-DOMAIN_CORE = frozenset({"lookup", "normalize", "models"})
+DOMAIN_CORE = frozenset({"lookup", "normalize", "models", "review"})
 DOMAIN_LLM = frozenset({"sentence"})
 # Protocol-neutral orchestration used by command, API and in-process web
 # translation. Linked-channel auto-translation owns specialized channel
@@ -501,6 +501,13 @@ def check() -> list[str]:
                 failures.append(
                     f"{rel}: must not import Telegram SDK {sdk} "
                     f"(TYPE_CHECKING not exempt)"
+                )
+
+        if name in DOMAIN_CORE:
+            bad_llm = sorted(local_all & DOMAIN_LLM)
+            if bad_llm:
+                failures.append(
+                    f"{rel}: domain core must not import domain+LLM {bad_llm}"
                 )
 
         if name in DOMAIN_LLM:

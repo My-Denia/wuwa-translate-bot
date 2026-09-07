@@ -16,9 +16,10 @@ layer that runs inside the API process and is off by default. Linked-channel
 posts keep channel-specific orchestration while sharing the same term and
 sentence primitives. A Windows desktop client consumes the API. `site/` is a
 separately hosted anonymous public beta: the browser only calls same-origin
-`/api/*`, and a server-side proxy holds the device credential for the
-published `/v1` contract. It is not the in-process `/wuwaterm-web` layer and
-not a third translation pipeline ([Public Beta Site](docs/sites.md)).
+`/api/*` (lookup, translation, and review), and a server-side proxy holds the
+device credential for the published `/v1` contract. Review is dictionary
+checking on the VPS, not a third translation pipeline and not the in-process
+`/wuwaterm-web` layer ([Public Beta Site](docs/sites.md)).
 
 The service is dictionary-first. An exact database hit returns the official
 string from the local SQLite database byte-for-byte and does not call the LLM.

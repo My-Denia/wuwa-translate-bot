@@ -143,7 +143,7 @@ export function TranslationWorkbench() {
           <div className="field-hint"><span>请勿输入敏感或个人信息</span><span aria-live="polite">{sourceLength.toLocaleString()} / 2,000</span></div>
           <div className="actions"><button type="submit" disabled={!source.trim() || sourceLength > 2000 || translation.kind === 'loading' || translationClosed}>{translation.kind === 'loading' ? '翻译中…' : '翻译整句'}</button>{translation.kind === 'loading' && <button className="secondary-button" type="button" onClick={cancelTranslation}>取消等待</button>}</div>
         </form>
-        <TranslationView state={translation} copied={copied} copyFailed={copyFailed} onCopy={copyTranslation} />
+        <TranslationView state={translation} copied={copied} copyFailed={copyFailed} onCopy={copyTranslation} source={source} />
       </section>
     </div>
     <div className="product-notes"><p><strong>字典优先</strong><span>优先使用官方中英对照，未命中时才尝试模型翻译。</span></p><p><strong>不保存历史</strong><span>结果仅在当前页面显示，刷新页面即清空。</span></p><p><strong>独立作品</strong><span>基于官方游戏术语，不是游戏官方运营的网站。</span></p></div>
@@ -157,13 +157,16 @@ function TermsView({ state, onTranslate }: { state: State<TermsResult>; onTransl
   if (!state.data.matches.length) return <div className="empty-state"><p>暂未找到这个术语。</p><button className="text-button" type="button" onClick={onTranslate}>转到整句翻译</button></div>;
   return <div className="terms-results" aria-live="polite"><p className="result-summary">找到 {state.data.matches.length} 条匹配</p>{state.data.matches.map((m,i) => <article className="term-result" key={i}><div className="term-pair"><strong>{m.zh}</strong><span>{m.en}</span></div><dl><div><dt>类别</dt><dd>{m.category}</dd></div><div><dt>匹配方式</dt><dd>{m.reason}</dd></div><div><dt>匹配分数</dt><dd>{m.score}</dd></div></dl></article>)}<RequestId value={state.data.request_id} /></div>;
 }
-function TranslationView({ state, copied, copyFailed, onCopy }: { state: State<TranslationResult>; copied: boolean; copyFailed: boolean; onCopy: () => void }) {
+function TranslationView({ state, copied, copyFailed, onCopy, source }: { state: State<TranslationResult>; copied: boolean; copyFailed: boolean; onCopy: () => void; source: string }) {
   if (state.kind === 'idle') return <p className="translation-placeholder">译文会出现在这里。</p>;
   if (state.kind === 'loading') return <p className="notice-state" role="status">正在翻译，请稍候。取消仅停止本页等待。</p>;
   if (state.kind === 'cancelled') return <p className="notice-state" role="status">已停止本页等待；服务可能继续处理，已扣额度不会返还。</p>;
   if (state.kind === 'error') return <FailureView value={state.error} />;
   if (state.kind !== 'success') return null;
-  return <div className="translation-result" aria-live="polite"><div className="result-meta"><span>{({ exact: '官方术语精确匹配', fuzzy: '术语近似匹配', noop: '无需转换', llm: '模型翻译' })[state.data.kind]}</span><span>{state.data.direction === 'en' ? '英文' : '中文'}</span></div>{state.data.dictionary_miss && <p className="field-hint">未命中字典，译文请结合上下文核对。</p>}<p className="translated-text">{state.data.text}</p><button type="button" className="secondary-button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button>{copyFailed && <p role="status">复制未成功，请选择译文手动复制。</p>}<RequestId value={state.data.request_id} /></div>;
+  function sendToReview() {
+    window.dispatchEvent(new CustomEvent('wuwaterm-send-review', { detail: { source, target: state.data.text, direction: state.data.direction } }));
+  }
+  return <div className="translation-result" aria-live="polite"><div className="result-meta"><span>{({ exact: '官方术语精确匹配', fuzzy: '术语近似匹配', noop: '无需转换', llm: '模型翻译' })[state.data.kind]}</span><span>{state.data.direction === 'en' ? '英文' : '中文'}</span></div>{state.data.dictionary_miss && <p className="field-hint">未命中字典，译文请结合上下文核对。</p>}<p className="translated-text">{state.data.text}</p><button type="button" className="secondary-button" onClick={onCopy}>{copied ? '已复制' : '复制译文'}</button><button type="button" className="secondary-button" onClick={sendToReview}>送去审校</button>{copyFailed && <p role="status">复制未成功，请选择译文手动复制。</p>}<RequestId value={state.data.request_id} /></div>;
 }
 function FailureView({ value }: { value: Failure }) {
   return <div className="error-panel" role="status"><p>{MESSAGES[value.reason] ?? '服务暂时不可用，请稍后重试。'}</p>{value.retry_after_seconds !== undefined && <p>建议 {value.retry_after_seconds >= 3600 ? Math.ceil(value.retry_after_seconds / 3600) + ' 小时' : Math.ceil(value.retry_after_seconds) + ' 秒'}后重试。不会自动重发。</p>}{value.request_id && <RequestId value={value.request_id} />}</div>;

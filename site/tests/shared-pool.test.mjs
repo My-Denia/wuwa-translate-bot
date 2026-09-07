@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { admitRequest, poolStatus, POOL_LIMITS } from '../lib/shared-pool.js';
 import { createPool, fixtureEnvironment } from './helpers/pool-fixture.mjs';
-import { proxyTermsRequest, proxyTranslationRequest, parseTermsRequest, parseTranslationRequest } from '../lib/wuwaterm-proxy.js';
+import { proxyReviewRequest, proxyTermsRequest, proxyTranslationRequest, parseTermsRequest, parseTranslationRequest } from '../lib/wuwaterm-proxy.js';
 
 test('one caller can exhaust translations; lookup retains its own allowance', async () => {
   const db = createPool(); const env = fixtureEnvironment(db);
@@ -121,6 +121,67 @@ test('second-only contention retries in one second but translation minute exhaus
   assert.equal(translation.response.headers.get('retry-after'), '60');
   db.advance(1);
   assert.equal((await admitRequest(env, 'terms')).ok, true);
+});
+
+test('review admission does not increment translation_used and survives translation exhaustion', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  assert.equal((await admitRequest(env, 'review', 0)).ok, true);
+  assert.equal(db.row().review_used, 1);
+  assert.equal(db.row().translation_used, 0);
+  assert.equal(db.row().character_used, 0);
+  assert.equal(db.row().terms_used, 0);
+  assert.equal(db.row().meta_used, 0);
+  for (let i = 0; i < POOL_LIMITS.translationsPerDay; i++) {
+    db.advance(61);
+    assert.equal((await admitRequest(env, 'translations', 3)).ok, true);
+  }
+  db.advance(61);
+  const refused = await admitRequest(env, 'translations', 3);
+  assert.equal((await refused.response.json()).reason, 'translation_pool_exhausted');
+  assert.equal((await admitRequest(env, 'review', 0)).ok, true);
+  const status = await (await poolStatus(env)).json();
+  assert.equal('reviews' in status, false);
+});
+
+test('review daily exhaustion is independent of translation remaining', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  for (let i = 0; i < POOL_LIMITS.reviewsPerDay; i++) {
+    db.advance(61);
+    assert.equal((await admitRequest(env, 'review', 0)).ok, true);
+  }
+  db.advance(61);
+  const denied = await admitRequest(env, 'review', 0);
+  assert.equal((await denied.response.json()).reason, 'reviews_pool_exhausted');
+  assert.equal((await admitRequest(env, 'translations', 3)).ok, true);
+});
+
+test('proxyReviewRequest charges review_used and not translation_used', async () => {
+  const db = createPool(); const env = fixtureEnvironment(db);
+  const response = await proxyReviewRequest({
+    environment: env,
+    input: { source: '今汐', target: 'Jinhsi', direction: 'en' },
+    fetchImpl: async () => new Response(JSON.stringify({
+      request_id: 'req-review-pool',
+      source_revision: 'a'.repeat(64),
+      target_revision: 'b'.repeat(64),
+      rule_version: 'review-v1',
+      dictionary: { schema_version: '2', source_commit: 'abc123', term_count: 1 },
+      coverage: { evaluated: 1, not_evaluated: 1, rules: ['review.term_pair'] },
+      findings: [{
+        id: '0:2:今汐',
+        verdict: 'verified_constraint',
+        rule_id: 'review.term_pair',
+        source_span: { start: 0, end: 2, text: '今汐' },
+        target_span: { start: 0, end: 6, text: 'Jinhsi' },
+        candidates: [{ zh: '今汐', en: 'Jinhsi', category: 'resonator', sources: [{ source_file: 'RoleInfo.json', source_id: '1' }] }],
+        candidates_truncated: false,
+      }],
+      truncated: false,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(db.row().review_used, 1);
+  assert.equal(db.row().translation_used, 0);
 });
 
 test('meta daily exhaustion advertises UTC day reset, independently of the minute gate', async () => {
