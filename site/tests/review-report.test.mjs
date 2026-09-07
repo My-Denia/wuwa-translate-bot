@@ -130,7 +130,9 @@ test('review UI imports the report module and does not insert manuscripts as HTM
   assert.match(component, /discardInFlight/u);
   assert.match(component, /setHistory\(\[\]\)/u);
   assert.match(component, /setResolutions\(\[\]\)/u);
-  assert.match(component, /target_span\.text === expected/u);
+  assert.match(component, /forms\.includes\(span\.text\)/u);
+  assert.match(component, /discardInFlight\(\); setDirection/u);
+  assert.match(component, /choice: 'not_a_term'[\s\S]{0,80}setState\(\{ kind: 'idle' \}\)/u);
   assert.match(component, /原文 \{sourceLength\.toLocaleString\(\)\} \/ 2,000/u);
   assert.match(component, /x\.findings\.every\(isFinding\)/u);
   assert.match(translation, /const result = state\.data/u);

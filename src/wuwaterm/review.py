@@ -461,7 +461,15 @@ def _judge_mention(
                 target_span=_span_at(target, hit[0], hit[1]),
                 candidates=candidates,
             )
-        # Corresponding sentence is a reliable alignment region.
+        if _elsewhere_has_form(target, corresponding, forms):
+            return ReviewFinding(
+                id=finding_id,
+                verdict=VERDICT_NOT_EVALUATED,
+                rule_id=RULE_TERM_PAIR,
+                source_span=source_span,
+                target_span=None,
+                candidates=candidates,
+            )
         mismatch = None
         for form, hits in in_region.items():
             if form == chosen_form:

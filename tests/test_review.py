@@ -309,6 +309,33 @@ def test_official_form_only_elsewhere_is_not_verified(sample_db):
     assert echo.verdict != VERDICT_VERIFIED
 
 
+def test_official_pair_elsewhere_stays_not_evaluated(sample_db):
+    service = _service(sample_db)
+    source = "前言。声骸。"
+    target = "Preface. More. Echo."
+    baseline = review_pair(service, source, target, "en")
+    echo = _finding(baseline, "声骸")
+    assert echo.verdict == VERDICT_NOT_EVALUATED
+    report = review_pair(
+        service,
+        source,
+        target,
+        "en",
+        resolutions=(
+            {
+                "mention_id": echo.id,
+                "choice": CHOICE_OFFICIAL_PAIR,
+                "zh": "声骸",
+                "en": "Echo",
+            },
+        ),
+    )
+    resolved = _finding(report, "声骸")
+    assert resolved.verdict == VERDICT_NOT_EVALUATED
+    assert resolved.target_span is None
+    assert resolved.verdict != VERDICT_CONFLICT
+
+
 def test_official_pair_resolution_conflict_when_aligned_region_fails(sample_db):
     service = _service(sample_db)
     source = "今汐拿到了声骸。"

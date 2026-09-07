@@ -165,14 +165,16 @@ export function ReviewWorkbench() {
       return [...rest, { mention_id: finding.id, choice: 'official_pair', zh, en }];
     });
     const expected = direction === 'en' ? en : zh;
-    if (finding.target_span && finding.target_span.text === expected) {
-      const segments = highlightSegments(target, finding.target_span);
+    const span = finding.target_span;
+    const forms = finding.candidates.flatMap((candidate) => [candidate.zh, candidate.en]);
+    if (span && forms.includes(span.text)) {
+      const segments = highlightSegments(target, span);
       if (segments) {
         setHistory((stack) => [...stack, target]);
         setTarget(segments.before + expected + segments.after);
-        setState({ kind: 'idle' });
       }
     }
+    setState({ kind: 'idle' });
   }
 
   function markNotTerm(finding: ReviewFinding) {
@@ -180,6 +182,7 @@ export function ReviewWorkbench() {
       const rest = current.filter((item) => item.mention_id !== finding.id);
       return [...rest, { mention_id: finding.id, choice: 'not_a_term' }];
     });
+    setState({ kind: 'idle' });
   }
 
   function undo() {
@@ -230,7 +233,7 @@ export function ReviewWorkbench() {
     <div className="card-heading"><div><p className="section-kicker">03 / REVIEW</p><h2 id="review-title">译文审校</h2></div><span className="tag">术语依据</span></div>
     <p className="card-intro">粘贴原文和已有译文，核对词典依据。不调用整句翻译模型，也不消耗翻译额度。</p>
     <form onSubmit={submit}>
-      <div className="label-row"><label htmlFor="review-source">原文</label><select aria-label="译文语言" value={direction} disabled={state.kind === 'loading'} onChange={e => { setDirection(e.target.value as 'en' | 'zh'); setState({ kind: 'idle' }); }}><option value="en">译文为英文</option><option value="zh">译文为中文</option></select></div>
+      <div className="label-row"><label htmlFor="review-source">原文</label><select aria-label="译文语言" value={direction} disabled={state.kind === 'loading'} onChange={e => { discardInFlight(); setDirection(e.target.value as 'en' | 'zh'); }}><option value="en">译文为英文</option><option value="zh">译文为中文</option></select></div>
       <textarea id="review-source" value={source} disabled={state.kind === 'loading'} onChange={e => { setSource(e.target.value); setState({ kind: 'idle' }); setResolutions([]); }} rows={4} placeholder="粘贴需要核对的原文…" />
       <label htmlFor="review-target">已有译文</label>
       <textarea id="review-target" value={target} disabled={state.kind === 'loading'} onChange={e => { setTarget(e.target.value); setState({ kind: 'idle' }); }} rows={4} placeholder="粘贴已有译文…" />
