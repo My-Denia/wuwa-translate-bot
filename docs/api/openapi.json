@@ -135,6 +135,370 @@
         "title": "MetaResponseBody",
         "type": "object"
       },
+      "NotATermResolutionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "choice": {
+            "const": "not_a_term",
+            "title": "Choice",
+            "type": "string"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "choice"
+        ],
+        "title": "NotATermResolutionBody",
+        "type": "object"
+      },
+      "OfficialPairResolutionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "choice": {
+            "const": "official_pair",
+            "title": "Choice",
+            "type": "string"
+          },
+          "en": {
+            "title": "En",
+            "type": "string"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          },
+          "zh": {
+            "title": "Zh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "choice",
+          "zh",
+          "en"
+        ],
+        "title": "OfficialPairResolutionBody",
+        "type": "object"
+      },
+      "ReviewCandidateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "en": {
+            "title": "En",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewSourceBody"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "zh": {
+            "title": "Zh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zh",
+          "en",
+          "category",
+          "sources"
+        ],
+        "title": "ReviewCandidateBody",
+        "type": "object"
+      },
+      "ReviewCoverageBody": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluated": {
+            "title": "Evaluated",
+            "type": "integer"
+          },
+          "not_evaluated": {
+            "title": "Not Evaluated",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "evaluated",
+          "not_evaluated",
+          "rules"
+        ],
+        "title": "ReviewCoverageBody",
+        "type": "object"
+      },
+      "ReviewDictionaryBody": {
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          },
+          "source_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Commit"
+          },
+          "term_count": {
+            "title": "Term Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "source_commit",
+          "term_count"
+        ],
+        "title": "ReviewDictionaryBody",
+        "type": "object"
+      },
+      "ReviewFindingBody": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewCandidateBody"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "candidates_truncated": {
+            "title": "Candidates Truncated",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "source_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewSpanBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verdict": {
+            "enum": [
+              "verified_constraint",
+              "confirmed_conflict",
+              "needs_review",
+              "not_evaluated"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "verdict",
+          "rule_id",
+          "source_span",
+          "target_span",
+          "candidates",
+          "candidates_truncated"
+        ],
+        "title": "ReviewFindingBody",
+        "type": "object"
+      },
+      "ReviewRequestBody": {
+        "additionalProperties": false,
+        "properties": {
+          "direction": {
+            "description": "Target language of the submitted translation (same meaning as translations.to).",
+            "enum": [
+              "en",
+              "zh"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "resolutions": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/OfficialPairResolutionBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NotATermResolutionBody"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolutions"
+          },
+          "source": {
+            "description": "Submitted source text. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "description": "Submitted translation. At most 2,000 Unicode scalars.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target",
+          "direction"
+        ],
+        "title": "ReviewRequestBody",
+        "type": "object"
+      },
+      "ReviewResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/ReviewCoverageBody"
+          },
+          "dictionary": {
+            "$ref": "#/components/schemas/ReviewDictionaryBody"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewFindingBody"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "rule_version": {
+            "title": "Rule Version",
+            "type": "string"
+          },
+          "source_revision": {
+            "title": "Source Revision",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id",
+          "source_revision",
+          "target_revision",
+          "rule_version",
+          "dictionary",
+          "coverage",
+          "findings",
+          "truncated"
+        ],
+        "title": "ReviewResponseBody",
+        "type": "object"
+      },
+      "ReviewSourceBody": {
+        "additionalProperties": false,
+        "properties": {
+          "source_file": {
+            "title": "Source File",
+            "type": "string"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_file",
+          "source_id"
+        ],
+        "title": "ReviewSourceBody",
+        "type": "object"
+      },
+      "ReviewSpanBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "Half-open end offset in Unicode scalars of the submitted side.",
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "description": "Half-open start offset in Unicode scalars of the submitted side.",
+            "title": "Start",
+            "type": "integer"
+          },
+          "text": {
+            "description": "Exact substring covering [start, end) on the submitted side.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "text"
+        ],
+        "title": "ReviewSpanBody",
+        "type": "object"
+      },
       "TermMatchBody": {
         "properties": {
           "category": {
@@ -456,6 +820,133 @@
         "summary": "Read Meta",
         "tags": [
           "dictionary"
+        ]
+      }
+    },
+    "/v1/reviews": {
+      "post": {
+        "description": "Review a submitted source/target pair against dictionary constraints.",
+        "operationId": "create_review_v1_reviews_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponseBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Missing or invalid credential"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Scope not granted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Input rejected"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Rate limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "A dependency this request needs is temporarily unavailable: the translation model, the credential store, or the post-admission device re-check. Classified as `llm_unavailable` or `internal`; the 503 status is what distinguishes it from a genuine 500. Retryable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseBody"
+                }
+              }
+            },
+            "description": "Request exceeded the server time budget. Classified as `internal`: the enumerated code set is closed, so the HTTP status is what distinguishes a timeout from a genuine 500."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Review",
+        "tags": [
+          "review"
         ]
       }
     },

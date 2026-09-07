@@ -33,7 +33,7 @@ from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
@@ -48,8 +48,10 @@ from wuwaterm.application import (
     ERROR_UNAUTHORIZED,
     KIND_ERROR,
     KIND_LLM,
+    REVIEW_MAX_SIDE_SCALARS,
     LLMFailureDiagnostic,
     LlmCallBudget,
+    ReviewRequestError,
     SlidingWindowRateLimiter,
     TranslationJob,
     build_term_service,
@@ -57,6 +59,8 @@ from wuwaterm.application import (
     llm_configured,
     lookup_terms,
     probe_database,
+    project_review_report,
+    review_pair,
     service_metadata,
     translate_request_async,
 )
@@ -253,6 +257,96 @@ class MetaResponseBody(BaseModel):
 
 class HealthResponseBody(BaseModel):
     status: Literal["ok", "ready"]
+
+
+class OfficialPairResolutionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mention_id: str
+    choice: Literal["official_pair"]
+    zh: str
+    en: str
+
+
+class NotATermResolutionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mention_id: str
+    choice: Literal["not_a_term"]
+
+
+class ReviewRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str = Field(min_length=1, description="Submitted source text. At most 2,000 Unicode scalars.")
+    target: str = Field(min_length=1, description="Submitted translation. At most 2,000 Unicode scalars.")
+    direction: Literal["en", "zh"] = Field(
+        description="Target language of the submitted translation (same meaning as translations.to)."
+    )
+    resolutions: list[OfficialPairResolutionBody | NotATermResolutionBody] | None = None
+
+
+class ReviewSpanBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: int = Field(
+        description="Half-open start offset in Unicode scalars of the submitted side."
+    )
+    end: int = Field(
+        description="Half-open end offset in Unicode scalars of the submitted side."
+    )
+    text: str = Field(
+        description="Exact substring covering [start, end) on the submitted side."
+    )
+
+
+class ReviewSourceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_file: str
+    source_id: str
+
+
+class ReviewCandidateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    zh: str
+    en: str
+    category: str
+    sources: list[ReviewSourceBody]
+
+
+class ReviewFindingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    verdict: Literal[
+        "verified_constraint", "confirmed_conflict", "needs_review", "not_evaluated"
+    ]
+    rule_id: str
+    source_span: ReviewSpanBody | None
+    target_span: ReviewSpanBody | None
+    candidates: list[ReviewCandidateBody]
+    candidates_truncated: bool
+
+
+class ReviewDictionaryBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: str | None
+    source_commit: str | None
+    term_count: int
+
+
+class ReviewCoverageBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evaluated: int
+    not_evaluated: int
+    rules: list[str]
+
+
+class ReviewResponseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    source_revision: str
+    target_revision: str
+    rule_version: str
+    dictionary: ReviewDictionaryBody
+    coverage: ReviewCoverageBody
+    findings: list[ReviewFindingBody]
+    truncated: bool
 
 
 # The wire vocabulary, spelled out so a generated client can model every
@@ -926,6 +1020,9 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     text_schema = document["components"]["schemas"]["TranslationRequestBody"][
         "properties"
     ]["text"]
+    review_properties = document["components"]["schemas"]["ReviewRequestBody"][
+        "properties"
+    ]
     parameters = document["paths"][f"/{API_VERSION}/terms"]["get"]["parameters"]
     try:
         query_schema = next(
@@ -937,6 +1034,8 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     for schema, limit in (
         (text_schema, LLM_INPUT_CHAR_LIMIT),
         (query_schema, TERM_QUERY_MAX_LENGTH),
+        (review_properties["source"], REVIEW_MAX_SIDE_SCALARS),
+        (review_properties["target"], REVIEW_MAX_SIDE_SCALARS),
     ):
         nested = schema.get("json_schema_extra")
         if isinstance(nested, dict) and "maxLength" in nested:
@@ -1308,3 +1407,47 @@ def _register_routes(app: FastAPI) -> None:
             llm_configured=llm_configured(),
             request_id=_request_id(request),
         )
+
+    @app.post(
+        f"{prefix}/reviews",
+        response_model=ReviewResponseBody,
+        tags=["review"],
+        responses=ERROR_RESPONSES,
+    )
+    async def create_review(
+        request: Request,
+        body: ReviewRequestBody,
+        device: Annotated[Device, Depends(require_scope(SCOPE_TRANSLATE))],
+    ) -> JSONResponse:
+        """Review a submitted source/target pair against dictionary constraints."""
+        await _require_active_device(request, device)
+        resolutions = []
+        for item in body.resolutions or ():
+            dumped = item.model_dump()
+            if dumped.get("choice") == "not_a_term":
+                dumped = {
+                    "mention_id": dumped["mention_id"],
+                    "choice": dumped["choice"],
+                }
+            resolutions.append(dumped)
+        try:
+            report = await asyncio.to_thread(
+                review_pair,
+                request.app.state.term_service,
+                body.source,
+                body.target,
+                body.direction,
+                tuple(resolutions),
+            )
+        except ReviewRequestError as exc:
+            raise ApiError(exc.code, exc.message)
+        projected = project_review_report(report, _request_id(request))
+        LOGGER.info(
+            "review device=%s findings=%s truncated=%s request_id=%s",
+            redact_id(device.device_id),
+            len(projected["findings"]),
+            projected["truncated"],
+            _request_id(request),
+        )
+        await _require_active_device(request, device, serve_on_store_error=True)
+        return JSONResponse(content=projected)

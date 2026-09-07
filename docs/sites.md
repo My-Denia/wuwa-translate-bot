@@ -10,8 +10,8 @@ requests can be busy or fail, and there is no SLA.
 ## Evidence boundaries
 
 - **Repository fact:** `site/` is a separately built Hosted / Cloudflare Worker
-  BFF. The browser calls only same-origin `/api/pool`, `/api/terms` and
-  `/api/translations`; the server-side proxy holds the device credential and
+  BFF. The browser calls only same-origin `/api/pool`, `/api/terms`,
+  `/api/translations` and `/api/reviews`; the server-side proxy holds the device credential and
   calls the published `/v1` contract. There is no visitor account system in
   this application code.
 - **Hosted platform control:** the hosting platform owns deployment versions,
@@ -50,11 +50,13 @@ another admission. This is not a time-based deletion promise.
 | Terms | 240 admissions / UTC day |
 | Translation | 30 admissions and 12,000 raw Unicode characters / UTC day |
 | Optional meta | 60 admissions / UTC day |
-| Inputs | query <=200 trimmed Unicode characters; translation <=2,000 raw characters; streamed body <=32,768 bytes |
+| Review | 60 admissions / UTC day; does not increment translation or character counters |
+| Inputs | query <=200 trimmed Unicode characters; translation <=2,000 raw characters; review source and target each <=2,000 raw characters; streamed body <=32,768 bytes |
 
-Terms and translations have independent daily counters. Disabling translation,
+Terms, translations and reviews have independent daily counters. Disabling translation,
 exhausting its count or character pool, or VPS model unavailability does not
-disable terms. Terms can still be busy under the total short window, its own
+disable terms or reviews. The public `/api/pool` JSON does not include a `reviews`
+key. Terms can still be busy under the total short window, its own
 daily cap or infrastructure failure.
 
 One atomic conditional SQLite UPSERT checks and increments all applicable

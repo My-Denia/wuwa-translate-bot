@@ -5,9 +5,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  parseReviewRequest,
   parseTermsRequest,
   parseTranslationRequest,
   proxyMetaRequest,
+  proxyReviewRequest,
   proxyTermsRequest,
   proxyTranslationRequest,
 } from '../lib/wuwaterm-proxy.js';
@@ -480,11 +482,145 @@ test('local request parsers accept only the public Site contract', async () => {
   }
 });
 
+function sampleReviewBody(source, target, extraFindings = []) {
+  const findings = [
+    {
+      id: '0:2:今汐',
+      verdict: 'verified_constraint',
+      rule_id: 'review.term_pair',
+      source_span: { start: 0, end: 2, text: '今汐' },
+      target_span: { start: 0, end: 6, text: 'Jinhsi' },
+      candidates: [{
+        zh: '今汐',
+        en: 'Jinhsi',
+        category: 'resonator',
+        sources: [{ source_file: 'RoleInfo.json', source_id: 'RoleInfo_1304_Name' }],
+      }],
+      candidates_truncated: false,
+    },
+    ...extraFindings,
+  ];
+  return {
+    request_id: 'req-review',
+    source_revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    target_revision: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    rule_version: 'review-v1',
+    dictionary: { schema_version: '2', source_commit: 'abc123', term_count: 12 },
+    coverage: { evaluated: 1, not_evaluated: 1, rules: ['review.term_pair', 'review.sentence_meaning'] },
+    findings,
+    truncated: false,
+  };
+}
+
+function denseCappedReviewBody(source, target) {
+  const findings = [];
+  const pad = 'N'.repeat(240);
+  for (let index = 0; index < 32; index += 1) {
+    findings.push({
+      id: `${index}:${index + 1}:${Array.from(source)[index]}`,
+      verdict: 'needs_review',
+      rule_id: 'review.term_pair',
+      source_span: { start: index, end: index + 1, text: Array.from(source)[index] },
+      target_span: null,
+      candidates: Array.from({ length: 8 }, (_, candidate) => ({
+        zh: '今',
+        en: `Jinhsi${candidate}`,
+        category: 'resonator',
+        sources: Array.from({ length: 8 }, (_, sourceIndex) => ({
+          source_file: `${pad}${index}_${candidate}_${sourceIndex}.json`,
+          source_id: `id_${index}_${candidate}_${sourceIndex}`,
+        })),
+      })),
+      candidates_truncated: true,
+    });
+  }
+  const body = {
+    request_id: 'req-dense',
+    source_revision: 'c'.repeat(64),
+    target_revision: 'd'.repeat(64),
+    rule_version: 'review-v1',
+    dictionary: { schema_version: '2', source_commit: 'abc123', term_count: 99 },
+    coverage: { evaluated: 32, not_evaluated: 1, rules: ['review.term_pair', 'review.sentence_meaning'] },
+    findings,
+    truncated: true,
+  };
+  while (Buffer.byteLength(JSON.stringify(body), 'utf8') > 65536) {
+    const last = body.findings[body.findings.length - 1];
+    if (last.candidates.length > 1) last.candidates.pop();
+    else if (body.findings.length > 1) body.findings.pop();
+    else break;
+    body.truncated = true;
+  }
+  return body;
+}
+
+test('review proxy uses an independent endpoint and keeps exact keys', async () => {
+  let captured;
+  const input = { source: '今汐', target: 'Jinhsi', direction: 'en' };
+  const upstream = sampleReviewBody(input.source, input.target);
+  const response = await proxyReviewRequest({
+    environment: ENVIRONMENT,
+    input,
+    fetchImpl: async (url, init) => {
+      captured = { url: url.toString(), init };
+      return upstreamJson(200, upstream);
+    },
+  });
+  assert.equal(captured.url, `${BASE_URL}v1/reviews`);
+  assert.equal(captured.init.method, 'POST');
+  assert.equal(JSON.parse(captured.init.body).source, '今汐');
+  assert.equal(response.status, 200);
+  assertSafeResponse(response);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body).sort(), [
+    'coverage', 'dictionary', 'findings', 'request_id', 'rule_version',
+    'source_revision', 'target_revision', 'truncated',
+  ]);
+  assert.equal('reviews' in body, false);
+});
+
+test('dense 2000+2000 review responses stay 200 rather than upstream_response_too_large', async () => {
+  const source = '今'.repeat(2000);
+  const target = 'A'.repeat(2000);
+  const upstream = denseCappedReviewBody(source, target);
+  const encoded = Buffer.byteLength(JSON.stringify(upstream), 'utf8');
+  assert.ok(encoded > 40_000, `stub too small: ${encoded}`);
+  assert.ok(encoded <= 65_536, `stub over cap: ${encoded}`);
+  const response = await proxyReviewRequest({
+    environment: ENVIRONMENT,
+    input: { source, target, direction: 'en' },
+    fetchImpl: async () => upstreamJson(200, upstream),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  const body = await response.json();
+  assert.notEqual(body.reason, 'upstream_response_too_large');
+  assert.equal(body.truncated, true);
+});
+
+test('oversized or invalid review requests never reach upstream', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return upstreamJson(200, sampleReviewBody('今汐', 'Jinhsi')); };
+  const parsedEmpty = await parseReviewRequest(new Request('https://site.invalid/api/reviews', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: '', target: 'Jinhsi', direction: 'en' }),
+  }));
+  assert.equal(parsedEmpty.ok, false);
+  const tooLong = await proxyReviewRequest({
+    environment: ENVIRONMENT,
+    input: { source: '今'.repeat(2001), target: 'Jinhsi', direction: 'en' },
+    fetchImpl,
+  });
+  assert.equal(tooLong.status, 400);
+  assert.equal(calls, 0);
+});
+
 test('routes all delegate to the shared proxy and expose no environment names', () => {
   const routeFiles = [
     '../app/api/meta/route.ts',
     '../app/api/terms/route.ts',
     '../app/api/translations/route.ts',
+    '../app/api/reviews/route.ts',
   ];
   for (const relativePath of routeFiles) {
     const source = readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), 'utf8');

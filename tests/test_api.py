@@ -22,6 +22,7 @@ import pytest
 from wuwaterm.application import ERROR_INPUT_TOO_LONG
 from wuwaterm.db import connect, insert_records
 from wuwaterm.models import TermRecord
+from wuwaterm.review import MAX_SIDE_SCALARS
 from wuwaterm.translation_policy import LLM_INPUT_CHAR_LIMIT
 from wuwaterm_api import TERM_QUERY_MAX_LENGTH
 from wuwaterm_api.app import create_app
@@ -925,6 +926,7 @@ def test_openapi_snapshot_documents_the_versioned_surface():
         "/healthz",
         "/readyz",
         "/v1/meta",
+        "/v1/reviews",
         "/v1/terms",
         "/v1/translations",
     ]
@@ -950,6 +952,16 @@ def test_openapi_documents_conservative_client_limits():
 
     assert text_schema["maxLength"] == LLM_INPUT_CHAR_LIMIT
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
+    review_properties = document["components"]["schemas"]["ReviewRequestBody"][
+        "properties"
+    ]
+    assert review_properties["source"]["maxLength"] == MAX_SIDE_SCALARS
+    assert review_properties["target"]["maxLength"] == MAX_SIDE_SCALARS
+    span_properties = document["components"]["schemas"]["ReviewSpanBody"]["properties"]
+    assert "Unicode scalars" in span_properties["start"]["description"]
+    assert "Half-open" in span_properties["start"]["description"]
+    assert "Unicode scalars" in span_properties["end"]["description"]
+    assert "Half-open" in span_properties["end"]["description"]
 
 
 def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
@@ -968,7 +980,13 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
                             },
                         }
                     }
-                }
+                },
+                "ReviewRequestBody": {
+                    "properties": {
+                        "source": {"type": "string"},
+                        "target": {"type": "string"},
+                    }
+                },
             }
         },
         "paths": {
@@ -1001,6 +1019,12 @@ def test_openapi_limit_postprocessor_handles_pydantic1_shapes():
     assert text_schema["json_schema_extra"] == {"x-preserved": "body"}
     assert query_schema["maxLength"] == TERM_QUERY_MAX_LENGTH
     assert query_schema["json_schema_extra"] == {"x-preserved": "query"}
+    assert result["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert result["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
@@ -1011,7 +1035,13 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
             "schemas": {
                 "TranslationRequestBody": {
                     "properties": {"text": {"type": "string", "maxLength": 7}}
-                }
+                },
+                "ReviewRequestBody": {
+                    "properties": {
+                        "source": {"type": "string", "maxLength": 9},
+                        "target": {"type": "string", "maxLength": 9},
+                    }
+                },
             }
         },
         "paths": {
@@ -1036,6 +1066,12 @@ def test_openapi_limit_postprocessor_is_idempotent_and_overrides_conflicts():
     assert document["paths"]["/v1/terms"]["get"]["parameters"][0]["schema"][
         "maxLength"
     ] == TERM_QUERY_MAX_LENGTH
+    assert document["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert document["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 @pytest.mark.parametrize(
@@ -1077,6 +1113,12 @@ def test_openapi_schema_cache_uses_postprocessed_document(tmp_path, sample_db):
         for parameter in first["paths"]["/v1/terms"]["get"]["parameters"]
         if parameter["name"] == "q"
     ) == TERM_QUERY_MAX_LENGTH
+    assert first["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "source"
+    ]["maxLength"] == MAX_SIDE_SCALARS
+    assert first["components"]["schemas"]["ReviewRequestBody"]["properties"][
+        "target"
+    ]["maxLength"] == MAX_SIDE_SCALARS
 
 
 API_NUMERIC_SETTING_CASES = (
@@ -2889,3 +2931,225 @@ def test_a_request_after_teardown_is_503_not_an_unhandled_500(tmp_path, sample_d
 
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "internal"
+
+
+# --------------------------------------------------------------------------
+# Pair review
+# --------------------------------------------------------------------------
+
+REVIEW_TOP_KEYS = {
+    "coverage",
+    "dictionary",
+    "findings",
+    "request_id",
+    "rule_version",
+    "source_revision",
+    "target_revision",
+    "truncated",
+}
+
+
+def _assert_review_exact_keys(body: dict) -> None:
+    assert set(body) == REVIEW_TOP_KEYS
+    assert set(body["dictionary"]) == {"schema_version", "source_commit", "term_count"}
+    assert set(body["coverage"]) == {"evaluated", "not_evaluated", "rules"}
+    assert isinstance(body["truncated"], bool)
+    assert isinstance(body["findings"], list)
+    for finding in body["findings"]:
+        assert set(finding) == {
+            "candidates",
+            "candidates_truncated",
+            "id",
+            "rule_id",
+            "source_span",
+            "target_span",
+            "verdict",
+        }
+        assert finding["verdict"] in {
+            "verified_constraint",
+            "confirmed_conflict",
+            "needs_review",
+            "not_evaluated",
+        }
+        for span_key in ("source_span", "target_span"):
+            span = finding[span_key]
+            if span is not None:
+                assert set(span) == {"end", "start", "text"}
+        assert isinstance(finding["candidates_truncated"], bool)
+        for candidate in finding["candidates"]:
+            assert set(candidate) == {"category", "en", "sources", "zh"}
+            assert "source_file" not in candidate
+            assert "source_id" not in candidate
+            for source in candidate["sources"]:
+                assert set(source) == {"source_file", "source_id"}
+
+
+def test_review_success_exact_keys(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "今汐拿到了声骸。", "target": "Jinhsi got an Echo.", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    _assert_review_exact_keys(body)
+    assert body["rule_version"] == "review-v1"
+    assert body["truncated"] is False
+    assert all(item["verdict"] != "confirmed_conflict" for item in body["findings"])
+    assert body["coverage"]["not_evaluated"] > 0
+
+
+def test_review_empty_source_is_4xx_not_a_report(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "", "target": "Jinhsi", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 400
+    assert set(response.json()) == {"error", "request_id"}
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "findings" not in response.json()
+
+
+def test_review_empty_target_is_4xx_not_a_report(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "今汐", "target": "", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_without_resolutions_never_emits_confirmed_conflict(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "今汐拿到了声骸。", "target": "Jinhsi got a phantom.", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    _assert_review_exact_keys(body)
+    assert all(item["verdict"] != "confirmed_conflict" for item in body["findings"])
+
+
+def test_review_overlong_side_is_input_too_long(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=32 * 1024)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "今" * 2001, "target": "Jinhsi", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "input_too_long"
+
+
+def test_review_does_not_call_translate_request(tmp_path, sample_db, monkeypatch):
+    import wuwaterm.application as application
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("POST /v1/reviews must not call translate_request")
+
+    monkeypatch.setattr(application, "translate_request", boom)
+    monkeypatch.setattr(application, "translate_request_async", boom)
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": "今汐", "target": "Jinhsi", "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    _assert_review_exact_keys(response.json())
+
+
+def test_review_capped_json_fits_max_upstream_bytes(tmp_path, sample_db):
+    from wuwaterm.db import connect, insert_records
+    from wuwaterm.models import TermRecord
+
+    with connect(sample_db) as conn:
+        extra = []
+        for candidate in range(8):
+            for source_index in range(8):
+                extra.append(
+                    TermRecord(
+                        category="resonator",
+                        source_file=("RoleInfoExtra.json/" + "N" * 180) + f"{candidate}_{source_index}",
+                        source_id=f"RoleInfo_extra_{candidate}_{source_index}_Name",
+                        text_key=f"RoleInfo_extra_{candidate}_{source_index}_Name",
+                        zh="今汐",
+                        en=f"Jinhsi{candidate}",
+                    )
+                )
+        insert_records(conn, extra)
+        conn.commit()
+
+    app, store = build_client_app(tmp_path, sample_db, max_body_bytes=32 * 1024)
+    _, token = issue_device(store, "owner desktop")
+    source = "今汐，" * 32
+    target = "Jinhsi0, " * 32
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={"source": source, "target": target, "direction": "en"},
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    raw = response.content
+    assert len(raw) <= 65536
+    body = response.json()
+    _assert_review_exact_keys(body)
+    assert len(body["findings"]) <= 32
+    if len(body["findings"]) == 32 or body["truncated"]:
+        assert body["truncated"] is True or all(
+            len(item["candidates"]) <= 8 for item in body["findings"]
+        )

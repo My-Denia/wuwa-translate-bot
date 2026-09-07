@@ -1370,3 +1370,30 @@ def test_no_websocket_library_is_locked_for_any_purpose():
 
     assert "uvicorn" in locked, sorted(locked)
     assert not locked & WEBSOCKET_LIBRARIES, sorted(locked & WEBSOCKET_LIBRARIES)
+
+
+def test_review_completion_log_does_not_contain_source_or_target(tmp_path, sample_db):
+    app, store = build_app(tmp_path, sample_db)
+    _, token = issue_device(store)
+    source = "今汐拿到了声骸-UNIQUE-SOURCE-MARKER。"
+    target = "Jinhsi got an Echo UNIQUE-TARGET-MARKER."
+
+    with captured_records() as captured:
+        response = run(
+            call(
+                app,
+                "POST",
+                "/v1/reviews",
+                json={"source": source, "target": target, "direction": "en"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        )
+
+    assert response.status_code == 200, response.text
+    stream = "\n".join(captured.messages)
+    assert source not in stream
+    assert target not in stream
+    assert "UNIQUE-SOURCE-MARKER" not in stream
+    assert "UNIQUE-TARGET-MARKER" not in stream
+    assert captured.completions
+    assert "/v1/reviews" in captured.completions[0]

@@ -125,6 +125,90 @@ function validTranslationBody(value) {
     && exactKeys(value, ['dictionary_miss', 'direction', 'kind', 'request_id', 'text']);
 }
 
+function validReviewSpan(value, haystack) {
+  if (value === null) return true;
+  if (!plainObject(value) || !exactKeys(value, ['end', 'start', 'text'])) return false;
+  if (!Number.isInteger(value.start) || !Number.isInteger(value.end) || value.start < 0 || value.end < value.start) return false;
+  if (typeof value.text !== 'string' || value.text.length > 8_000) return false;
+  const scalars = Array.from(haystack);
+  if (value.end > scalars.length) return false;
+  return scalars.slice(value.start, value.end).join('') === value.text;
+}
+
+function validReviewSource(value) {
+  return plainObject(value)
+    && boundedText(value.source_file, 4_096)
+    && boundedText(value.source_id, 1_024)
+    && exactKeys(value, ['source_file', 'source_id']);
+}
+
+function validReviewCandidate(value) {
+  return plainObject(value)
+    && boundedText(value.zh, 2_000)
+    && boundedText(value.en, 2_000)
+    && boundedText(value.category, 256)
+    && Array.isArray(value.sources)
+    && value.sources.length <= 8
+    && value.sources.every(validReviewSource)
+    && exactKeys(value, ['category', 'en', 'sources', 'zh']);
+}
+
+function validReviewFinding(value, source, target) {
+  if (!plainObject(value) || !exactKeys(value, [
+    'candidates', 'candidates_truncated', 'id', 'rule_id', 'source_span', 'target_span', 'verdict',
+  ])) return false;
+  if (!['verified_constraint', 'confirmed_conflict', 'needs_review', 'not_evaluated'].includes(value.verdict)) return false;
+  if (!boundedText(value.id, 8_192) || !boundedText(value.rule_id, 256)) return false;
+  if (typeof value.candidates_truncated !== 'boolean') return false;
+  if (!Array.isArray(value.candidates) || value.candidates.length > 8) return false;
+  if (!value.candidates.every(validReviewCandidate)) return false;
+  return validReviewSpan(value.source_span, source) && validReviewSpan(value.target_span, target);
+}
+
+function validReviewBody(value, input) {
+  if (!plainObject(value) || !exactKeys(value, [
+    'coverage', 'dictionary', 'findings', 'request_id', 'rule_version',
+    'source_revision', 'target_revision', 'truncated',
+  ])) return false;
+  if (!boundedText(value.request_id) || value.rule_version !== 'review-v1') return false;
+  if (!/^[0-9a-f]{64}$/u.test(value.source_revision) || !/^[0-9a-f]{64}$/u.test(value.target_revision)) return false;
+  if (typeof value.truncated !== 'boolean') return false;
+  if (!plainObject(value.dictionary) || !exactKeys(value.dictionary, ['schema_version', 'source_commit', 'term_count'])) return false;
+  if (!nullableText(value.dictionary.schema_version) || !nullableText(value.dictionary.source_commit)) return false;
+  if (!Number.isInteger(value.dictionary.term_count) || value.dictionary.term_count < 0) return false;
+  if (!plainObject(value.coverage) || !exactKeys(value.coverage, ['evaluated', 'not_evaluated', 'rules'])) return false;
+  if (!Number.isInteger(value.coverage.evaluated) || value.coverage.evaluated < 0) return false;
+  if (!Number.isInteger(value.coverage.not_evaluated) || value.coverage.not_evaluated < 0) return false;
+  if (!Array.isArray(value.coverage.rules) || !value.coverage.rules.every((rule) => boundedText(rule, 256))) return false;
+  if (!Array.isArray(value.findings) || value.findings.length > 32) return false;
+  return value.findings.every((finding) => validReviewFinding(finding, input.source, input.target));
+}
+
+function validReviewResolution(value) {
+  if (!plainObject(value) || !boundedText(value.mention_id, 8_192)) return false;
+  if (value.choice === 'official_pair') {
+    return boundedText(value.zh, 2_000) && boundedText(value.en, 2_000)
+      && exactKeys(value, ['choice', 'en', 'mention_id', 'zh']);
+  }
+  if (value.choice === 'not_a_term') {
+    return exactKeys(value, ['choice', 'mention_id']);
+  }
+  return false;
+}
+
+function validReviewInput(value) {
+  if (!plainObject(value)) return false;
+  const keys = value.resolutions === undefined
+    ? ['direction', 'source', 'target']
+    : ['direction', 'resolutions', 'source', 'target'];
+  if (!exactKeys(value, keys)) return false;
+  if (!nonEmptyString(value.source) || !nonEmptyString(value.target)) return false;
+  if (Array.from(value.source).length > 2000 || Array.from(value.target).length > 2000) return false;
+  if (value.direction !== 'en' && value.direction !== 'zh') return false;
+  if (value.resolutions === undefined) return true;
+  return Array.isArray(value.resolutions) && value.resolutions.every(validReviewResolution);
+}
+
 function validErrorBody(value) {
   return plainObject(value)
     && plainObject(value.error)
@@ -564,6 +648,125 @@ function validTranslationInput(value) {
 }
 
 /**
+ * @param {{
+ *   environment?: Record<string, unknown>,
+ *   input?: {source: string, target: string, direction: 'en' | 'zh', resolutions?: object[]},
+ *   fetchImpl?: typeof globalThis.fetch,
+ *   timeoutMs?: number,
+ * }} [options]
+ * @returns {Promise<Response>}
+ */
+export async function proxyReviewRequest({
+  environment,
+  input,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 30_000,
+} = {}) {
+  if (!validReviewInput(input)) return errorResponse('site_invalid_request');
+  const configured = configuredUpstream(environment);
+  if (!configured || typeof fetchImpl !== 'function') return errorResponse('site_not_configured');
+  const admission = await admitRequest(environment, 'review', 0);
+  if (!admission.ok) return admission.response;
+  const upstreamUrl = new URL('v1/reviews', configured.baseUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = {
+      accept: 'application/json',
+      authorization: `Bearer ${configured.token}`,
+      'content-type': 'application/json',
+    };
+    const upstream = await fetchImpl(upstreamUrl, {
+      method: 'POST',
+      headers,
+      cache: 'no-store',
+      credentials: 'omit',
+      redirect: 'manual',
+      signal: controller.signal,
+      body: JSON.stringify(input),
+    });
+    if (upstream.status >= 300 && upstream.status < 400) {
+      return rejectUpstream(upstream, 'upstream_redirect');
+    }
+    if ([400, 401, 403, 413, 422, 429, 500, 503, 504].includes(upstream.status)) {
+      const contentType = upstream.headers.get('content-type') ?? '';
+      if (!strictJsonContentType(contentType)) {
+        return rejectUpstream(upstream, 'upstream_invalid_content_type');
+      }
+      return await projectApiError(upstream, controller, configured, upstreamUrl);
+    }
+    if (upstream.status === 404) return rejectUpstream(upstream, 'upstream_not_found');
+    if (upstream.status !== 200) return rejectUpstream(upstream, 'upstream_network_error');
+    const contentType = upstream.headers.get('content-type') ?? '';
+    if (!strictJsonContentType(contentType)) {
+      return rejectUpstream(upstream, 'upstream_invalid_content_type');
+    }
+    const raw = await readBoundedBody(upstream, controller.signal);
+    if (!raw.ok) return errorResponse(raw.reason);
+    let upstreamBody;
+    try {
+      upstreamBody = JSON.parse(raw.text);
+    } catch {
+      return errorResponse('upstream_invalid_json');
+    }
+    if (!validReviewBody(upstreamBody, input)) return errorResponse('upstream_schema_mismatch');
+    if (
+      containsSensitiveValue(
+        upstreamBody,
+        [configured.token],
+        [
+          configured.baseValue,
+          upstreamUrl.origin,
+          upstreamUrl.hostname,
+          configured.baseUrl.pathname,
+          upstreamUrl.toString(),
+        ],
+      )
+    ) {
+      return errorResponse('upstream_schema_mismatch');
+    }
+    return jsonResponse(200, {
+      request_id: upstreamBody.request_id,
+      source_revision: upstreamBody.source_revision,
+      target_revision: upstreamBody.target_revision,
+      rule_version: upstreamBody.rule_version,
+      dictionary: {
+        schema_version: upstreamBody.dictionary.schema_version,
+        source_commit: upstreamBody.dictionary.source_commit,
+        term_count: upstreamBody.dictionary.term_count,
+      },
+      coverage: {
+        evaluated: upstreamBody.coverage.evaluated,
+        not_evaluated: upstreamBody.coverage.not_evaluated,
+        rules: upstreamBody.coverage.rules,
+      },
+      findings: upstreamBody.findings.map((finding) => ({
+        id: finding.id,
+        verdict: finding.verdict,
+        rule_id: finding.rule_id,
+        source_span: finding.source_span,
+        target_span: finding.target_span,
+        candidates: finding.candidates.map((candidate) => ({
+          zh: candidate.zh,
+          en: candidate.en,
+          category: candidate.category,
+          sources: candidate.sources.map((source) => ({
+            source_file: source.source_file,
+            source_id: source.source_id,
+          })),
+        })),
+        candidates_truncated: finding.candidates_truncated,
+      })),
+      truncated: upstreamBody.truncated,
+    });
+  } catch {
+    return errorResponse(controller.signal.aborted ? 'upstream_timeout' : 'upstream_network_error');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * @param {Request} request
  * @returns {{ok: true, query: string} | {ok: false, response: Response}}
  */
@@ -611,6 +814,38 @@ export async function parseTranslationRequest(request) {
     delete value.to;
   }
   if (!validTranslationInput(value)) {
+    return { ok: false, response: errorResponse('site_invalid_request') };
+  }
+  return { ok: true, input: value };
+}
+
+/**
+ * @param {Request} request
+ * @returns {Promise<
+ *   {ok: true, input: {source: string, target: string, direction: 'en' | 'zh', resolutions?: object[]}}
+ *   | {ok: false, response: Response}
+ * >}
+ */
+export async function parseReviewRequest(request) {
+  if (!strictJsonContentType(request.headers.get('content-type') ?? '')) {
+    return { ok: false, response: errorResponse('site_invalid_request') };
+  }
+  const contentLength = request.headers.get('content-length');
+  if (contentLength !== null) {
+    const parsed = Number(contentLength);
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_SITE_REQUEST_BYTES) {
+      return { ok: false, response: errorResponse('site_request_too_large') };
+    }
+  }
+  const requestBody = await readBoundedRequestBody(request);
+  if (!requestBody.ok) return { ok: false, response: errorResponse(requestBody.reason) };
+  let value;
+  try {
+    value = JSON.parse(requestBody.text);
+  } catch {
+    return { ok: false, response: errorResponse('site_invalid_request') };
+  }
+  if (!validReviewInput(value)) {
     return { ok: false, response: errorResponse('site_invalid_request') };
   }
   return { ok: true, input: value };
