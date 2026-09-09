@@ -1,0 +1,606 @@
+"""Review-v2 frozen coverage, alignment, and freshness contract."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from wuwaterm.application import project_review_report, review_pair
+from wuwaterm.db import connect, initialize, insert_records
+from wuwaterm.lookup import TermService
+from wuwaterm.models import TermRecord
+from wuwaterm.review import (
+    RULE_VERSION_V2,
+    VERDICT_NEEDS_REVIEW,
+    VERDICT_NOT_EVALUATED,
+    VERDICT_VERIFIED,
+    ReviewRequestError,
+    _sentence_ranges,
+    _sentence_ranges_v2,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+FROZEN = {
+    item["id"]: item
+    for item in json.loads(
+        (
+            ROOT
+            / "tests"
+            / "fixtures"
+            / "review-v2-cases.json"
+        ).read_text(encoding="utf-8")
+    )
+}
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+DECIMAL_WORD_CASE = {
+    "source": "倍率为1.5，今汐登场。",
+    "target": "With a multiplier of one and a half, Jinhsi appears.",
+    "direction": "en",
+}
+
+
+@pytest.fixture()
+def v2_service(tmp_path: Path) -> TermService:
+    path = tmp_path / "review-v2.db"
+    with connect(path) as conn:
+        initialize(conn)
+        conn.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            (("schema_version", "synthetic-v1"), ("source_commit", "fixture-commit")),
+        )
+        insert_records(
+            conn,
+            (
+                TermRecord(
+                    category="character",
+                    source_file="SyntheticCharacters.json",
+                    source_id="character-jinhsi",
+                    text_key="character-jinhsi",
+                    zh="今汐",
+                    en="Jinhsi",
+                ),
+                TermRecord(
+                    category="item",
+                    source_file="SyntheticItems.json",
+                    source_id="item-echo",
+                    text_key="item-echo",
+                    zh="声骸",
+                    en="Echo",
+                ),
+            ),
+        )
+        conn.commit()
+    return TermService(path)
+
+
+def _v2(service: TermService, case_id: str, **overrides):
+    case = FROZEN[case_id]
+    request = {
+        "source": case["source"],
+        "target": case["target"],
+        "direction": case["direction"],
+        "review_version": RULE_VERSION_V2,
+    }
+    request.update(overrides)
+    return review_pair(service, **request)
+
+
+def _term_findings(report):
+    return list(report.findings)
+
+
+def _whole_alignment(case_id: str) -> list[dict[str, object]]:
+    case = FROZEN[case_id]
+    return [
+        {
+            "source": {
+                "start": 0,
+                "end": len(case["source"]),
+                "text": case["source"],
+            },
+            "target": {
+                "start": 0,
+                "end": len(case["target"]),
+                "text": case["target"],
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "verdicts", "evaluated", "not_evaluated", "target_spans"),
+    (
+        ("basic-zh-en", [VERDICT_VERIFIED], 1, 1, [(0, 6, "Jinhsi")]),
+        ("basic-en-zh", [VERDICT_VERIFIED], 1, 1, [(0, 2, "今汐")]),
+        ("decimal", [VERDICT_VERIFIED], 1, 1, [(8, 14, "Jinhsi")]),
+        ("nonbmp", [VERDICT_VERIFIED], 1, 1, [(1, 7, "Jinhsi")]),
+    ),
+)
+def test_frozen_single_region_oracles(
+    v2_service,
+    case_id,
+    verdicts,
+    evaluated,
+    not_evaluated,
+    target_spans,
+):
+    report = _v2(v2_service, case_id)
+    findings = _term_findings(report)
+
+    assert [item.verdict for item in findings] == verdicts
+    assert report.coverage.evaluated == evaluated
+    assert report.coverage.not_evaluated == not_evaluated
+    assert [
+        (item.target_span.start, item.target_span.end, item.target_span.text)
+        for item in findings
+        if item.target_span is not None
+    ] == target_spans
+
+
+def test_v2_decimal_segmentation_does_not_split_between_digits():
+    text = FROZEN["decimal"]["target"]
+    assert len(_sentence_ranges(text)) == 2
+    assert _sentence_ranges_v2(text) == [(0, len(text))]
+
+
+def test_decimal_word_target_demonstrates_v2_coverage_gain(v2_service):
+    v1 = review_pair(v2_service, **DECIMAL_WORD_CASE)
+    v2 = review_pair(
+        v2_service,
+        **DECIMAL_WORD_CASE,
+        review_version=RULE_VERSION_V2,
+    )
+
+    assert [item.verdict for item in v1.findings] == [VERDICT_NOT_EVALUATED]
+    assert v1.coverage.evaluated == 0
+    assert v1.coverage.not_evaluated == 2
+    assert [item.verdict for item in v2.findings] == [VERDICT_VERIFIED]
+    assert v2.coverage.evaluated == 1
+    assert v2.coverage.not_evaluated == 1
+    assert v2.findings[0].target_span is not None
+    assert v2.findings[0].target_span.text == "Jinhsi"
+
+
+@pytest.mark.parametrize("case_id", ("merge", "split"))
+def test_frozen_explicit_merge_and_split_cover_both_terms(v2_service, case_id):
+    report = _v2(v2_service, case_id, alignments=_whole_alignment(case_id))
+    findings = _term_findings(report)
+
+    assert [item.verdict for item in findings] == [VERDICT_VERIFIED, VERDICT_VERIFIED]
+    assert report.coverage.evaluated == 2
+    assert report.coverage.not_evaluated == 1
+    assert {item.target_span.text for item in findings if item.target_span} == {
+        "Jinhsi",
+        "Echo",
+    }
+    assert len({item.target_span.start for item in findings if item.target_span}) == 2
+
+
+@pytest.mark.parametrize("case_id", ("merge", "split", "unmatched"))
+def test_frozen_mismatched_counts_without_mapping_are_unassessed(v2_service, case_id):
+    report = _v2(v2_service, case_id)
+    findings = _term_findings(report)
+
+    assert [item.verdict for item in findings] == [
+        VERDICT_NOT_EVALUATED,
+        VERDICT_NOT_EVALUATED,
+    ]
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 3
+    assert all(item.target_span is None for item in findings)
+
+
+def test_frozen_repeat_shortage_does_not_reuse_target_span(v2_service):
+    report = _v2(v2_service, "repeat-shortage")
+    findings = _term_findings(report)
+
+    assert [item.verdict for item in findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_NEEDS_REVIEW,
+    ]
+    assert report.coverage.evaluated == 2
+    assert report.coverage.not_evaluated == 1
+    assert findings[0].target_span is not None
+    assert findings[1].target_span is None
+
+
+def test_frozen_swapped_default_regions_do_not_verify_elsewhere(v2_service):
+    report = _v2(v2_service, "swapped")
+
+    assert [item.verdict for item in report.findings] == [
+        VERDICT_NOT_EVALUATED,
+        VERDICT_NOT_EVALUATED,
+    ]
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 3
+    assert all(item.target_span is None for item in report.findings)
+
+
+def test_frozen_omitted_map_only_evaluates_the_mapped_source(v2_service):
+    case = FROZEN["omitted-map"]
+    alignments = [
+        {
+            "source": {"start": 0, "end": 5, "text": case["source"][:5]},
+            "target": {"start": 0, "end": 15, "text": case["target"][:15]},
+        }
+    ]
+    report = _v2(v2_service, "omitted-map", alignments=alignments)
+
+    assert [item.verdict for item in report.findings] == [
+        VERDICT_VERIFIED,
+        VERDICT_NOT_EVALUATED,
+    ]
+    assert report.coverage.evaluated == 1
+    assert report.coverage.not_evaluated == 2
+    assert report.findings[1].target_span is None
+
+
+def test_explicit_empty_alignments_map_nothing(v2_service):
+    report = _v2(v2_service, "basic-zh-en", alignments=[])
+    assert [item.verdict for item in report.findings] == [VERDICT_NOT_EVALUATED]
+    assert report.coverage.evaluated == 0
+    assert report.coverage.not_evaluated == 2
+
+
+def test_explicit_null_target_is_unassessed(v2_service):
+    case = FROZEN["basic-zh-en"]
+    report = _v2(
+        v2_service,
+        "basic-zh-en",
+        alignments=[
+            {
+                "source": _span(case["source"], 0, len(case["source"])),
+                "target": None,
+            }
+        ],
+    )
+    assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
+    assert report.findings[0].target_span is None
+
+
+def test_v2_wire_additions_are_raw_hex_and_top_level_is_unchanged(v2_service):
+    report = _v2(v2_service, "basic-zh-en")
+    body = project_review_report(report, "request-v2")
+
+    assert set(body) == {
+        "coverage",
+        "dictionary",
+        "findings",
+        "request_id",
+        "rule_version",
+        "source_revision",
+        "target_revision",
+        "truncated",
+    }
+    assert set(body["dictionary"]) == {
+        "schema_version",
+        "source_commit",
+        "term_count",
+        "revision",
+    }
+    assert HEX64.fullmatch(body["dictionary"]["revision"])
+    candidates = body["findings"][0]["candidates"]
+    assert candidates
+    assert all(
+        set(item) == {"candidate_id", "category", "en", "sources", "zh"}
+        for item in candidates
+    )
+    assert all(HEX64.fullmatch(item["candidate_id"]) for item in candidates)
+
+
+def test_snapshot_revision_and_candidate_id_detect_same_count_provenance_change(
+    v2_service,
+):
+    first = _v2(v2_service, "basic-zh-en")
+    first_candidate = first.findings[0].candidates[0].candidate_id
+
+    with connect(v2_service.db_path) as conn:
+        conn.execute(
+            "UPDATE terms SET source_id = ? WHERE source_id = ?",
+            ("character-jinhsi-changed", "character-jinhsi"),
+        )
+        conn.commit()
+
+    second = _v2(v2_service, "basic-zh-en")
+    assert first.dictionary.term_count == second.dictionary.term_count == 2
+    assert first.dictionary.revision != second.dictionary.revision
+    assert first_candidate != second.findings[0].candidates[0].candidate_id
+
+
+def test_v2_uses_the_bounded_review_snapshot_method(v2_service, monkeypatch):
+    monkeypatch.setattr(
+        v2_service,
+        "metadata",
+        lambda: pytest.fail("v2 must not make a separate metadata read"),
+    )
+    monkeypatch.setattr(
+        v2_service,
+        "term_count",
+        lambda: pytest.fail("v2 must not make a separate count read"),
+    )
+    monkeypatch.setattr(
+        v2_service,
+        "entries",
+        lambda: pytest.fail("v2 must not make a separate entries read"),
+    )
+
+    report = _v2(v2_service, "basic-zh-en")
+    assert report.dictionary.term_count == 2
+    assert HEX64.fullmatch(report.dictionary.revision or "")
+
+
+def test_current_candidate_resolution_requires_and_accepts_exact_context(v2_service):
+    baseline = _v2(v2_service, "basic-zh-en")
+    finding = baseline.findings[0]
+    candidate_id = finding.candidates[0].candidate_id
+    resolutions = (
+        {
+            "mention_id": finding.id,
+            "choice": "official_pair",
+            "candidate_id": candidate_id,
+        },
+    )
+    context = {
+        "source_revision": baseline.source_revision,
+        "rule_version": baseline.rule_version,
+        "dictionary_revision": baseline.dictionary.revision,
+    }
+
+    resolved = _v2(
+        v2_service,
+        "basic-zh-en",
+        resolutions=resolutions,
+        resolution_context=context,
+    )
+    assert resolved.findings[0].verdict == VERDICT_VERIFIED
+
+    with pytest.raises(ReviewRequestError, match="resolution_context") as missing:
+        _v2(v2_service, "basic-zh-en", resolutions=resolutions)
+    assert missing.value.code == "invalid_request"
+
+    stale = dict(context)
+    stale["dictionary_revision"] = "0" * 64
+    with pytest.raises(ReviewRequestError, match="stale") as mismatch:
+        _v2(
+            v2_service,
+            "basic-zh-en",
+            resolutions=resolutions,
+            resolution_context=stale,
+        )
+    assert mismatch.value.code == "invalid_request"
+
+    wrong_candidate = ({**resolutions[0], "candidate_id": "f" * 64},)
+    with pytest.raises(ReviewRequestError, match="not current") as candidate:
+        _v2(
+            v2_service,
+            "basic-zh-en",
+            resolutions=wrong_candidate,
+            resolution_context=context,
+        )
+    assert candidate.value.code == "invalid_request"
+
+
+def test_v2_not_a_term_keeps_its_two_field_shape_but_requires_context(v2_service):
+    baseline = _v2(v2_service, "basic-zh-en")
+    resolution = {
+        "mention_id": baseline.findings[0].id,
+        "choice": "not_a_term",
+    }
+    context = {
+        "source_revision": baseline.source_revision,
+        "rule_version": baseline.rule_version,
+        "dictionary_revision": baseline.dictionary.revision,
+    }
+    report = _v2(
+        v2_service,
+        "basic-zh-en",
+        resolutions=(resolution,),
+        resolution_context=context,
+    )
+    assert report.findings[0].verdict == VERDICT_NOT_EVALUATED
+
+
+def _span(text: str, start: int, end: int) -> dict[str, object]:
+    return {"start": start, "end": end, "text": text[start:end]}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda source, target: [
+            {"source": _span(source, 0, 2), "target": _span(target, 0, 6)},
+            {"source": _span(source, 1, 3), "target": _span(target, 7, 11)},
+        ],
+        lambda source, target: [
+            {"source": _span(source, 0, 2), "target": _span(target, 7, 11)},
+            {"source": _span(source, 3, 5), "target": _span(target, 0, 6)},
+        ],
+        lambda source, target: [
+            {
+                "source": {"start": 0, "end": len(source) + 1, "text": source},
+                "target": _span(target, 0, len(target)),
+            }
+        ],
+        lambda source, target: [
+            {
+                "source": {"start": True, "end": 2, "text": source[:2]},
+                "target": _span(target, 0, 6),
+            }
+        ],
+        lambda source, target: [
+            {
+                "source": {"start": 0, "end": 2, "text": "stale"},
+                "target": _span(target, 0, 6),
+            }
+        ],
+        lambda source, target: [
+            {
+                "source": _span(source, 1, len(source)),
+                "target": _span(target, 0, len(target)),
+            }
+        ],
+        lambda source, target: [
+            {
+                "source": _span(source, 0, len(source)),
+                "target": _span(target, 0, len(target)),
+                "unknown": True,
+            }
+        ],
+    ),
+    ids=(
+        "source-overlap",
+        "target-unordered",
+        "out-of-bounds",
+        "boolean-offset",
+        "stale-text",
+        "term-cut",
+        "unknown-key",
+    ),
+)
+def test_invalid_alignment_shapes_fail_closed(v2_service, mutate):
+    source = "今汐。声骸。"
+    target = "Jinhsi. Echo."
+    with pytest.raises(ReviewRequestError) as caught:
+        review_pair(
+            v2_service,
+            source,
+            target,
+            "en",
+            review_version=RULE_VERSION_V2,
+            alignments=mutate(source, target),
+        )
+    assert caught.value.code == "invalid_request"
+
+
+def test_more_than_64_alignments_is_invalid(v2_service):
+    source = "x" * 65
+    target = "y" * 65
+    alignments = [
+        {
+            "source": _span(source, index, index + 1),
+            "target": _span(target, index, index + 1),
+        }
+        for index in range(65)
+    ]
+    with pytest.raises(ReviewRequestError) as caught:
+        review_pair(
+            v2_service,
+            source,
+            target,
+            "en",
+            review_version=RULE_VERSION_V2,
+            alignments=alignments,
+        )
+    assert caught.value.code == "invalid_request"
+
+
+def test_v1_rejects_v2_only_fields_and_unknown_version(v2_service):
+    with pytest.raises(ReviewRequestError) as fields:
+        review_pair(
+            v2_service,
+            "今汐。",
+            "Jinhsi.",
+            "en",
+            alignments=[],
+        )
+    assert fields.value.code == "invalid_request"
+
+    with pytest.raises(ReviewRequestError) as version:
+        review_pair(
+            v2_service,
+            "今汐。",
+            "Jinhsi.",
+            "en",
+            review_version="review-v3",
+        )
+    assert version.value.code == "invalid_request"
+
+
+def test_frozen_before_after_measurement(v2_service):
+    """Emit the frozen v1/v2 matrix while pinning its safety properties."""
+
+    def summarize(report):
+        return {
+            "evaluated": report.coverage.evaluated,
+            "not_evaluated": report.coverage.not_evaluated,
+            "verdicts": [item.verdict for item in report.findings],
+            "target_spans": [
+                (
+                    None
+                    if item.target_span is None
+                    else {
+                        "start": item.target_span.start,
+                        "end": item.target_span.end,
+                        "text": item.target_span.text,
+                    }
+                )
+                for item in report.findings
+            ],
+        }
+
+    matrix = {}
+    for case_id in (
+        "basic-zh-en",
+        "basic-en-zh",
+        "decimal",
+        "decimal-word",
+        "merge",
+        "split",
+        "repeat-shortage",
+        "swapped",
+        "unmatched",
+        "omitted-map",
+        "nonbmp",
+    ):
+        case = DECIMAL_WORD_CASE if case_id == "decimal-word" else FROZEN[case_id]
+        v1 = review_pair(
+            v2_service,
+            case["source"],
+            case["target"],
+            case["direction"],
+        )
+        overrides = {}
+        if case_id in {"merge", "split"}:
+            overrides["alignments"] = _whole_alignment(case_id)
+        elif case_id == "omitted-map":
+            overrides["alignments"] = [
+                {
+                    "source": {
+                        "start": 0,
+                        "end": 5,
+                        "text": case["source"][:5],
+                    },
+                    "target": {
+                        "start": 0,
+                        "end": 15,
+                        "text": case["target"][:15],
+                    },
+                }
+            ]
+        v2 = (
+            review_pair(
+                v2_service,
+                **case,
+                review_version=RULE_VERSION_V2,
+                **overrides,
+            )
+            if case_id == "decimal-word"
+            else _v2(v2_service, case_id, **overrides)
+        )
+        matrix[case_id] = {"v1": summarize(v1), "v2": summarize(v2)}
+
+    assert matrix["decimal"]["v2"]["verdicts"] == [VERDICT_VERIFIED]
+    assert matrix["decimal-word"]["v1"]["verdicts"] == [VERDICT_NOT_EVALUATED]
+    assert matrix["decimal-word"]["v2"]["verdicts"] == [VERDICT_VERIFIED]
+    for case_id in ("merge", "split"):
+        assert matrix[case_id]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 2
+        assert matrix[case_id]["v1"]["verdicts"].count(VERDICT_VERIFIED) < 2
+    assert matrix["swapped"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 0
+    assert matrix["unmatched"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 0
+    assert matrix["omitted-map"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 1
+    assert matrix["repeat-shortage"]["v2"]["verdicts"].count(VERDICT_VERIFIED) == 1
+
+    print("FROZEN_REVIEW_METRICS=" + json.dumps(matrix, ensure_ascii=False, sort_keys=True))

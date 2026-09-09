@@ -3153,3 +3153,243 @@ def test_review_capped_json_fits_max_upstream_bytes(tmp_path, sample_db):
         assert body["truncated"] is True or all(
             len(item["candidates"]) <= 8 for item in body["findings"]
         )
+
+
+def test_review_v2_success_has_only_the_two_nested_wire_additions(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐拿到了声骸。",
+                "target": "Jinhsi got an Echo.",
+                "direction": "en",
+            },
+            headers=bearer(token),
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) == REVIEW_TOP_KEYS
+    assert body["rule_version"] == "review-v2"
+    assert set(body["dictionary"]) == {
+        "revision",
+        "schema_version",
+        "source_commit",
+        "term_count",
+    }
+    assert len(body["dictionary"]["revision"]) == 64
+    assert all(
+        character in "0123456789abcdef" for character in body["dictionary"]["revision"]
+    )
+    for finding in body["findings"]:
+        for candidate in finding["candidates"]:
+            assert set(candidate) == {
+                "candidate_id",
+                "category",
+                "en",
+                "sources",
+                "zh",
+            }
+            assert len(candidate["candidate_id"]) == 64
+
+
+def test_review_v2_current_candidate_resolution_round_trip(tmp_path, sample_db):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    request = {
+        "review_version": "review-v2",
+        "source": "今汐拿到了声骸。",
+        "target": "Jinhsi got something.",
+        "direction": "en",
+    }
+    baseline = run(
+        call(app, "POST", "/v1/reviews", json=request, headers=bearer(token))
+    )
+    assert baseline.status_code == 200, baseline.text
+    body = baseline.json()
+    echo = next(
+        item for item in body["findings"] if item["source_span"]["text"] == "声骸"
+    )
+    official = next(
+        item
+        for item in echo["candidates"]
+        if item["zh"] == "声骸" and item["en"] == "Echo"
+    )
+    request["resolutions"] = [
+        {
+            "mention_id": echo["id"],
+            "choice": "official_pair",
+            "candidate_id": official["candidate_id"],
+        }
+    ]
+    request["resolution_context"] = {
+        "source_revision": body["source_revision"],
+        "rule_version": body["rule_version"],
+        "dictionary_revision": body["dictionary"]["revision"],
+    }
+
+    resolved = run(
+        call(app, "POST", "/v1/reviews", json=request, headers=bearer(token))
+    )
+    assert resolved.status_code == 200, resolved.text
+    resolved_echo = next(
+        item
+        for item in resolved.json()["findings"]
+        if item["source_span"]["text"] == "声骸"
+    )
+    assert resolved_echo["verdict"] == "confirmed_conflict"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        {"review_version": "review-v3"},
+        {"review_version": "review-v1", "alignments": []},
+        {"review_version": "review-v1", "alignments": None},
+        {"review_version": "review-v1", "resolution_context": None},
+        {"review_version": "review-v2", "alignments": None},
+        {"review_version": "review-v2", "resolution_context": None},
+        {"review_version": "review-v2", "resolutions": None},
+        {
+            "review_version": "review-v2",
+            "resolutions": [
+                {
+                    "mention_id": "0:2:今汐",
+                    "choice": "official_pair",
+                    "zh": "今汐",
+                    "en": "Jinhsi",
+                }
+            ],
+        },
+    ),
+)
+def test_review_rejects_cross_version_request_shapes(tmp_path, sample_db, extra):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    body = {"source": "今汐", "target": "Jinhsi", "direction": "en"}
+    body.update(extra)
+
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json=body,
+            headers=bearer(token),
+        )
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_v2_proxy_rejects_malformed_alignment_before_core(
+    tmp_path, sample_db, monkeypatch
+):
+    import wuwaterm_api.app as app_module
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("syntactically malformed alignment reached review core")
+
+    monkeypatch.setattr(app_module, "review_pair", boom)
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    response = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐",
+                "target": "Jinhsi",
+                "direction": "en",
+                "alignments": [
+                    {
+                        "source": {"start": True, "end": 2, "text": "今汐"},
+                        "target": {"start": 0, "end": 6, "text": "Jinhsi"},
+                    }
+                ],
+            },
+            headers=bearer(token),
+        )
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_review_v2_semantic_term_cut_and_stale_context_are_invalid_request(
+    tmp_path, sample_db
+):
+    app, store = build_client_app(tmp_path, sample_db)
+    _, token = issue_device(store, "owner desktop")
+    cut = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐。",
+                "target": "Jinhsi.",
+                "direction": "en",
+                "alignments": [
+                    {
+                        "source": {"start": 1, "end": 3, "text": "汐。"},
+                        "target": {"start": 0, "end": 7, "text": "Jinhsi."},
+                    }
+                ],
+            },
+            headers=bearer(token),
+        )
+    )
+    assert cut.status_code == 400, cut.text
+    assert cut.json()["error"]["code"] == "invalid_request"
+
+    baseline = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐",
+                "target": "Jinhsi",
+                "direction": "en",
+            },
+            headers=bearer(token),
+        )
+    ).json()
+    stale = run(
+        call(
+            app,
+            "POST",
+            "/v1/reviews",
+            json={
+                "review_version": "review-v2",
+                "source": "今汐",
+                "target": "Jinhsi",
+                "direction": "en",
+                "resolutions": [
+                    {
+                        "mention_id": baseline["findings"][0]["id"],
+                        "choice": "not_a_term",
+                    }
+                ],
+                "resolution_context": {
+                    "source_revision": "0" * 64,
+                    "rule_version": "review-v2",
+                    "dictionary_revision": baseline["dictionary"]["revision"],
+                },
+            },
+            headers=bearer(token),
+        )
+    )
+    assert stale.status_code == 400, stale.text
+    assert stale.json()["error"]["code"] == "invalid_request"

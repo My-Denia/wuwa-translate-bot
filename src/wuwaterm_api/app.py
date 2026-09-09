@@ -33,7 +33,7 @@ from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import ClientDisconnect
@@ -273,14 +273,102 @@ class NotATermResolutionBody(BaseModel):
     choice: Literal["not_a_term"]
 
 
+class V2OfficialPairResolutionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mention_id: str
+    choice: Literal["official_pair"]
+    candidate_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ReviewAlignmentSpanInputBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: int = Field(strict=True, ge=0)
+    end: int = Field(strict=True, ge=0)
+    text: str
+
+
+class ReviewAlignmentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: ReviewAlignmentSpanInputBody
+    target: ReviewAlignmentSpanInputBody | None
+
+
+class ReviewResolutionContextBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    rule_version: Literal["review-v2"]
+    dictionary_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ReviewRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    source: str = Field(min_length=1, description="Submitted source text. At most 2,000 Unicode scalars.")
-    target: str = Field(min_length=1, description="Submitted translation. At most 2,000 Unicode scalars.")
+    review_version: Literal["review-v1", "review-v2"] = "review-v1"
+    source: str = Field(
+        min_length=1,
+        description="Submitted source text. At most 2,000 Unicode scalars.",
+    )
+    target: str = Field(
+        min_length=1,
+        description="Submitted translation. At most 2,000 Unicode scalars.",
+    )
     direction: Literal["en", "zh"] = Field(
         description="Target language of the submitted translation (same meaning as translations.to)."
     )
-    resolutions: list[OfficialPairResolutionBody | NotATermResolutionBody] | None = None
+    resolutions: (
+        list[
+            OfficialPairResolutionBody
+            | V2OfficialPairResolutionBody
+            | NotATermResolutionBody
+        ]
+        | None
+    ) = None
+    alignments: list[ReviewAlignmentBody] | None = Field(default=None, max_length=64)
+    resolution_context: ReviewResolutionContextBody | None = None
+
+    @model_validator(mode="after")
+    def validate_versioned_shape(self) -> "ReviewRequestBody":
+        resolutions = self.resolutions or []
+        if self.review_version == "review-v1":
+            if {"alignments", "resolution_context"} & self.model_fields_set:
+                raise ValueError("review-v1 does not accept v2 request fields")
+            if any(
+                isinstance(item, V2OfficialPairResolutionBody) for item in resolutions
+            ):
+                raise ValueError("review-v1 official_pair requires zh and en")
+            return self
+
+        for field in ("alignments", "resolution_context", "resolutions"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"review-v2 {field} must not be null")
+        if any(isinstance(item, OfficialPairResolutionBody) for item in resolutions):
+            raise ValueError("review-v2 official_pair requires candidate_id")
+        if resolutions and self.resolution_context is None:
+            raise ValueError("review-v2 resolutions require resolution_context")
+
+        previous_source_end = -1
+        previous_target_end = -1
+        for alignment in self.alignments or []:
+            source_span = alignment.source
+            if (
+                source_span.start >= source_span.end
+                or source_span.end > len(self.source)
+                or self.source[source_span.start : source_span.end] != source_span.text
+                or source_span.start < previous_source_end
+            ):
+                raise ValueError("invalid source alignment span")
+            previous_source_end = source_span.end
+            target_span = alignment.target
+            if target_span is None:
+                continue
+            if (
+                target_span.start >= target_span.end
+                or target_span.end > len(self.target)
+                or self.target[target_span.start : target_span.end] != target_span.text
+                or target_span.start < previous_target_end
+            ):
+                raise ValueError("invalid target alignment span")
+            previous_target_end = target_span.end
+        return self
 
 
 class ReviewSpanBody(BaseModel):
@@ -308,6 +396,7 @@ class ReviewCandidateBody(BaseModel):
     en: str
     category: str
     sources: list[ReviewSourceBody]
+    candidate_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ReviewFindingBody(BaseModel):
@@ -328,6 +417,7 @@ class ReviewDictionaryBody(BaseModel):
     schema_version: str | None
     source_commit: str | None
     term_count: int
+    revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ReviewCoverageBody(BaseModel):
@@ -1023,6 +1113,16 @@ def _apply_openapi_client_limits(document: dict[str, Any]) -> dict[str, Any]:
     review_properties = document["components"]["schemas"]["ReviewRequestBody"][
         "properties"
     ]
+    # None is an internal omitted-field sentinel, not an accepted wire value.
+    for field in ("alignments", "resolution_context"):
+        schema = review_properties.get(field)
+        if not isinstance(schema, dict):
+            continue
+        variants = schema.pop("anyOf", [])
+        non_null = [variant for variant in variants if variant.get("type") != "null"]
+        if len(non_null) == 1:
+            schema.update(non_null[0])
+        schema.pop("default", None)
     parameters = document["paths"][f"/{API_VERSION}/terms"]["get"]["parameters"]
     try:
         query_schema = next(
@@ -1430,6 +1530,16 @@ def _register_routes(app: FastAPI) -> None:
                     "choice": dumped["choice"],
                 }
             resolutions.append(dumped)
+        alignments = (
+            [item.model_dump() for item in body.alignments]
+            if body.alignments is not None
+            else None
+        )
+        resolution_context = (
+            body.resolution_context.model_dump()
+            if body.resolution_context is not None
+            else None
+        )
         try:
             report = await asyncio.to_thread(
                 review_pair,
@@ -1438,6 +1548,9 @@ def _register_routes(app: FastAPI) -> None:
                 body.target,
                 body.direction,
                 tuple(resolutions),
+                review_version=body.review_version,
+                alignments=alignments,
+                resolution_context=resolution_context,
             )
         except ReviewRequestError as exc:
             raise ApiError(exc.code, exc.message)

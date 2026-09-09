@@ -15,6 +15,13 @@ does not distribute generated game data or generated SQLite databases.
 
 ### Sites
 
+- Add local manuscript save/import, occurrence-specific choice recovery, explicit
+  segment correspondence, and decision-aware report comparison to the bilingual
+  workbench. Recheck current dictionary evidence before reusing saved choices;
+  imported reports never certify current work. Export current text and scoped
+  terminology results without claiming sentence correctness. Patch the existing
+  Site dependencies required by the security audit gate.
+
 - Add an anonymous review workbench on the public Site: paste a source string and an existing translation, inspect dictionary evidence, apply a local official-pair or not-a-term choice, recheck after edits, and export a local report. Default review does not call the model and does not consume translation or character pool counters. Hosted D1 must apply `0001_review_used` before this UPSERT is deployed, or every admission path that uses the new statement will fail together. The live public URL does not gain the surface until that Hosted deploy.
 
 - Open the shared beta at
@@ -28,6 +35,11 @@ does not distribute generated game data or generated SQLite databases.
 - Remove temporary private acceptance controls from the final shared-pool product.
 
 ### HTTP API
+
+- Add opt-in `review-v2` with decimal-aware segment handling, explicit scalar
+  correspondences, full dictionary/candidate identities and resolution freshness
+  validation. Default `review-v1` requests retain their existing behavior and
+  response shape.
 
 - api: add `POST /v1/reviews` for dictionary-first review of a source text plus an existing translation. Existing `/v1/translations`, `/v1/terms` and `/v1/meta` exact-key contracts are unchanged. Review does not call the model. Findings are capped and omitted until the JSON body fits the Site's 64KiB upstream read limit. Constraint-green is not sentence-meaning certification.
 

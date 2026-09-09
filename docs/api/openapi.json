@@ -185,9 +185,71 @@
         "title": "OfficialPairResolutionBody",
         "type": "object"
       },
+      "ReviewAlignmentBody": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/ReviewAlignmentSpanInputBody"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewAlignmentSpanInputBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "ReviewAlignmentBody",
+        "type": "object"
+      },
+      "ReviewAlignmentSpanInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "minimum": 0.0,
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "minimum": 0.0,
+            "title": "Start",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "text"
+        ],
+        "title": "ReviewAlignmentSpanInputBody",
+        "type": "object"
+      },
       "ReviewCandidateBody": {
         "additionalProperties": false,
         "properties": {
+          "candidate_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
           "category": {
             "title": "Category",
             "type": "string"
@@ -247,6 +309,18 @@
       "ReviewDictionaryBody": {
         "additionalProperties": false,
         "properties": {
+          "revision": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
           "schema_version": {
             "anyOf": [
               {
@@ -350,6 +424,14 @@
       "ReviewRequestBody": {
         "additionalProperties": false,
         "properties": {
+          "alignments": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewAlignmentBody"
+            },
+            "maxItems": 64,
+            "title": "Alignments",
+            "type": "array"
+          },
           "direction": {
             "description": "Target language of the submitted translation (same meaning as translations.to).",
             "enum": [
@@ -359,6 +441,9 @@
             "title": "Direction",
             "type": "string"
           },
+          "resolution_context": {
+            "$ref": "#/components/schemas/ReviewResolutionContextBody"
+          },
           "resolutions": {
             "anyOf": [
               {
@@ -366,6 +451,9 @@
                   "anyOf": [
                     {
                       "$ref": "#/components/schemas/OfficialPairResolutionBody"
+                    },
+                    {
+                      "$ref": "#/components/schemas/V2OfficialPairResolutionBody"
                     },
                     {
                       "$ref": "#/components/schemas/NotATermResolutionBody"
@@ -379,6 +467,15 @@
               }
             ],
             "title": "Resolutions"
+          },
+          "review_version": {
+            "default": "review-v1",
+            "enum": [
+              "review-v1",
+              "review-v2"
+            ],
+            "title": "Review Version",
+            "type": "string"
           },
           "source": {
             "description": "Submitted source text. At most 2,000 Unicode scalars.",
@@ -401,6 +498,33 @@
           "direction"
         ],
         "title": "ReviewRequestBody",
+        "type": "object"
+      },
+      "ReviewResolutionContextBody": {
+        "additionalProperties": false,
+        "properties": {
+          "dictionary_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Dictionary Revision",
+            "type": "string"
+          },
+          "rule_version": {
+            "const": "review-v2",
+            "title": "Rule Version",
+            "type": "string"
+          },
+          "source_revision": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_revision",
+          "rule_version",
+          "dictionary_revision"
+        ],
+        "title": "ReviewResolutionContextBody",
         "type": "object"
       },
       "ReviewResponseBody": {
@@ -634,6 +758,32 @@
           "request_id"
         ],
         "title": "TranslationResponseBody",
+        "type": "object"
+      },
+      "V2OfficialPairResolutionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "choice": {
+            "const": "official_pair",
+            "title": "Choice",
+            "type": "string"
+          },
+          "mention_id": {
+            "title": "Mention Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mention_id",
+          "choice",
+          "candidate_id"
+        ],
+        "title": "V2OfficialPairResolutionBody",
         "type": "object"
       }
     },

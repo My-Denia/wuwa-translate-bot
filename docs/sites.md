@@ -33,6 +33,56 @@ Optional `/api/meta` exposes only term count, data schema version and the existi
 request correlation ID. The Telegram bot, Windows client and API contract are
 separate surfaces and are unchanged by public Site access.
 
+## Resumable bilingual manuscripts
+
+The review workbench saves a user-initiated `wuwaterm-manuscript-v1` JSON file.
+It contains source, target, direction, up to 32 occurrence-specific decisions,
+their dictionary/rule/candidate basis, explicit scalar correspondences and the
+last two reports. Import is local and bounded to 1 MiB; it never sends a request.
+There are no accounts, cloud manuscripts, automatic uploads or browser-storage
+history. The user must download and later import the file to resume.
+
+File reports are untrusted historical records, regardless of hashes or verdicts.
+The first explicit check after import obtains fresh authoritative candidates.
+Unchanged official choices can then be staged for a second explicit check;
+an imported `not_a_term` decision always needs user confirmation. A source edit
+can recover an occurrence only within an identical, unique whole source block;
+changed, deleted or duplicate blocks cannot be guessed into new positions.
+Direction, dictionary/rule basis or correspondence changes require confirmation.
+Text edits invalidate reports and clear previously explicit correspondences.
+Partial candidate/source display does not prevent reusing a visible specific
+candidate whose complete identity and fresh basis match. The next request still
+validates that identity against the server's full snapshot; globally truncated
+reports cannot restore choices automatically.
+
+Users may confirm selected source/target ranges, including merged or split
+sentences, or explicitly leave a source region unevaluated. Correspondences are
+bounded non-overlapping scalar ranges with exact text. Without explicit ranges,
+v2 uses decimal-aware sentence boundaries only when both sentence counts match.
+Positional correspondence is a terminology-check scope, not proof of semantic
+equivalence. Target occurrences cannot satisfy multiple source mentions.
+
+Report comparison distinguishes new findings, positively resolved terminology
+constraints, still-pending items and incomparable history. Only a fresh,
+comparable positive check can resolve a prior conflict; disappearance,
+global report truncation, omission and changed basis never mean resolved. Imported history
+cannot establish resolution. Export includes current text and explicitly states
+whether its report is current; no export certifies sentence meaning.
+Each runtime report also records the decisions actually submitted. A changed
+decision is incomparable, not a resolved old constraint. For a partially shown
+candidate/source list, only the identical explicitly selected, visible candidate
+under the same full basis can support a resolved terminology constraint;
+automatic partial evidence and globally truncated reports remain incomparable.
+
+The endpoint remains `/v1/reviews`: absent `review_version` retains the original
+v1 request/response and segmentation behavior. The Site opts into `review-v2`,
+which adds candidate identities and a content-derived dictionary revision from
+one read snapshot. Nonempty choices require current source/rule/dictionary
+context and are checked against the authoritative snapshot. The Site performs
+one upstream call per admitted explicit check; save/import/edit/select/compare
+and export perform none. Deploy the dual-protocol API before the v2 Site;
+roll back the Site to its v1 version before reverting the API.
+
 ## Shared pool contract
 
 There is no per-visitor, per-IP or personal fair-use allowance. A single caller

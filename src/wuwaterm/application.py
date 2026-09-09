@@ -701,10 +701,23 @@ def review_pair(
     target: str,
     direction: str,
     resolutions: Sequence[object] = (),
+    *,
+    review_version: str = "review-v1",
+    alignments: object = None,
+    resolution_context: object = None,
 ) -> ReviewReport:
     """Unique application entry for pair review. Adapters must not import review."""
     try:
-        return _review_pair(service, source, target, direction, resolutions)
+        return _review_pair(
+            service,
+            source,
+            target,
+            direction,
+            resolutions,
+            review_version=review_version,
+            alignments=alignments,
+            resolution_context=resolution_context,
+        )
     except ReviewRequestError:
         raise
 
@@ -725,17 +738,18 @@ def _review_finding_to_wire(finding: object) -> dict[str, object]:
         if len(sources) > REVIEW_MAX_SOURCES:
             candidates_truncated = True
             sources = sources[:REVIEW_MAX_SOURCES]
-        wire_candidates.append(
-            {
-                "zh": candidate.zh,
-                "en": candidate.en,
-                "category": candidate.category,
-                "sources": [
-                    {"source_file": source.source_file, "source_id": source.source_id}
-                    for source in sources
-                ],
-            }
-        )
+        wire_candidate = {
+            "zh": candidate.zh,
+            "en": candidate.en,
+            "category": candidate.category,
+            "sources": [
+                {"source_file": source.source_file, "source_id": source.source_id}
+                for source in sources
+            ],
+        }
+        if candidate.candidate_id is not None:
+            wire_candidate["candidate_id"] = candidate.candidate_id
+        wire_candidates.append(wire_candidate)
     return {
         "id": finding.id,
         "verdict": finding.verdict,
@@ -781,16 +795,19 @@ def project_review_report(report: ReviewReport, request_id: str) -> dict[str, ob
     if len(ordered) > REVIEW_MAX_FINDINGS:
         ordered = ordered[:REVIEW_MAX_FINDINGS]
         truncated = True
+    dictionary: dict[str, object] = {
+        "schema_version": report.dictionary.schema_version,
+        "source_commit": report.dictionary.source_commit,
+        "term_count": report.dictionary.term_count,
+    }
+    if report.dictionary.revision is not None:
+        dictionary["revision"] = report.dictionary.revision
     body: dict[str, object] = {
         "request_id": request_id,
         "source_revision": report.source_revision,
         "target_revision": report.target_revision,
         "rule_version": report.rule_version,
-        "dictionary": {
-            "schema_version": report.dictionary.schema_version,
-            "source_commit": report.dictionary.source_commit,
-            "term_count": report.dictionary.term_count,
-        },
+        "dictionary": dictionary,
         "coverage": {
             "evaluated": report.coverage.evaluated,
             "not_evaluated": report.coverage.not_evaluated,

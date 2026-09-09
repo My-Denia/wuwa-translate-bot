@@ -1,4 +1,6 @@
 import { admitRequest } from './shared-pool.js';
+import { validAlignments, validReport } from './manuscript.js';
+import { revisionOf } from './review-report.js';
 
 const MAX_UPSTREAM_BYTES = 65_536;
 const MAX_SITE_REQUEST_BYTES = 32_768;
@@ -166,6 +168,7 @@ function validReviewFinding(value, source, target) {
 }
 
 function validReviewBody(value, input) {
+  if (input.review_version === 'review-v2') return validReport(value, input.source, input.target) && value.rule_version === 'review-v2';
   if (!plainObject(value) || !exactKeys(value, [
     'coverage', 'dictionary', 'findings', 'request_id', 'rule_version',
     'source_revision', 'target_revision', 'truncated',
@@ -198,9 +201,33 @@ function validReviewResolution(value) {
 
 function validReviewInput(value) {
   if (!plainObject(value)) return false;
+  if (value.review_version === 'review-v2') {
+    const required = ['source', 'target', 'direction', 'review_version'];
+    const optional = ['alignments', 'resolutions', 'resolution_context'].filter(key => Object.hasOwn(value, key));
+    if (!exactKeys(value, [...required, ...optional]) || !nonEmptyString(value.source) || !nonEmptyString(value.target)
+      || Array.from(value.source).length > 2000 || Array.from(value.target).length > 2000
+      || !['en', 'zh'].includes(value.direction)) return false;
+    if (Object.hasOwn(value, 'alignments') && (!Array.isArray(value.alignments) || !validAlignments(value.alignments, value.source, value.target))) return false;
+    const resolutions = value.resolutions ?? [];
+    if (Object.hasOwn(value, 'resolutions') && !Array.isArray(value.resolutions)) return false;
+    if (resolutions.length > 32 || new Set(resolutions.map(item => item?.mention_id)).size !== resolutions.length) return false;
+    if (!resolutions.every(item => plainObject(item) && boundedText(item.mention_id, 8192)
+      && (item.choice === 'not_a_term' ? exactKeys(item, ['mention_id', 'choice'])
+        : item.choice === 'official_pair' && exactKeys(item, ['mention_id', 'choice', 'candidate_id'])
+        && typeof item.candidate_id === 'string' && /^[0-9a-f]{64}$/u.test(item.candidate_id)))) return false;
+    const context = value.resolution_context;
+    if (resolutions.length || Object.hasOwn(value, 'resolution_context')) {
+      if (!plainObject(context) || !exactKeys(context, ['source_revision', 'rule_version', 'dictionary_revision'])
+        || context.rule_version !== 'review-v2' || typeof context.source_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.source_revision)
+        || typeof context.dictionary_revision !== 'string' || !/^[0-9a-f]{64}$/u.test(context.dictionary_revision)) return false;
+    }
+    return true;
+  }
+  if (Object.hasOwn(value, 'review_version') && value.review_version !== 'review-v1') return false;
   const keys = value.resolutions === undefined
     ? ['direction', 'source', 'target']
     : ['direction', 'resolutions', 'source', 'target'];
+  if (Object.hasOwn(value, 'review_version')) keys.push('review_version');
   if (!exactKeys(value, keys)) return false;
   if (!nonEmptyString(value.source) || !nonEmptyString(value.target)) return false;
   if (Array.from(value.source).length > 2000 || Array.from(value.target).length > 2000) return false;
@@ -710,6 +737,8 @@ export async function proxyReviewRequest({
       return errorResponse('upstream_invalid_json');
     }
     if (!validReviewBody(upstreamBody, input)) return errorResponse('upstream_schema_mismatch');
+    if (input.review_version === 'review-v2' && (upstreamBody.source_revision !== await revisionOf(input.source)
+      || upstreamBody.target_revision !== await revisionOf(input.target))) return errorResponse('upstream_schema_mismatch');
     if (
       containsSensitiveValue(
         upstreamBody,
@@ -734,6 +763,7 @@ export async function proxyReviewRequest({
         schema_version: upstreamBody.dictionary.schema_version,
         source_commit: upstreamBody.dictionary.source_commit,
         term_count: upstreamBody.dictionary.term_count,
+        ...(input.review_version === 'review-v2' ? { revision: upstreamBody.dictionary.revision } : {}),
       },
       coverage: {
         evaluated: upstreamBody.coverage.evaluated,
@@ -750,6 +780,7 @@ export async function proxyReviewRequest({
           zh: candidate.zh,
           en: candidate.en,
           category: candidate.category,
+          ...(input.review_version === 'review-v2' ? { candidate_id: candidate.candidate_id } : {}),
           sources: candidate.sources.map((source) => ({
             source_file: source.source_file,
             source_id: source.source_id,
