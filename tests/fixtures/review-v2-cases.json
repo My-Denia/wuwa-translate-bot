@@ -1,0 +1,18 @@
+[
+ {"id":"basic-zh-en","source":"今汐。","target":"Jinhsi.","direction":"en","expected":"term constraint found; sentence meaning unassessed"},
+ {"id":"basic-en-zh","source":"Jinhsi.","target":"今汐。","direction":"zh","expected":"term constraint found; sentence meaning unassessed"},
+ {"id":"decimal","source":"倍率为1.5，今汐登场。","target":"At 1.5, Jinhsi appears.","direction":"en","expected":"decimal is not sentence split; Jinhsi covered"},
+ {"id":"merge","source":"今汐登场。声骸出现。","target":"Jinhsi appears with an Echo.","direction":"en","explicit":"whole pair confirmed by user","expected":"both terms covered within explicit region"},
+ {"id":"split","source":"今汐与声骸出现。","target":"Jinhsi appears. An Echo appears.","direction":"en","explicit":"whole pair confirmed by user","expected":"both terms covered within explicit region"},
+ {"id":"repeat-shortage","source":"今汐与今汐。","target":"Jinhsi.","direction":"en","expected":"one target occurrence cannot verify two source mentions"},
+ {"id":"swapped","source":"今汐登场。声骸出现。","target":"An Echo appears. Jinhsi appears.","direction":"en","expected":"positional regions must not verify elsewhere terms"},
+ {"id":"unmatched","source":"今汐登场。声骸出现。","target":"Someone appears.","direction":"en","expected":"no false verified constraints; explicit mapping available"},
+ {"id":"omitted-map","source":"今汐登场。声骸出现。","target":"Jinhsi appears. Nothing else.","direction":"en","explicit":"only first pair","expected":"unmapped second term unassessed"},
+ {"id":"nonbmp","source":"😀今汐。","target":"😀Jinhsi.","direction":"en","expected":"scalar offsets select correct term"},
+ {"id":"unchanged-draft","expected":"save reopen exact text and direction, separate repeated mention choices recover intent, zero import requests"},
+ {"id":"unrelated-block-edit","expected":"unique unchanged source block retains choice intent; edited block pending"},
+ {"id":"duplicate-block-edit","expected":"changed source containing duplicate block never relocates choices by guess"},
+ {"id":"basis-change","expected":"rule/dictionary metadata change requires recheck and reconfirmation; old pass invalid"},
+ {"id":"disappeared-finding","expected":"removed or truncated finding counted cannot compare, never resolved"},
+ {"id":"tampered-import","expected":"invented hash/pass/report never establishes current check, unknown/deep/oversize/prototype input rejected safely"}
+]

@@ -18,7 +18,7 @@
     "verify:no-client-secret": "node scripts/verify-no-client-secret.mjs"
   },
   "dependencies": {
-    "next": "16.3.2",
+    "next": "16.3.3",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -35,7 +35,7 @@
     "drizzle-kit": "0.31.10",
     "drizzle-orm": "0.45.2",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.3.2",
+    "eslint-config-next": "16.3.3",
     "miniflare": "5.20260820.0-alpha",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.2.1",
@@ -46,6 +46,8 @@
   },
   "type": "module",
   "overrides": {
+    "sharp": "0.35.4",
+    "js-yaml": "4.3.2",
     "@esbuild-kit/core-utils": {
       "esbuild": "0.25.12"
     }

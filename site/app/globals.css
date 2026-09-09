@@ -110,3 +110,18 @@ footer div { display:flex; gap:20px; }
 @media(max-width:850px) { .workspace-grid { grid-template-columns:1fr; } .pool-strip { gap:14px; } .pool-strip > p { max-width:none; width:100%; margin:0; } .workbench { padding-top:32px; } }
 @media(max-width:540px) { .brand small { display:none; } .nav-links { gap:14px; font-size:11px; } .beta-badge { display:none; } .topbar { padding-block:18px; } .workbench-header h1 span { display:block; margin-top:5px; } .pool-notice { align-items:flex-start; padding:14px; gap:10px; flex-wrap:wrap; } .pool-notice > div { flex:1; } .pool-notice a { margin-left:35px; } .workspace-card { padding:20px; } .pool-strip > div { padding-right:12px; } .pool-strip strong { font-size:16px; } .pool-strip { gap:12px; } .product-notes { grid-template-columns:1fr; gap:6px; } .input-row { grid-template-columns:minmax(0,1fr) auto; } form button:not(.secondary-button) { padding-inline:14px; } footer { flex-direction:column; gap:8px; } .term-pair { flex-wrap:wrap; } }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation:none!important; transition:none!important; } }
+
+/* Manuscript controls extend the existing workbench surface. */
+.review-card .actions { flex-wrap:wrap; }
+.draft-actions { margin:0 0 22px; }
+.visually-hidden { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.alignment-panel,.report-changes { margin-top:20px; border:1px solid var(--line); border-radius:8px; padding:14px; font-size:14px; line-height:1.7; }
+.alignment-panel summary,.report-changes summary { cursor:pointer; font-weight:600; }
+.alignment-row,.choice-record { border-top:1px solid var(--line); padding:10px 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.choice-records { margin-top:24px; font-size:14px; }
+.choice-records h3 { font-size:16px; }
+.choice-record p { margin:5px 0; }
+.review-card .term-pair { flex-wrap:wrap; padding:8px 0; }
+.review-card .term-pair small { color:var(--muted); }
+.report-changes h4 { margin:14px 0 5px; }
+.review-card .text-button:disabled { opacity:.45; }

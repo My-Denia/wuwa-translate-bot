@@ -129,14 +129,14 @@ test('review UI imports the report module and does not insert manuscripts as HTM
   assert.equal(page.includes('dangerouslySetInnerHTML'), false);
   assert.match(component, /discardInFlight/u);
   assert.match(component, /setHistory\(\[\]\)/u);
-  assert.match(component, /setResolutions\(\[\]\)/u);
-  assert.match(component, /forms\.includes\(span\.text\)/u);
-  assert.match(component, /discardInFlight\(\); setDirection/u);
-  assert.match(component, /choice: 'not_a_term'[\s\S]{0,80}setState\(\{ kind: 'idle' \}\)/u);
-  assert.match(component, /setTarget\(e\.target\.value\); setState\(\{ kind: 'idle' \}\); setHistory\(\[\]\)/u);
+  // State transitions are exercised by manuscript.test and the hydrated GUI acceptance.
+  assert.match(component, /parseWorkfile/u);
+  assert.match(component, /reconcileChoice/u);
+  assert.match(component, /forms\.includes\(finding\.target_span\.text\)/u);
+  assert.match(component, /generation\.current !== mine/u);
   const limits = readFileSync(fileURLToPath(new URL('../app/limits/page.tsx', import.meta.url)), 'utf8');
   assert.match(limits, /译文审校[\s\S]{0,80}reviewsPerDay/u);
   assert.match(component, /原文 \{sourceLength\.toLocaleString\(\)\} \/ 2,000/u);
-  assert.match(component, /x\.findings\.every\(isFinding\)/u);
+  assert.match(component, /validReport\(value, source, target\)/u);
   assert.match(translation, /const result = state\.data/u);
 });

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -9,6 +10,18 @@ from .constants import CATEGORY_ORDER
 from .db import connect, row_to_entry
 from .models import LookupCandidate, LookupResult, TermEntry
 from .normalize import normalize_ascii, normalize_text
+
+
+@dataclass(frozen=True)
+class ReviewSnapshot:
+    """One transaction's complete dictionary basis for pair review."""
+
+    metadata: dict[str, str]
+    entries: tuple[TermEntry, ...]
+
+    @property
+    def term_count(self) -> int:
+        return len(self.entries)
 
 
 class TermService:
@@ -68,6 +81,28 @@ class TermService:
         with connect(self.db_path) as conn:
             row = conn.execute("SELECT COUNT(*) AS n FROM terms").fetchone()
         return int(row["n"])
+
+    def review_snapshot(self) -> ReviewSnapshot:
+        """Read review metadata and terms from one SQLite snapshot.
+
+        The explicit transaction keeps the metadata, entries, and derived count
+        on one database view even if a database writer commits between queries.
+        """
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN")
+            metadata_rows = conn.execute(
+                "SELECT key, value FROM metadata ORDER BY key"
+            ).fetchall()
+            term_rows = conn.execute(
+                """
+                SELECT * FROM terms
+                ORDER BY priority, zh_norm, en_norm, category, source_file, source_id
+                """
+            ).fetchall()
+        return ReviewSnapshot(
+            metadata={row["key"]: row["value"] for row in metadata_rows},
+            entries=tuple(row_to_entry(row) for row in term_rows),
+        )
 
     def _exact(self, query: str) -> list[LookupCandidate]:
         zh_norm = normalize_text(query)
