@@ -1,0 +1,136 @@
+<!--
+  WuwaTerm README diagram: how it works.
+  Original artwork for this repository; no game assets.
+  Render: open in Chromium at a 1280x600 viewport, device scale factor 2, transparent background,
+  once with ?lang=en and once with ?lang=zh-CN. Fonts: Inter, Noto Sans SC, JetBrains Mono.
+  Output: docs/assets/readme/how-it-works-en.png and how-it-works-zh.png.
+-->
+<!doctype html><html><head><meta charset="utf-8"><style>
+:root{--bg:#0b1319;--surface:#111e26;--surface2:#0e1920;--line:#2a3c45;--text:#edf3ef;--muted:#a1b4b8;--accent:#b1e8c6;--warm:#ffd0bc}
+html,body{margin:0;background:transparent}
+.wrap{position:relative;width:1280px;height:600px;box-sizing:border-box;border-radius:24px;background:var(--bg);border:1px solid #1d2c34;font-family:Inter,"Noto Sans SC",sans-serif;color:var(--text);padding:40px 48px;overflow:hidden}
+.k{font-size:14px;letter-spacing:2.2px;color:var(--accent);font-weight:700;text-transform:uppercase}
+.cols{display:grid;grid-template-columns:276px 1fr 262px;gap:0;height:490px;margin-top:20px;align-items:stretch}
+.col h3{margin:0 0 14px;font-size:15px;letter-spacing:1.6px;color:var(--muted);font-weight:600;text-transform:uppercase}
+.surface{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 17px;margin-bottom:13px}
+.surface b{display:block;font-size:20px;font-weight:600}
+.surface span{display:block;font-size:15px;color:var(--muted);margin-top:4px;line-height:1.35}
+.mid{padding:0 30px;position:relative}
+.core{height:100%;box-sizing:border-box;border:1px solid #3b5a4b;background:linear-gradient(180deg,#132821,#0f1d19);border-radius:18px;padding:22px 24px;position:relative}
+.core .title{font-size:24px;font-weight:700;margin:6px 0 18px}
+.step{display:flex;gap:14px;align-items:flex-start;margin-bottom:12px}
+.n{flex:0 0 32px;height:32px;border-radius:50%;border:1px solid var(--accent);color:var(--accent);display:grid;place-items:center;font-size:15px;font-weight:700}
+.step p{margin:0;font-size:18.5px;line-height:1.4}
+.step p small{display:block;color:var(--muted);font-size:15px;margin-top:3px}
+.fork{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:6px 0 16px 46px}
+.box{border:1px solid var(--line);background:var(--surface2);border-radius:12px;padding:12px 14px}
+.box .h{font-size:14px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase}
+.box p{margin:6px 0 0;font-size:17px;line-height:1.4}
+.box p small{color:var(--muted);font-size:14.5px}
+.pill{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:14px;white-space:nowrap;border:1px dashed #5d8a72;border-radius:6px;padding:0 5px;color:var(--accent)}
+.review{border-top:1px dashed var(--line);margin-top:10px;padding-top:14px;font-size:16px;color:var(--muted);line-height:1.5}
+.review b{color:var(--text);font-weight:600}
+.right .db{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px}
+.db b{display:block;font-size:20px}
+.db p{margin:8px 0 0;font-size:15.5px;color:var(--muted);line-height:1.45}
+.cyl{width:54px;height:62px;margin:2px 0 10px;position:relative}
+.cyl svg{display:block}
+.note{margin-top:14px;font-size:15px;color:var(--muted);line-height:1.5;border-left:2px solid var(--line);padding-left:10px}
+.arrow{position:absolute;top:50%;width:30px;height:2px;background:var(--line)}
+.arrow::after{content:"";position:absolute;right:-1px;top:-4px;border:5px solid transparent;border-left:7px solid var(--line)}
+.a1{left:0}.a2{right:0;transform:scaleX(-1)}
+</style></head><body><div class="wrap">
+<div class="k"><span data-t="kicker"></span></div>
+<div class="cols">
+ <div class="col">
+  <h3><span data-t="where"></span></h3>
+  <div class="surface"><b><span data-t="web"></span></b><span><span data-t="web_sub"></span></span></div>
+  <div class="surface"><b>Telegram</b><span><span data-t="tg_sub"></span></span></div>
+  <div class="surface"><b><span data-t="win"></span></b><span><span data-t="win_sub"></span></span></div>
+  <div class="surface"><b>HTTP API /v1</b><span><span data-t="api_sub"></span></span></div>
+ </div>
+ <div class="mid"><div class="arrow a1"></div><div class="arrow a2"></div>
+  <div class="core">
+   <div class="k"><span data-t="core_kicker"></span></div>
+   <div class="title"><span data-t="core_title"></span></div>
+   <div class="step"><div class="n">1</div><p><span data-t="s1"></span><small><span data-t="s1_sub"></span></small></p></div>
+   <div class="fork">
+    <div class="box"><div class="h"><span data-t="hit"></span></div><p><span data-t="hit_p"></span><br><small><span data-t="hit_sub"></span></small></p></div>
+    <div class="box"><div class="h"><span data-t="miss"></span></div><p><span data-t="miss_p"></span><br><small><span data-t="miss_sub"></span></small></p></div>
+   </div>
+   <div class="step"><div class="n">2</div><p><span data-t="s2"></span><small><span data-t="s2_sub"></span></small></p></div>
+   <div class="review"><span data-t="review"></span></div>
+  </div>
+ </div>
+ <div class="col right">
+  <h3><span data-t="data"></span></h3>
+  <div class="db">
+   <div class="cyl"><svg width="54" height="62" viewBox="0 0 54 62"><ellipse cx="27" cy="10" rx="24" ry="8" fill="#16291f" stroke="#b1e8c6" stroke-width="2"/><path d="M3 10v40c0 4.4 10.7 8 24 8s24-3.6 24-8V10" fill="none" stroke="#b1e8c6" stroke-width="2"/><path d="M3 30c0 4.4 10.7 8 24 8s24-3.6 24-8" fill="none" stroke="#5d8a72" stroke-width="2"/></svg></div>
+   <b><span data-t="db_title"></span></b>
+   <p><span data-t="db_p"></span></p>
+  </div>
+  <div class="note"><span data-t="db_note"></span></div>
+ </div>
+</div></div><script>
+// Strings for both README languages. Render with ?lang=en or ?lang=zh-CN.
+const STRINGS = {
+ "en": {
+  "kicker": "How it works",
+  "core_kicker": "WuwaTerm core",
+  "where": "Where you use it",
+  "web": "Public web beta",
+  "web_sub": "No account. A server-side proxy calls the API.",
+  "tg_sub": "Group commands and linked-channel replies. Self-hosted.",
+  "win": "Windows client",
+  "win_sub": "Desktop app. Needs a server and a device token.",
+  "api_sub": "Versioned, device-token auth. Self-hosted.",
+  "core_title": "Dictionary first, model last",
+  "s1": "Look the text up in the dictionary",
+  "s1_sub": "Exact match first; short queries can also match pinyin",
+  "hit": "Dictionary hit",
+  "hit_p": "Return the official string, byte for byte",
+  "hit_sub": "No model call",
+  "miss": "Sentence or free text",
+  "miss_p": "Lock known terms as <span class=\"pill\">__WUWA_TERM_…__</span>",
+  "miss_sub": "The rest goes to the model",
+  "s2": "Translate with an OpenAI-compatible model, then restore terms",
+  "s2_sub": "If a locked term is lost or altered, you get an error, not a wrong name",
+  "review": "<b>Review</b> checks a source and an existing translation against the same dictionary. No model call; it flags terminology, not sentence meaning.",
+  "data": "Term dictionary",
+  "db_title": "Local SQLite",
+  "db_p": "Built on your machine from public game-text data, pinned to one upstream commit and verified before use.",
+  "db_note": "Never shipped in releases or images. Game data © Kuro Games."
+ },
+ "zh-CN": {
+  "kicker": "工作原理",
+  "core_kicker": "WuwaTerm 核心",
+  "where": "在哪里使用",
+  "web": "公测站",
+  "web_sub": "无需账户，由服务端代理调用 API。",
+  "tg_sub": "群组命令与关联频道回复，需自建。",
+  "win": "Windows 客户端",
+  "win_sub": "桌面应用，需要服务端与设备令牌。",
+  "api_sub": "设备令牌认证，需自建。",
+  "core_title": "词典优先，模型兜底",
+  "s1": "先在词典中查找",
+  "s1_sub": "优先精确匹配；短查询也可按拼音匹配",
+  "hit": "命中词典",
+  "hit_p": "逐字节返回官方译名",
+  "hit_sub": "不调用模型",
+  "miss": "整句或自由文本",
+  "miss_p": "已知术语锁定为 <span class=\"pill\">__WUWA_TERM_…__</span>",
+  "miss_sub": "只有其余文字交给模型",
+  "s2": "交给 OpenAI 兼容模型翻译，再原样还原术语",
+  "s2_sub": "锁定的术语丢失或被改动时直接报错，不给出错误的名称",
+  "review": "<b>审校</b>用同一份词典核对原文与已有译文。不调用模型，只检查术语，不评判整句含义。",
+  "data": "术语词典",
+  "db_title": "本地 SQLite",
+  "db_p": "在你的机器上由公开游戏文本数据构建，固定到某一上游提交，使用前先校验。",
+  "db_note": "不随发布包或镜像分发。游戏数据版权归 Kuro Games 所有。"
+ }
+};
+const lang = new URLSearchParams(location.search).get('lang') === 'zh-CN' ? 'zh-CN' : 'en';
+document.documentElement.lang = lang;
+document.querySelectorAll('[data-t]').forEach(el => { el.outerHTML = STRINGS[lang][el.dataset.t]; });
+</script>
+</body></html>

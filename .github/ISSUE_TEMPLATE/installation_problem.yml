@@ -77,7 +77,7 @@ body:
         - docs/data-refresh.md
         - docs/validation.md
         - client/README.md
-        - README.md or README.en.md
+        - README.md or README.zh-CN.md
         - No guide, or a guide elsewhere
     validations:
       required: true

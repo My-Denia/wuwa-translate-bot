@@ -661,7 +661,15 @@ Older deployments stored `chat_settings.json` and `channel_replies.json` in
 `data/` beside `terms.db`. The current runtime keeps `terms.db` read-only under
 `data/` and writes runtime state under `state/`.
 
-For a normal live upgrade, run `deploy/vps-update.sh`. Before any stop it:
+For a normal live upgrade, run `deploy/vps-update.sh` from the deploy root:
+
+```bash
+cd /opt/wuwaterm/current
+WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
+```
+
+`WUWATERM_DEPLOY_ROOT` defaults to `/opt/wuwaterm/current`. Before any stop the
+updater:
 
 1. fetches `origin/main`, requires clean `HEAD == origin/main`, and records the
    full source commit;

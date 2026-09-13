@@ -5,6 +5,18 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
+### Documentation
+
+- Rebuild the repository front door as a short landing page. `README.md` is now
+  English and `README.zh-CN.md` Chinese (replacing `README.en.md`), with an
+  original logo, a hero banner, real screenshots of the public beta, a
+  how-it-works diagram and one path per audience. Operator, validation and
+  data-source detail that only the old READMEs carried moves to
+  `docs/deployment.md`, `docs/validation.md`, `docs/release-checklist.md` and
+  `docs/data-refresh.md`, and a new `docs/README.md` indexes every guide.
+  The operator notes are now English-only in `docs/deployment.md`, and the
+  package long description follows `README.md`, so it is now the English page.
+
 ### Operations
 
 - Add a transactional runtime-only deployment mode that keeps the existing

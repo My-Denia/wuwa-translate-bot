@@ -17,8 +17,9 @@ adds one will be rejected no matter how well it is written.
 
 ## What This Repository Contains
 
-Five surfaces share one application layer (the last two are consumers, not
-adapters):
+Five surfaces sit on one application layer, except that linked-channel
+auto-translation keeps its own orchestration over the same lookup and
+term-locking primitives (the last two surfaces are API consumers, not adapters):
 
 - a Telegram bot,
 - an HTTP API under `/v1`,
@@ -193,9 +194,11 @@ every pull request without a Windows runner.
   because a disabled widget correctly refuses focus.
 - **An entry under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md).** Say what
   changed and why, in the voice of the surrounding entries.
-- **README parity.** `README.md` (Chinese, the front page) and
-  `README.en.md` (English) are kept aligned: if you touch one, touch the other,
-  and keep the headings and code fences matching between them.
+- **README parity.** `README.md` (English, the front page) and
+  `README.zh-CN.md` (Chinese) are kept aligned: if you touch one, touch the
+  other, and keep the same sections, facts and images in both. The READMEs are
+  a short introduction; detail belongs in the guides listed in
+  [docs/README.md](docs/README.md), not in the front page.
 - **Documentation updated when behaviour changed.** A document that promises
   something the code does not do is a defect here, and there are text gates that
   say so.

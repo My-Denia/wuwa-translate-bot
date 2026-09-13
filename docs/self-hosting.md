@@ -491,8 +491,9 @@ Two things to get right whatever you use:
   service, and make the client's configured base address agree with that
   decision. A base address that resolves to no route answers `404`, which reads
   like a broken deployment and is not one.
-- Do not publish anything the surface does not need. The service declares five
-  paths; a rule that forwards a whole host to it publishes more than that.
+- Do not publish anything the surface does not need. The service declares only
+  the paths in `docs/api/openapi.json` at your checkout; a rule that forwards a
+  whole host to it publishes more than that.
 
 The owner's own installation uses one particular terminator with a path route,
 and the exact block, the validation command and the rollback for it are in

@@ -8,6 +8,9 @@ Primary source:
 - pinned commit: `6ce8d5eda49f2930da84d8846c144432142c7465`
 - pinned version: `GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
 
+Both source profiles, with their pinned commits, are defined in
+`src/wuwaterm/constants.py`.
+
 Fallback mirror to try manually if the primary source is unavailable:
 
 - `https://github.com/Dimbreath/WutheringData` is frozen at 3.1.0
@@ -26,7 +29,9 @@ The active Arikatsu source profile uses sparse checkout for only:
 Bulk TextMap data and generated `terms.db` are local artifacts and are ignored
 by Git. This project does **not** redistribute Wuthering Waves game data; only a
 small derived term dictionary is built locally from the public source above. All
-Wuthering Waves game data and in-game terminology are © Kuro Games.
+Wuthering Waves game data and in-game terminology are © Kuro Games. The
+project's MIT license covers its source code only, not the upstream game data or
+in-game terminology.
 
 ## Local Development
 

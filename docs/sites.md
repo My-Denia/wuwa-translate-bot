@@ -2,10 +2,12 @@
 
 The current public entry is
 <https://wuwaterm.denia-official.chatgpt.site>. It is anonymously reachable,
-requires no WuwaTerm account, and offers Chinese-English official-term lookup
-plus bidirectional, term-locked sentence translation through one shared public
-beta pool. It is a best-effort hobby service: one visitor can exhaust the pool,
-requests can be busy or fail, and there is no SLA.
+requires no WuwaTerm account, and offers Chinese-English official-term lookup,
+bidirectional term-locked sentence translation, and a review workbench that
+checks an existing translation against the dictionary and saves resumable local
+manuscript files, all through one shared public beta pool. It is a best-effort
+hobby service: one visitor can exhaust the pool, requests can be busy or fail,
+and there is no SLA.
 
 ## Evidence boundaries
 
@@ -28,6 +30,12 @@ requests can be busy or fail, and there is no SLA.
   each direction succeeded, while another admitted translation first returned a
   busy response and later succeeded after the suggested wait. This establishes
   the tested behavior, not universal model accuracy or future availability.
+- **Current production observation (2026-09-13):** fresh, cookie-free browser
+  sessions showed the review workbench on the public page. Exact lookups,
+  Chinese-to-English sentence translations and one review check succeeded; the
+  first lookup attempt returned an upstream timeout and later attempts
+  succeeded. The same limits apply: this is tested behavior, not an availability
+  promise.
 
 Optional `/api/meta` exposes only term count, data schema version and the existing
 request correlation ID. The Telegram bot, Windows client and API contract are

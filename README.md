@@ -1,208 +1,132 @@
-简体中文 | [English](README.en.md)
+<a href="https://wuwaterm.denia-official.chatgpt.site">
+  <img src="docs/assets/readme/hero.png" alt="WuwaTerm: get Wuthering Waves terms right, in Chinese and English">
+</a>
 
-# WuwaTerm
+<p align="center">
+  Official Chinese and English terminology for the game Wuthering Waves (鸣潮): look up a term, translate a sentence without the names getting paraphrased, or check a translation you already have.
+  <br>
+  查询《鸣潮》中英官方术语，整句翻译时保留官方译名，并用词典核对已有译文。
+</p>
 
-> **匿名公开公测：** [立即使用 WuwaTerm](https://wuwaterm.denia-official.chatgpt.site) — 无需账户，可查询中英官方术语，并做中英双向整句翻译。全站共享一份先到先用的公测额度；单个访客可能耗尽额度，服务也可能繁忙或偶发失败，**无 SLA**。
+<p align="center">
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><b>Try the public beta</b></a> ·
+  <a href="#run-your-own"><b>Self-host</b></a> ·
+  <a href="#windows-client">Windows client</a> ·
+  <a href="#http-api">HTTP API</a> ·
+  <a href="docs/README.md">Docs</a>
+  <br>
+  <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-WuwaTerm 是面向《鸣潮》的中英术语与翻译工具：中文术语查询官方英文，英文亦可反向查询中文，并支持两个方向的术语锁定整句翻译。它是非官方的独立个人开源项目，并非 Kuro Games 官方网站，与 Kuro Games **无隶属、授权或背书关系**。
+<p align="center">
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=0b1319&color=b1e8c6"></a>
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=0b1319"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=0b1319">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=0b1319"></a>
+</p>
 
-一个 protocol-neutral 应用流水线服务 Telegram 命令、版本化 HTTP API 与 API 进程内默认关闭的 owner 私有 web；linked-channel 则保留频道专用编排，同时复用术语与句子翻译原语。Windows 桌面客户端消费该 API。`site/` 是另一条、独立托管的匿名公开公测入口：浏览器只打同源 `/api/*`（含查词、翻译与审校），由服务端代理持有设备凭据再访问已发布的 `/v1`；审校在 VPS 上做词典核对，不是第三条翻译流水线，也不是进程内 `/wuwaterm-web`（[公开公测 Site](docs/sites.md)）。
+> [!NOTE]
+> WuwaTerm is an unofficial, independent fan project. It is not affiliated with, authorized by, or endorsed by Kuro Games, and it uses no official game art. Wuthering Waves game data and in-game terminology are © Kuro Games.
 
-服务遵循 dictionary-first（词典优先）。词典精确命中时，直接逐字节返回本地 SQLite 数据库中的官方字符串，不调用 LLM。翻译方向按文字体系自动判定：中文源文本默认译为英文，英文/拉丁字母源文本默认译为中文。两种语言的自由文本都只在已知词条被锁定之后才送往 OpenAI 兼容端点，因此官方术语会在目标语言中按原样还原，而不是被改写。
+## Why WuwaTerm
 
-术语词典在本地构建，不随发布物分发；上游游戏数据的许可边界见[数据来源与许可边界](#数据来源与许可边界)。
+WuwaTerm is for anyone who reads or writes about Wuthering Waves across Chinese and English: fan translators, guide and wiki writers, and community admins.
 
-## 从这里开始
+A general-purpose translator sees game names as ordinary words, so an official name can come back paraphrased, or rendered differently from one sentence to the next. WuwaTerm checks a dictionary built from the game's own text data first. When the whole query is a term, you get the dictionary's official string back byte for byte, with no model involved. When it is a sentence, the matching terms are locked before any text reaches a language model and put back unchanged afterwards.
 
-- **先试再装**：打开[匿名公开公测站](https://wuwaterm.denia-official.chatgpt.site)。没有账户或登录；查词与整句翻译额度全站共享，提交前请先读[额度与隐私边界](docs/sites.md)。
-- **桌面用户**：从 [GitHub Releases](https://github.com/My-Denia/wuwa-translate-bot/releases) 下载 Windows 客户端 zip（自 v0.4.0 起提供），用法见[桌面客户端](client/README.md)。
-- **Telegram 群管理员**：命令、授权与频道自动翻译见 [Telegram 行为](docs/telegram-behavior.md)。
-- **自建部署者**：从零把服务跑起来见[自建部署指南](docs/self-hosting.md)。
-- **贡献者**：先读 [CONTRIBUTING.md](CONTRIBUTING.md)，本地校验只有一个入口 `python scripts/validate.py`。
-- **owner 生产运维**：这台机器上的事务式更新流程见[部署](docs/deployment.md)。公开 Site 的环境变量、共享额度、信任边界与校验见[公开公测 Site](docs/sites.md)。
+<a href="https://wuwaterm.denia-official.chatgpt.site">
+  <img src="docs/assets/readme/screenshot-workbench.png" alt="The WuwaTerm public beta: looking up 声骸 returns the official English Echo, and translating 今汐装备了声骸 keeps both official names">
+</a>
+<p align="center"><sub>The public beta, captured 2026-09-13. Its interface is in Chinese, and you can type in either language. 声骸 is listed twice because the game uses the term in two categories.</sub></p>
 
-平台与版本的支持范围见[支持矩阵](docs/support-matrix.md)。
+## What you can do
 
-## 架构概述
+- **Look up a term in either direction.** Type Chinese or English and get the official pair. Short romanised queries such as `shenghai` can also match by pinyin.
+- **Translate a sentence with the names locked.** The direction is detected from the script, or you choose it. If a locked term goes missing or comes back altered, you get an error instead of a wrong name.
+- **Review a translation you already have.** Paste the source and your translation; WuwaTerm shows which official terms are confirmed and which need a look, and offers the official pair for each. It checks terminology only, not sentence meaning, and never calls a model.
+- **Pick up where you left off.** The review workbench saves your draft as a manuscript file on your own computer, and you import it later to continue. There are no accounts and no cloud copy of your manuscript.
 
-- **应用层**：`src/wuwaterm/application.py` 持有命令、API 与进程内 web 共用的 dictionary-first 翻译流水线。它是 protocol-neutral 的——不导入任何表示层模块，也不导入聊天 SDK（[ADR 0009](docs/adr/0009-http-api-adapter.md)）。
-- **两个 presentation adapter**：Telegram bot（`src/wuwaterm/bot.py`、`channel.py`）负责命令、会话授权、聊天措辞与富文本标记；版本化的 HTTP API（`src/wuwaterm_api/`）负责版本化路由、设备认证、统一错误信封与纯文本响应。Telegram 命令走应用流水线；linked-channel 使用频道专用的 admission、freshness、edit 与 delivery 编排（[架构文档](docs/architecture.md)）。
-- **第三个表示层 owner 私有 web**：`src/wuwaterm_api/web/` 是一个供 owner 从手机使用的移动端网页界面，跑在 API 进程内部而不是独立服务。它由 `WUWATERM_API_WEB_ENABLED` 控制，**默认关闭**：开关关闭时既没有路由，也没有子应用，已发布的 API 契约里同样没有它的任何条目（[web 表示层](docs/web-presentation-layer.md)、[ADR 0014](docs/adr/0014-private-web-presentation-layer.md)）。
-- **device-principal 设备主体认证**：所有 `/v1` 路由都要求设备凭据。凭据可单独吊销，不涉及 Telegram bot 自身的访问控制；凭据存储中只保存加盐 scrypt 校验值（[ADR 0010](docs/adr/0010-device-principal-authentication.md)）。
-- **Windows 桌面客户端**：`client/` 下的客户端有意不作为 adapter，而是 API 已发布契约的消费方，自身不含任何翻译逻辑。它经由 HTTPS 访问服务（[ADR 0011](docs/adr/0011-pc-client-stack.md)、[ADR 0012](docs/adr/0012-client-transport-selection.md)）。
-- **匿名公开公测 Site**：`site/` 是独立的 Hosted / Cloudflare Worker 产品，不是 API 进程的一部分。访客无需 WuwaTerm 账户；浏览器不持有设备凭据，服务端代理代表全站以一个设备主体访问 VPS 上的权威 `/v1` 后端。不要把它和默认关闭的 owner 私有 `/wuwaterm-web` 当成同一条表面（[公开公测 Site](docs/sites.md)）。
-- **已发布契约**：API 契约快照提交在 [`docs/api/openapi.json`](docs/api/openapi.json)，由 `scripts/check_api_contract.py` 做漂移门禁。
+<img src="docs/assets/readme/screenshot-review.png" alt="The review workbench: 今汐 is confirmed as Jinhsi, while 声骸 needs a look and the official Echo is offered">
+<p align="center"><sub>Review on the public beta: “Jinhsi” is confirmed; no official rendering of 声骸 is found in the translation, so the workbench offers “Echo”. Where it had to shorten a candidate list, the report says so instead of claiming a complete check. The image is cropped.</sub></p>
 
-合起来是：两个 presentation adapter，加上一个跑在 API 进程内、默认关闭的 owner 私有表示层，加上两个 API 消费方（桌面客户端，以及 `site/` 上的服务端代理）。0.3.0 的发布说明将这一步描述为「API-first release: the Telegram-only bot becomes a multi-adapter system」（[更新日志](CHANGELOG.md)）。以上各点的决策依据见 [ADR 索引](docs/adr/README.md)；模块、请求流与信任边界的维护者地图见 [架构文档](docs/architecture.md)。
+### Where it runs
 
-## 下载与分发
+|  | Public web beta | Telegram bot | Windows client | HTTP API |
+| --- | :---: | :---: | :---: | :---: |
+| Term lookup | ✓ | ✓ | ✓ | ✓ |
+| Sentence translation | ✓ | ✓ | ✓ | ✓ |
+| Translation review | ✓ |  |  | ✓ |
+| Manuscript save and import | ✓ |  |  |  |
+| Linked-channel auto-translation |  | ✓ |  |  |
+| **What you need** | A browser | Your own server and bot token | A server address and device token | Your own server |
 
-下面描述的是自 **v0.4.0** 起的分发形态。截至 v0.3.0 的发布物只有 wheel、sdist 与 `SHA256SUMS`：既没有客户端二进制，也没有容器镜像。下面这套资产策略由[发布检查单](docs/release-checklist.md)与 `.github/workflows/release.yml` 构建并把关。
+<sub>Outside the public beta, sentence translation also needs an OpenAI-compatible model configured on the server. In the HTTP API, review and pinyin or fuzzy term candidates (which the Windows client's lookup uses) are on the `main` branch and not yet in a tagged release.</sub>
 
-- **GitHub Releases**：自 v0.4.0 起，每个发布带 wheel、sdist、Windows 客户端 zip（`WuwaTerm-<version>-windows-x64.zip`）、`SHA256SUMS` 与 `release-manifest.json`。
-- **Windows 客户端**：便携式压缩包，解压即用，**未做代码签名**，因此 Windows SmartScreen 会弹出警告，需要用户自己点开「更多信息 → 仍要运行」才能启动。
-- **容器镜像**：自 v0.4.0 起提供 `ghcr.io/my-denia/wuwaterm`（运行时）与 `ghcr.io/my-denia/wuwaterm-builder`（构建器）。请先验证镜像拉取是否成功；若被拒绝，请从源码构建（见[自建部署指南](docs/self-hosting.md)）。
+## How it works
 
-```bash
-docker pull ghcr.io/my-denia/wuwaterm:v0.4.0
-docker pull ghcr.io/my-denia/wuwaterm-builder:v0.4.0
-```
+<img src="docs/assets/readme/how-it-works-en.png" alt="How WuwaTerm works: dictionary hits return official strings without a model; free text is term-locked before an OpenAI-compatible model translates it; the dictionary is built locally from pinned public game-text data">
 
-镜像省下的只是本地构建镜像这一步。自建部署者仍然需要一份处于发布 tag 上的源码检出：Compose 文件、脚本与数据构建流程都在源码里，术语数据库永远是本地构建的产物，不随任何发布物分发。
+Telegram commands and the HTTP API share one dictionary-first application layer, and the public beta and the Windows client reach it through the API. Linked-channel auto-translation has its own orchestration over the same dictionary lookup and term locking. The terminology database is a local SQLite file you build from a pinned public copy of the game's text data; it is never shipped in a release or container image. The model is optional: without one, dictionary lookups still work. Modules, trust boundaries and request flows are mapped in [Architecture](docs/architecture.md).
 
-## 快速开始
+## Get started
 
-以下命令假定运行在 POSIX shell 中。若在 WSL 下工作，请把工作副本放在 WSL 文件系统上（例如 `~/projects/...`），以便文件监视、权限、换行符与虚拟环境脚本的行为与 Linux 一致。
+### Try it now
 
-```bash
-test -x .venv/bin/python || uv venv .venv
-uv sync --locked --extra dev
-```
+Open the [public beta](https://wuwaterm.denia-official.chatgpt.site). There is no sign-up. The interface is in Chinese, but you can type English, and lookups show both languages. Everyone shares the same first-come daily limits, counted separately for lookups, translations and reviews and reset at 00:00 UTC, so it can be busy or run out, and there is no SLA. Please do not paste personal or sensitive text. Limits are in [Public Beta Site](docs/sites.md) and privacy details in [Privacy and LLM](docs/privacy-and-llm.md#anonymous-public-beta-site).
 
-如果 WSL 镜像中已安装 `python3-venv` 与 pip，标准库路径同样可用：
+### Run your own
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e ".[dev]"
-```
+The [self-hosting guide](docs/self-hosting.md) goes from a checkout at a release tag to a first lookup: Docker Compose on Linux (or Python 3.11+ from source), about 2 GB of disk for the upstream data, and your own Telegram bot token and OpenAI-compatible endpoint if you want those features.
 
-仅在确实要从零重建本地虚拟环境时才使用 `uv venv --clear .venv`。
+### Windows client
 
-## 常用命令
+Download `WuwaTerm-<client version>-windows-x64.zip` from the [latest release](https://github.com/My-Denia/wuwa-translate-bot/releases/latest), not the “Source code” archive. It is a portable, unsigned build, so Windows SmartScreen asks you to choose “More info” and then “Run anyway”. The client talks to a WuwaTerm server through its API and needs a device token from whoever runs that server; it does not connect to the public beta. See the [client guide](client/README.md) (in Chinese).
 
-构建本地词典：
+### Telegram bot
 
-```bash
-.venv/bin/python -m wuwaterm.cli refresh-data --dest data/wutheringdata --profile arikatsu
-.venv/bin/python -m wuwaterm.cli build-db --data-dir data/wutheringdata --db data/terms.candidate.db --profile arikatsu --atomic
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
-```
+There is no shared public bot. Run the bot on your own server with your own BotFather token, then authorize the groups it may serve.
 
-查询术语并翻译整句：
+| You send | The bot replies with |
+| --- | --- |
+| `/tr 声骸` | `Echo` |
+| `/tr Echo` | `声骸` |
+| `/tr --to en 今汐装备了声骸` | the sentence in English, with `Jinhsi` and `Echo` locked |
 
-```bash
-.venv/bin/python -m wuwaterm.cli lookup --db data/terms.db 声骸
-.venv/bin/python -m wuwaterm.cli sentence --db data/terms.db "今汐装备了声骸"
-```
+Commands, group authorization and linked-channel auto-translation are covered in [Telegram Behavior](docs/telegram-behavior.md).
 
-运行 Telegram bot：
+### HTTP API
 
-```bash
-export TELEGRAM_BOT_TOKEN="..."
-export WUWATERM_DB_PATH="data/terms.db"
-.venv/bin/python -m wuwaterm.cli bot
-```
+Versioned `/v1` routes cover terms, translations and reviews, each authenticated with a revocable device token. The committed contract is [`docs/api/openapi.json`](docs/api/openapi.json), and the self-hosting guide walks through a [first lookup and translation](docs/self-hosting.md#first-lookup-first-translation).
 
-运行 HTTP API 适配器（需要 `api` extra，其中包含 FastAPI 与 uvicorn；默认绑定 loopback）：
+## Documentation
 
-```bash
-export WUWATERM_DB_PATH="data/terms.db"
-.venv/bin/python -m wuwaterm_api.cli serve
-```
+| For users | For self-hosters | For contributors |
+| --- | --- | --- |
+| [Public Beta Site](docs/sites.md) | [Self-Hosting](docs/self-hosting.md) | [Contributing](CONTRIBUTING.md) |
+| [Windows client](client/README.md) (in Chinese) | [Support Matrix](docs/support-matrix.md) | [Architecture](docs/architecture.md) |
+| [Telegram Behavior](docs/telegram-behavior.md) | [Data Refresh](docs/data-refresh.md) | [Decision records](docs/adr/README.md) |
+| [Privacy and LLM](docs/privacy-and-llm.md) | [HTTP API contract](docs/api/openapi.json) | [Validation](docs/validation.md) |
 
-Telegram 命令示例：
+Every guide is listed in the [documentation index](docs/README.md).
 
-- `/tr 声骸` -> `Echo`
-- `/tr Echo` -> `声骸`
-- `/tr --to en 今汐装备了声骸` 与 `/tr -to en 今汐装备了声骸`
-  强制输出英文
-- `/tr --to zh Jinhsi equipped an Echo` 与
-  `/tr -to zh Jinhsi equipped an Echo` 强制输出中文
-- `/sentence --to en 今汐装备了声骸` 与 `/sent --to en 今汐装备了声骸`
-  强制整句译为英文
-- `/sentence --to zh Jinhsi equipped an Echo` 与
-  `/sent --to zh Jinhsi equipped an Echo` 强制整句译为中文
+## Under the hood
 
-未给出方向参数时，默认仍为自动判定。要对某条消息作出回复式翻译，发送 `/tr --to en`、`/tr -to en`、`/sentence --to zh` 或 `/sent --to zh`，bot 会按指定方向翻译被回复的文本。就校验而言：非法的 --to 取值只返回用法说明，不调用 LLM；词典精确命中同样不调用 LLM。对于关联频道的贴文，频道自动翻译始终为自动判定方向，不接受命令方向参数。
+- **Python 3.11+** with python-telegram-bot (long polling) and FastAPI, over a SQLite dictionary that the serving containers mount read-only.
+- **Architecture rules that CI enforces**: the application layer imports no presentation code, and the API contract is drift-checked against a committed OpenAPI snapshot ([ADR 0009](docs/adr/0009-http-api-adapter.md)).
+- **Revocable device credentials** for the API, stored only as salted scrypt verifiers ([ADR 0010](docs/adr/0010-device-principal-authentication.md)).
+- **Transactional updates** in the maintainer's deployment tooling: the new image, and for data updates a candidate database, is verified before the running service is touched, and an ordinary failure restores the previous image, database and commit pointer ([ADR 0008](docs/adr/0008-candidate-verification-and-transactional-deployment.md)).
+- **A Windows client** in PySide6 that holds no translation logic ([ADR 0011](docs/adr/0011-pc-client-stack.md)), and **a public beta** built as a Cloudflare Worker that proxies the same API.
 
-运行标准校验集。CI 的服务端测试矩阵跑的就是这个文件，所以本地绿与矩阵那几个 job 绿是同一个判断。但它不等于整个 pull request：lock 漂移检查、wheel/sdist 构建与打包审计、Windows 客户端构建、Docker 运行时/构建器边界这四个 job 都在这条命令之外，另行运行（见[校验](docs/validation.md)）：
+## Project status
 
-```bash
-.venv/bin/python scripts/validate.py
-```
+WuwaTerm is a personal hobby project, maintained on a best-effort basis. The latest tagged release is on the [Releases page](https://github.com/My-Denia/wuwa-translate-bot/releases); `main` moves ahead of it, and [CHANGELOG.md](CHANGELOG.md) marks what is unreleased. The public beta promises no fixed availability or response time. Where to ask questions and what to expect is in [SUPPORT.md](SUPPORT.md).
 
-## 数据来源与许可边界
+## Contributing
 
-主数据源：
+- **Getting a wrong result?** Open a [bug report](https://github.com/My-Denia/wuwa-translate-bot/issues/new/choose) with your query, what WuwaTerm returned and what the game shows. A term that is wrong in the game data itself has to be fixed upstream ([SUPPORT.md](SUPPORT.md)).
+- **Want to change code or docs?** Read [CONTRIBUTING.md](CONTRIBUTING.md). Local validation has one entry point: `python scripts/validate.py`.
+- **Found a security problem?** Report it privately as described in [SECURITY.md](SECURITY.md).
 
-- `https://github.com/Arikatsu/WutheringWaves_Data`
-- 钉住提交：`6ce8d5eda49f2930da84d8846c144432142c7465`
-- 钉住版本：`GameVer 3.6.0 | ResVer 3.6.4 | Changelist 8464573`
+## License and data
 
-主数据源不可用时可手动尝试的备用镜像：
-
-- `https://github.com/Dimbreath/WutheringData`，仅作为 legacy fallback profile
-  保留，在 `src/wuwaterm/constants.py` 中钉住于
-  `e9234ffe094b2d944d16b222d31102e8ab32d954`。
-
-当前启用的 Arikatsu 源 profile 只对 `README.md`、`BinData` 与 `Textmaps` 做稀疏检出。其中根目录的 README 是必需的版本溯源文件。大体量 TextMap 数据与生成的数据库都是本地产物，已被 Git 忽略。本项目不对《鸣潮》游戏数据做任何再分发，只在本地从上述公开源构建一份小规模的派生术语词典。所有《鸣潮》游戏数据与游戏内术语版权归 © Kuro Games 所有。
-
-刷新、构建与校验的细节见[数据刷新](docs/data-refresh.md)。
-
-## 指南
-
-- [自建部署](docs/self-hosting.md)：陌生人从零自建这套服务的通用路径——容器或源码、数据构建、设备凭据、反向代理、升级、备份与回滚。
-- [支持矩阵](docs/support-matrix.md)：服务端与客户端的 Python 版本、操作系统、兼容性契约与「支持」在这里的含义。
-- [架构](docs/architecture.md)：模块、请求流、信任边界、单实例拓扑与 ADR 的维护者地图。
-- [更新日志](CHANGELOG.md)：按发布版本记录的源码变更。
-- [部署](docs/deployment.md)：VPS 上的 Docker Compose 服务、`.env` 处理、数据刷新命令与冒烟检查。
-- [数据刷新](docs/data-refresh.md)：源 profile、本地准备、数据库构建、查询命令与数据许可边界。
-- [Telegram 行为](docs/telegram-behavior.md)：命令、群组授权、公开模式、关联频道自动翻译与 Telegram 侧限制。
-- [HTTP API 契约](docs/api/openapi.json)：版本化 `/v1` 路由已提交的契约快照。
-- [桌面客户端](client/README.md)：HTTP API 的 Windows 客户端，含技术栈、设置、凭据处理与构建方式。
-- [隐私与 LLM](docs/privacy-and-llm.md)：dictionary-first 隐私边界、LLM 配置、提示注入防护、占位符完整性、fail-closed 设置与密钥处理。
-- [web 表示层](docs/web-presentation-layer.md)：跑在 API 进程内、默认关闭的 owner 私有网页界面，含开关、路由与边界。
-- [公开公测 Site](docs/sites.md)：匿名公开入口、共享额度、隐私边界与独立托管的同源代理；不是 `/wuwaterm-web`。
-- [校验](docs/validation.md)：离线校验命令、线上冒烟的注意事项与 Windows 参考命令。
-- [发布检查单](docs/release-checklist.md)：发布元数据、校验、隐私说明、分发边界与发布说明模板。
-
-## 部署入口
-
-VPS 目标环境使用 Docker Compose，因为该机器上现有的系统 Python 版本低于本项目要求。`/opt/wuwaterm/current` 必须是干净的 Git 工作副本，其 `HEAD` 可与刚拉取的 `origin/main` 校验一致；不带 `.git` 的导出式源码副本会被有意拒绝。请依据 `deploy/env.example` 创建 `/opt/wuwaterm/current/.env`，权限设为 `600`，并通过 `deploy/docker-compose.yml` 运行 Compose。
-
-```bash
-cd /opt/wuwaterm/current
-docker compose -f deploy/docker-compose.yml run --rm wuwaterm-builder refresh-data
-WUWATERM_DEPLOY_ROOT=/opt/wuwaterm/current sh deploy/vps-update.sh
-```
-
-更新脚本会先构建并强校验一份独立的候选数据库与一个不可变的源码修订镜像，然后才停止旧服务；随后执行提升、启动、冒烟、写入不可变清单，并原子地发布 `.deploy_commit`。提升之后的任何失败都会回滚数据库、镜像与指针。`deploy/vps-update.sh` 会对两个服务容器一并停止、重启、冒烟与回读，回滚同样覆盖两者。
-
-两个服务容器都出自 `runtime` Docker target 与同一镜像，区别只在入口命令：`bot` 运行 Telegram bot（`wuwaterm-bot`），`api` 运行 HTTP API（`wuwaterm-api`）。runtime 镜像还接受仅供运维使用的 `device` 命令，以一次性容器方式管理凭据，除此之外的命令一律拒绝。数据刷新、构建与校验则通过 `wuwaterm-builder` 服务使用 `builder` target。两个服务容器都以只读方式挂载 `data/`。bot 使用可写的 `state/` 存放 `chat_settings.json` 与 `channel_replies.json`；API 使用与之并列的 `state-api/` 存放自己的设备凭据存储，因此 bot 的读写挂载永远不会覆盖到它。
-升级较早的部署时，请使用 `deploy/vps-update.sh`，或[部署](docs/deployment.md)文档中的仅状态迁移路径。两者都会在经过校验的一次性原子迁移之前停止旧运行时。切勿在旧 bot 仍在运行时手工复制状态文件。请删除或更新那些仍把这些文件指向 `data/` 的旧 `.env` 覆盖项。
-运行时密钥只通过 Compose 的 `env_file` 注入到服务容器；builder 没有 `env_file`，且 `.env` 被忽略并排除在镜像构建上下文之外。完整部署说明见[部署](docs/deployment.md)。
-
-## 校验入口
-
-完整的本地校验只有一个入口。步骤依次为 `hygiene`、`non-goals`、`architecture`、`api-contract`、`ruff`、`pytest`，遇到第一个失败的步骤就停下并指名道姓：
-
-```bash
-.venv/bin/python scripts/validate.py
-.venv/bin/python scripts/validate.py --list
-.venv/bin/python scripts/validate.py --quick
-.venv/bin/python scripts/validate.py --client
-```
-
-候选数据库的校验**不在**这个入口里，这是有意的：它们需要一份构建出来的 `data/terms.candidate.db`，而这份文件只在数据刷新流程中存在，因此属于那条流程而不是每次提交。详见[校验](docs/validation.md)。
-
-```bash
-.venv/bin/python scripts/verify_db.py data/terms.candidate.db --profile arikatsu
-.venv/bin/python scripts/verify_seed_terms.py data/terms.candidate.db --discrepancies goal-runs/wuwaterm-v2-translator/seed-discrepancies.json
-.venv/bin/python scripts/verify_exact_hits.py data/terms.candidate.db --sample-size 500
-.venv/bin/python scripts/verify_idempotent_build.py --data-dir data/wutheringdata --out-dir goal-runs/wuwaterm-v2-translator --profile arikatsu
-```
-
-上面的 `goal-runs/` 路径是本地工作产物，已被 Git 忽略；这些文件由运行校验的机器上的脚本创建或读取。
-
-`scripts/deploy_smoke.py` 是部署可达性检查，不是长轮询处理链路的端到端测试。确切的校验范围与线上 Telegram 冒烟的注意事项见[校验](docs/validation.md)。
-
-## 维护
-
-这是个人业余项目，按尽力而为的方式维护。不保证会回应 issue 或 pull request。匿名公开公测站同样不承诺固定可用性、响应时间或单访客公平；详见[支持说明](SUPPORT.md)。
-
-提问、报告问题与提交改动的去处，以及能期待什么、不能期待什么，写在[支持说明](SUPPORT.md)里；安全问题的报告方式见[安全策略](SECURITY.md)；改动的提交流程见 [CONTRIBUTING.md](CONTRIBUTING.md)；被测试覆盖的平台与版本范围见[支持矩阵](docs/support-matrix.md)。
-
-## 许可
-
-本项目以 [MIT 许可证](LICENSE)发布，© 2026 My-Denia。该 MIT 许可仅覆盖本项目的源代码，不覆盖上游《鸣潮》游戏数据或游戏内术语——后者版权归 © Kuro Games 所有。参见[数据来源与许可边界](#数据来源与许可边界)。
+The source code is released under the [MIT License](LICENSE), © 2026 My-Denia. The license covers this project's code only. Wuthering Waves game data and in-game terminology are © Kuro Games and are not redistributed here: the dictionary is built on your own machine from a pinned public data source, as described in [Data Refresh](docs/data-refresh.md). The WuwaTerm logo and the images in this README are original to this project or screenshots of its own interface, and contain no game art ([asset notes](docs/assets/README.md)).
