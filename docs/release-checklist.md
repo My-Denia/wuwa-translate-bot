@@ -12,10 +12,9 @@ release. That boundary has not moved.
 
 - Prospective release version: derive `v<project.version>` from
   `pyproject.toml` at the reviewed release commit; never copy the latest
-  published tag. The current unreleased server line is `0.4.1`. Set
+  published tag. The current project version is `0.5.0`. Set
   `NEXT_VERSION` to the derived tag explicitly before any release command
-  below; `v0.4.0` is the latest historical release, not the current project
-  version.
+  below; `v0.4.0` is the previous historical release.
 - Desktop client version: `0.2.0` (`client/pyproject.toml`), versioned
   independently of the server and carried in the release as
   `WuwaTerm-0.2.0-windows-x64.zip`
@@ -58,13 +57,16 @@ downloaded asset traceable to a commit without trusting the release page.
 
 **Two container images, on the registry rather than on the release page:**
 `ghcr.io/my-denia/wuwaterm` (runtime) and `ghcr.io/my-denia/wuwaterm-builder`
-(builder), each tagged `vX.Y.Z`, `X.Y` and `sha-<7>`. Both are published
-because the runtime image is useless without a terminology database, and that
-database is built by the builder image and is never distributed. The images
-save the local image build and nothing more: the generic path still needs a
-source checkout at the release tag for the Compose files, the entrypoints, the
-data build and the verification scripts. Say that in the notes; do not let
-"images are published" be read as "no checkout needed".
+(builder). The draft-time push writes only `sha-<7>`. After a maintainer
+publishes the GitHub draft, `promote-images` retags the exact digests recorded
+in that release's `release-manifest.json` as `vX.Y.Z` and `X.Y`. A discarded
+draft therefore cannot leave release-looking registry tags. Both images are
+published because the runtime image is useless without a terminology database,
+and that database is built by the builder image and is never distributed. The
+images save the local image build and nothing more: the generic path still
+needs a source checkout at the release tag for the Compose files, the
+entrypoints, the data build and the verification scripts. Say that in the
+notes; do not let "images are published" be read as "no checkout needed".
 
 **The Windows client executable is UNSIGNED.** There is no code-signing
 certificate, no installer, and no plan for either this round. Windows
@@ -166,9 +168,10 @@ the exact commit you are about to release.
 A draft has no tag. GitHub creates `refs/tags/<tag>` at the moment of
 publication, not at draft creation, which is why deleting a draft leaves
 nothing behind and why the tag-absence check is meaningful right up to the
-publish command. An image tag pushed for a draft that is then discarded is
-overwritten by the retry of the same version; that is the one thing a discarded
-draft does leave behind, and it is deliberate.
+publish command. The only registry tags a discarded draft can leave are
+`sha-<7>` (unconfusable with `vX.Y.Z` / `X.Y`). If `promote-images` fails
+after publication, re-run that job on the same workflow run; do not create
+another draft.
 
 ## Draft Readback
 
@@ -208,30 +211,49 @@ which is the expected pass state before publication. A status of 0 means the
 tag exists — stop. Any other status is a lookup ERROR, not an absence, and is
 also a stop: the check must fail closed when it cannot answer.
 
-**Then probe the images anonymously**, without Docker and without being logged
-in, because that is the state a stranger is in. A first-published user package
-on this registry defaults to private, so a denial here is an expected outcome
-and an owner step, not a defect in the release:
+**Then probe GHCR**, without Docker. A first-published user package on this
+registry defaults to private, so an anonymous denial is an expected outcome
+and an owner visibility step, not a defect in the release. At draft time the
+probe must still distinguish “package private” from “semantic tag already
+exists”:
 
 ```bash
 NEXT_VERSION=vX.Y.Z
-for repository in my-denia/wuwaterm my-denia/wuwaterm-builder; do
+reviewed_main_commit=<reviewed-main-commit-sha>
+short="$(printf '%s' "$reviewed_main_commit" | cut -c1-7)"
+major_minor="${NEXT_VERSION#v}"; major_minor="${major_minor%.*}"
+
+probe() {
+  repository="$1"
+  ref="$2"
   token="$(curl -sS "https://ghcr.io/token?scope=repository:$repository:pull" | jq -r .token)"
-  printf '%s %s\n' "$repository" "$(
-    curl -sS -o /dev/null -w '%{http_code}' \
-      -H "Authorization: Bearer $token" \
-      -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
-      "https://ghcr.io/v2/$repository/manifests/$NEXT_VERSION"
-  )"
+  curl -sS -o /tmp/ghcr-manifest.json -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+    "https://ghcr.io/v2/$repository/manifests/$ref"
+}
+
+for repository in my-denia/wuwaterm my-denia/wuwaterm-builder; do
+  sha_code="$(probe "$repository" "sha-$short")"
+  semver_code="$(probe "$repository" "$NEXT_VERSION")"
+  mm_code="$(probe "$repository" "$major_minor")"
+  printf '%s sha-%s=%s %s=%s %s=%s\n' \
+    "$repository" "$short" "$sha_code" "$NEXT_VERSION" "$semver_code" "$major_minor" "$mm_code"
+  # Draft: sha tag must exist (200, or 401/403 if the package is private).
+  # Semantic tags must not exist yet: 404. A 200 here is a stop — the draft
+  # left a release-looking tag. 401/403 on the semantic ref is ambiguous
+  # (private package); confirm with an authenticated `gh api` package-version
+  # listing that `vX.Y.Z` / `X.Y` were not created.
+  test "$semver_code" != "200"
+  test "$mm_code" != "200"
 done
 ```
 
-`200` means an anonymous pull works and the documentation may say so. `401`,
-`403` or `404` means the package is not publicly readable: record it, set the
-package visibility in the registry's own interface (a maintainer step, not
-something any script here does), re-probe, and until it answers `200` the
-documentation must keep saying "verify the pull; if it is denied, build from
-source".
+After publication, repeat the same probe: `vX.Y.Z` and `X.Y` must resolve to
+the digests in the downloaded `release-manifest.json`. Authenticated
+`docker buildx imagetools inspect` (or `gh api` package versions) is the
+digest compare when anonymous pull is denied. `v0.4.0` / `0.4` must still
+resolve to the historical digests in that older release's manifest.
 
 ## Publish
 
@@ -401,6 +423,8 @@ databases, generated TextMap files, or Wuthering Waves game data.
 
 ### Known Limitations
 
+- WuwaTerm is an unofficial, independent fan project. It is not affiliated
+  with, authorized by, or endorsed by Kuro Games.
 - Release artifacts remain self-hosting inputs. The separate anonymous public
   beta is at https://wuwaterm.denia-official.chatgpt.site; it uses one shared,
   first-come pool and has no SLA or per-visitor fairness guarantee.
