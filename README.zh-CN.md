@@ -1,28 +1,26 @@
-<a href="https://wuwaterm.denia-official.chatgpt.site">
-  <img src="docs/assets/readme/hero.png" alt="WuwaTerm：《鸣潮》中英官方术语查询与保留术语的整句翻译">
-</a>
-
 <p align="center">
-  查询《鸣潮》中英官方术语，整句翻译时保留官方译名，并用词典核对已有译文。
-  <br>
-  Official Chinese and English terminology for the game Wuthering Waves: look up a term, translate a sentence without the names getting paraphrased, or check a translation you already have.
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><img src="docs/assets/readme/hero.png" alt="WuwaTerm：《鸣潮》中英官方术语查询与保留术语的整句翻译"></a>
 </p>
 
 <p align="center">
-  <a href="https://wuwaterm.denia-official.chatgpt.site"><b>立即试用公测站</b></a> ·
-  <a href="#自建部署"><b>自建部署</b></a> ·
-  <a href="#windows-客户端">Windows 客户端</a> ·
-  <a href="#http-api">HTTP API</a> ·
+  查询《鸣潮》中英官方术语，整句翻译时保留官方译名，并用词典核对已有译文。
+</p>
+
+<p align="center">
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><b>立即试用公测站</b></a>&nbsp;·
+  <a href="#自建部署"><b>自建部署</b></a>&nbsp;·
+  <a href="#windows-客户端">Windows&nbsp;客户端</a>&nbsp;·
+  <a href="#http-api">HTTP&nbsp;API</a>&nbsp;·
   <a href="docs/README.md">文档</a>
   <br>
   <a href="README.md">English</a> · <b>简体中文</b>
 </p>
 
 <p align="center">
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="最新发布" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=0b1319&color=b1e8c6"></a>
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=0b1319"></a>
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=0b1319">
-  <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=0b1319"></a>
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="最新发布" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=30363d">
+  <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=30363d"></a>
 </p>
 
 > [!NOTE]
@@ -34,10 +32,11 @@ WuwaTerm 面向需要在中英文之间阅读或书写《鸣潮》内容的人�
 
 通用翻译工具把游戏专有名词当作普通词语，官方译名可能被意译，同一个名字在不同句子里也可能译法不一。WuwaTerm 会先查一遍词典（由游戏自身的文本数据构建）：整条输入就是术语时，逐字节返回词典中的官方写法，不经过模型；输入是整句时，先锁定其中匹配到的术语，再把文字交给语言模型，译完后原样放回。
 
-<a href="https://wuwaterm.denia-official.chatgpt.site">
-  <img src="docs/assets/readme/screenshot-workbench.png" alt="WuwaTerm 公测站：查询“声骸”返回官方英文 Echo，翻译“今汐装备了声骸”时保留两个官方译名">
-</a>
-<p align="center"><sub>公测站界面，截于 2026-09-13。“声骸”出现两次，是因为游戏在两个类别中使用了这个术语。</sub></p>
+<p align="center">
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><img src="docs/assets/readme/screenshot-workbench.png" alt="WuwaTerm 公测站：查询“声骸”返回官方英文 Echo，翻译“今汐装备了声骸”时保留两个官方译名"></a>
+  <br>
+  <sub>公测站界面，截于 2026-09-13。“声骸”出现两次，是因为游戏在两个类别中使用了这个术语。</sub>
+</p>
 
 ## 能做什么
 
@@ -46,19 +45,20 @@ WuwaTerm 面向需要在中英文之间阅读或书写《鸣潮》内容的人�
 - **审校已有译文**：粘贴原文和你的译文，WuwaTerm 标出哪些术语约束已核、哪些需要核对，并给出每处对应的官方词对。它只检查术语，不评判整句含义，也不调用模型。
 - **在本地保存稿件**：双语稿件工作台把稿件保存为你电脑上的文件，下次导入即可继续。没有账户，也没有云端稿件。
 
-<img src="docs/assets/readme/screenshot-review.png" alt="双语稿件工作台：今汐对应 Jinhsi，术语约束已核；声骸需要核对，并给出官方词对 Echo">
-<p align="center"><sub>公测站上的双语稿件工作台：“Jinhsi”术语约束已核；译文中找不到“声骸”的官方译法，于是给出“Echo”。候选列表被截短时，报告会明确标出，不当作完整核对。图片有裁剪。</sub></p>
+<p align="center">
+  <img src="docs/assets/readme/screenshot-review.png" alt="双语稿件工作台：今汐对应 Jinhsi，术语约束已核；声骸需要核对，并给出官方词对 Echo">
+  <br>
+  <sub>公测站上的双语稿件工作台：“Jinhsi”术语约束已核；译文中找不到“声骸”的官方译法，于是给出“Echo”。候选列表被截短时，报告会明确标出，不当作完整核对。图片有裁剪。</sub>
+</p>
 
 ### 各入口支持的功能
 
-|  | 公测站 | Telegram bot | Windows 客户端 | HTTP API |
-| --- | :---: | :---: | :---: | :---: |
-| 术语查询 | ✓ | ✓ | ✓ | ✓ |
-| 整句翻译 | ✓ | ✓ | ✓ | ✓ |
-| 译文审校 | ✓ |  |  | ✓ |
-| 稿件保存与导入 | ✓ |  |  |  |
-| 关联频道自动翻译 |  | ✓ |  |  |
-| **需要准备** | 浏览器 | 自己的服务器和 bot token | 服务端地址和设备令牌 | 自己的服务器 |
+| 入口 | 能做什么 | 需要准备 |
+| --- | --- | --- |
+| 公测站 | 查术语、整句翻译、审校、稿件文件 | 浏览器 |
+| Telegram bot | 查术语、整句翻译、关联频道自动翻译 | 自己的服务器和 bot token |
+| Windows 客户端 | 查术语、整句翻译 | 服务端地址和设备令牌 |
+| HTTP API | 查术语、整句翻译、审校 | 自己的服务器 |
 
 <sub>公测站以外的整句翻译，还需要服务端配置 OpenAI 兼容模型。HTTP API 的审校接口，以及术语接口的拼音与模糊候选（Windows 客户端查词用的就是它），目前只在 `main` 分支上，尚未进入正式发布版本。</sub>
 
@@ -76,7 +76,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ### 自建部署
 
-[自建部署指南](docs/self-hosting.md)从检出发布 tag 一直讲到第一次查词。需要 Linux 上的 Docker Compose（或从源码运行 Python 3.11+）、约 2 GB 磁盘存放上游数据；如需 bot 或整句翻译，还要准备自己的 Telegram bot token 和 OpenAI 兼容接口。
+[自建部署指南](docs/self-hosting.md)（英文）从检出发布 tag 一直讲到第一次查词。需要 Linux 上的 Docker Compose（或从源码运行 Python 3.11+）、约 2 GB 磁盘存放上游数据；如需 bot 或整句翻译，还要准备自己的 Telegram bot token 和 OpenAI 兼容接口。
 
 ### Windows 客户端
 
@@ -90,7 +90,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 | --- | --- |
 | `/tr 声骸` | `Echo` |
 | `/tr Echo` | `声骸` |
-| `/tr --to en 今汐装备了声骸` | 英文整句，`Jinhsi` 与 `Echo` 保持锁定 |
+| `/tr --to en 今汐装备了声骸` | 英文整句，术语保持锁定 |
 
 命令、群组授权与关联频道自动翻译见 [Telegram 行为](docs/telegram-behavior.md)。
 
@@ -100,6 +100,8 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 
 ## 文档
 
+以下文档目前以英文为主；客户端说明和少数设计、审计记录是中文。
+
 | 使用者 | 自建部署者 | 贡献者 |
 | --- | --- | --- |
 | [公测站说明](docs/sites.md) | [自建部署](docs/self-hosting.md) | [贡献指南](CONTRIBUTING.md) |
@@ -107,7 +109,7 @@ Telegram 命令与 HTTP API 共用同一个词典优先的应用层，公测站�
 | [Telegram 行为](docs/telegram-behavior.md) | [数据刷新](docs/data-refresh.md) | [架构决策记录](docs/adr/README.md) |
 | [隐私与 LLM](docs/privacy-and-llm.md) | [HTTP API 契约](docs/api/openapi.json) | [校验](docs/validation.md) |
 
-全部指南都列在[文档索引](docs/README.md)中。这些文档目前以英文为主；客户端说明和少数设计、审计记录是中文。
+全部指南都列在[文档索引](docs/README.md)中。
 
 ## 技术实现
 

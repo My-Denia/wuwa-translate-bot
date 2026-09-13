@@ -1,6 +1,6 @@
-<a href="https://wuwaterm.denia-official.chatgpt.site">
-  <img src="docs/assets/readme/hero.png" alt="WuwaTerm: get Wuthering Waves terms right, in Chinese and English">
-</a>
+<p align="center">
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><img src="docs/assets/readme/hero.png" alt="WuwaTerm: get Wuthering Waves terms right, in Chinese and English"></a>
+</p>
 
 <p align="center">
   Official Chinese and English terminology for the game Wuthering Waves (鸣潮): look up a term, translate a sentence without the names getting paraphrased, or check a translation you already have.
@@ -9,20 +9,20 @@
 </p>
 
 <p align="center">
-  <a href="https://wuwaterm.denia-official.chatgpt.site"><b>Try the public beta</b></a> ·
-  <a href="#run-your-own"><b>Self-host</b></a> ·
-  <a href="#windows-client">Windows client</a> ·
-  <a href="#http-api">HTTP API</a> ·
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><b>Try&nbsp;the&nbsp;public&nbsp;beta</b></a>&nbsp;·
+  <a href="#run-your-own"><b>Self-host</b></a>&nbsp;·
+  <a href="#windows-client">Windows&nbsp;client</a>&nbsp;·
+  <a href="#http-api">HTTP&nbsp;API</a>&nbsp;·
   <a href="docs/README.md">Docs</a>
   <br>
   <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=0b1319&color=b1e8c6"></a>
-  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=0b1319"></a>
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=0b1319">
-  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=0b1319"></a>
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/My-Denia/wuwa-translate-bot?style=flat-square&label=release&labelColor=30363d&color=b1e8c6"></a>
+  <a href="https://github.com/My-Denia/wuwa-translate-bot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/My-Denia/wuwa-translate-bot/ci.yml?branch=main&style=flat-square&label=CI&labelColor=30363d"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-b1e8c6?style=flat-square&labelColor=30363d">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-b1e8c6?style=flat-square&labelColor=30363d"></a>
 </p>
 
 > [!NOTE]
@@ -34,10 +34,11 @@ WuwaTerm is for anyone who reads or writes about Wuthering Waves across Chinese 
 
 A general-purpose translator sees game names as ordinary words, so an official name can come back paraphrased, or rendered differently from one sentence to the next. WuwaTerm checks a dictionary built from the game's own text data first. When the whole query is a term, you get the dictionary's official string back byte for byte, with no model involved. When it is a sentence, the matching terms are locked before any text reaches a language model and put back unchanged afterwards.
 
-<a href="https://wuwaterm.denia-official.chatgpt.site">
-  <img src="docs/assets/readme/screenshot-workbench.png" alt="The WuwaTerm public beta: looking up 声骸 returns the official English Echo, and translating 今汐装备了声骸 keeps both official names">
-</a>
-<p align="center"><sub>The public beta, captured 2026-09-13. Its interface is in Chinese, and you can type in either language. 声骸 is listed twice because the game uses the term in two categories.</sub></p>
+<p align="center">
+  <a href="https://wuwaterm.denia-official.chatgpt.site"><img src="docs/assets/readme/screenshot-workbench.png" alt="The WuwaTerm public beta: looking up 声骸 returns the official English Echo, and translating 今汐装备了声骸 keeps both official names"></a>
+  <br>
+  <sub>The public beta, captured 2026-09-13. Its interface is in Chinese, and you can type in either language. 声骸 is listed twice because the game uses the term in two categories.</sub>
+</p>
 
 ## What you can do
 
@@ -46,19 +47,20 @@ A general-purpose translator sees game names as ordinary words, so an official n
 - **Review a translation you already have.** Paste the source and your translation; WuwaTerm shows which official terms are confirmed and which need a look, and offers the official pair for each. It checks terminology only, not sentence meaning, and never calls a model.
 - **Pick up where you left off.** The review workbench saves your draft as a manuscript file on your own computer, and you import it later to continue. There are no accounts and no cloud copy of your manuscript.
 
-<img src="docs/assets/readme/screenshot-review.png" alt="The review workbench: 今汐 is confirmed as Jinhsi, while 声骸 needs a look and the official Echo is offered">
-<p align="center"><sub>Review on the public beta: “Jinhsi” is confirmed; no official rendering of 声骸 is found in the translation, so the workbench offers “Echo”. Where it had to shorten a candidate list, the report says so instead of claiming a complete check. The image is cropped.</sub></p>
+<p align="center">
+  <img src="docs/assets/readme/screenshot-review.png" alt="The review workbench: 今汐 is confirmed as Jinhsi, while 声骸 needs a look and the official Echo is offered">
+  <br>
+  <sub>Review on the public beta: “Jinhsi” is confirmed; no official rendering of 声骸 is found in the translation, so the workbench offers “Echo”. Where it had to shorten a candidate list, the report says so instead of claiming a complete check. The image is cropped.</sub>
+</p>
 
 ### Where it runs
 
-|  | Public web beta | Telegram bot | Windows client | HTTP API |
-| --- | :---: | :---: | :---: | :---: |
-| Term lookup | ✓ | ✓ | ✓ | ✓ |
-| Sentence translation | ✓ | ✓ | ✓ | ✓ |
-| Translation review | ✓ |  |  | ✓ |
-| Manuscript save and import | ✓ |  |  |  |
-| Linked-channel auto-translation |  | ✓ |  |  |
-| **What you need** | A browser | Your own server and bot token | A server address and device token | Your own server |
+| Surface | What it does | What you need |
+| --- | --- | --- |
+| Public web beta | Lookup, translation, review, manuscript files | A browser |
+| Telegram bot | Lookup, translation, auto-translating a linked channel | Your own server and bot token |
+| Windows client | Lookup, translation | A server address and device token |
+| HTTP API | Lookup, translation, review | Your own server |
 
 <sub>Outside the public beta, sentence translation also needs an OpenAI-compatible model configured on the server. In the HTTP API, review and pinyin or fuzzy term candidates (which the Windows client's lookup uses) are on the `main` branch and not yet in a tagged release.</sub>
 
@@ -90,7 +92,7 @@ There is no shared public bot. Run the bot on your own server with your own BotF
 | --- | --- |
 | `/tr 声骸` | `Echo` |
 | `/tr Echo` | `声骸` |
-| `/tr --to en 今汐装备了声骸` | the sentence in English, with `Jinhsi` and `Echo` locked |
+| `/tr --to en 今汐装备了声骸` | the sentence in English, names locked |
 
 Commands, group authorization and linked-channel auto-translation are covered in [Telegram Behavior](docs/telegram-behavior.md).
 
