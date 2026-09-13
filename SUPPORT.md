@@ -8,9 +8,10 @@ that was never made.
 
 The project provides a no-account, shared public beta at
 <https://wuwaterm.denia-official.chatgpt.site>. It is a best-effort entry for
-term lookup and bidirectional sentence translation, not a managed commercial
-service: the whole site shares one first-come pool, one visitor can exhaust it,
-requests may be busy or fail, and there is **no SLA**. Self-hosted deployments
+term lookup, bidirectional sentence translation and translation review, not a
+managed commercial service: everyone shares the same first-come daily limits,
+one visitor can exhaust them, requests may be busy or fail, and there is
+**no SLA**. Self-hosted deployments
 remain separately operated by whoever runs them.
 
 There is **no private support channel**: no support mailbox, no chat, no direct
@@ -48,8 +49,10 @@ of the sharp edges are already written down, some with a decision attached.
 
 A good share of what gets asked is already documented:
 
-- [README.md](README.md) — what the project is, in Chinese, and
-  [README.en.md](README.en.md) in English.
+- [README.md](README.md) — what the project is, in English, and
+  [README.zh-CN.md](README.zh-CN.md) in Chinese.
+- [docs/README.md](docs/README.md) — the index of every guide in the
+  repository.
 - [docs/self-hosting.md](docs/self-hosting.md) — standing up your own instance.
 - [docs/support-matrix.md](docs/support-matrix.md) — which operating systems,
   Python versions and surfaces are supported, and which are merely known to

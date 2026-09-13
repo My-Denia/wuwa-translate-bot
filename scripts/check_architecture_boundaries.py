@@ -68,7 +68,7 @@ CURRENT_CONTRACT_FILES = (
     ROOT / "src" / "wuwaterm_api" / "app.py",
     ROOT / "scripts" / "check_architecture_boundaries.py",
     ROOT / "README.md",
-    ROOT / "README.en.md",
+    ROOT / "README.zh-CN.md",
     ROOT / "docs" / "architecture.md",
     ROOT / "docs" / "web-presentation-layer.md",
     ROOT / "docs" / "adr" / "0001-telegram-as-presentation-layer.md",

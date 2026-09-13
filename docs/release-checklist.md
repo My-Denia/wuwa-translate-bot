@@ -38,6 +38,9 @@ the page a reader checks first.
 
 ## What A Release Carries
 
+Releases up to and including v0.3.0 carried only the wheel, the sdist and
+`SHA256SUMS`: no client binary and no container image. From v0.4.0 onward:
+
 **Five assets, and no others:**
 
 | asset | built by | audited by |

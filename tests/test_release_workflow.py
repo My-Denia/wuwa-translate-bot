@@ -195,7 +195,7 @@ def test_the_client_zip_has_one_name_across_every_file_that_names_it():
         "docs/support-matrix.md": ROOT / "docs" / "support-matrix.md",
         "docs/release-checklist.md": CHECKLIST,
         "README.md": ROOT / "README.md",
-        "README.en.md": ROOT / "README.en.md",
+        "README.zh-CN.md": ROOT / "README.zh-CN.md",
     }
     shapes: dict[str, set[str]] = {}
     for label, path in holders.items():

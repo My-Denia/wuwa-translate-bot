@@ -45,14 +45,13 @@ credential-store backup and restore. It is the only gate in this repository
 that runs the documented install instead of reading it, which is exactly the
 class of defect the text gates cannot see.
 
-`README.md` and `README.en.md` used to carry their own command block, and it
-was **not** equivalent: it predated both the linter and the API-contract gate,
-so following it could leave a contributor green locally and red on the pull
-request. Both READMEs now send a reader to `python scripts/validate.py`
-instead, so there is one list of gates and it lives in the script. What they
-still list separately are the candidate-database checks below, and that is
-deliberate rather than left over: the entry point does not run them, because
-they need a built `data/terms.candidate.db`.
+The READMEs used to carry their own command block, and it was **not**
+equivalent: it predated both the linter and the API-contract gate, so following
+it could leave a contributor green locally and red on the pull request. The
+READMEs now name only `python scripts/validate.py`, so there is one list of
+gates and it lives in the script. The candidate-database checks below are
+deliberately not in the entry point, because they need a built
+`data/terms.candidate.db`.
 
 The script uses only the standard library and runs each step with the
 interpreter that runs the script, so there is no POSIX-only path in it:
@@ -101,6 +100,9 @@ than to every commit. `uv lock --check` is also outside the script (it needs
 .venv/bin/python -m pytest
 uv lock --check
 ```
+
+The `goal-runs/` paths above are local working artifacts, ignored by Git; the
+scripts create or read them on the machine that runs the validation pass.
 
 `verify_idempotent_build.py` compares SHA256 over LF-normalized SQLite logical
 dumps, not raw database bytes, so Windows/Linux SQLite formatting differences

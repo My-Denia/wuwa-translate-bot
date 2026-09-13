@@ -43,7 +43,7 @@ Anything extra that was run — the client suite (`python scripts/validate.py
 - [ ] One concern. This change does one thing; anything else is a separate pull request.
 - [ ] `python scripts/validate.py` passes locally, and the output above is from this branch.
 - [ ] An entry was added under `## Unreleased` in `CHANGELOG.md`.
-- [ ] If either README was touched, `README.md` and `README.en.md` were both updated and their headings and code fences still match.
+- [ ] If either README was touched, `README.md` and `README.zh-CN.md` were both updated and still carry the same sections, facts and images.
 - [ ] Documentation was updated wherever this change made an existing statement untrue.
 - [ ] Tests were added or changed such that they fail without this change, and the description says which ones.
 - [ ] No secrets and no generated data: no `.env`, no tokens or API keys, no generated SQLite database, no upstream TextMap or game data, no runtime state (`state/`, `state-api/`, `chat_settings.json`, `channel_replies.json`).
