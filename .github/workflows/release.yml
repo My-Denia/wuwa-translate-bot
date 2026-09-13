@@ -6,6 +6,8 @@ name: Release
 #
 # A pull_request run is ALWAYS a dry run: it builds everything, pushes nothing,
 # creates nothing, and its manifest records `"dry_run": true` with null digests.
+# A release published event runs only promote-images: it retags recorded
+# digests and never publishes a GitHub release.
 on:
   workflow_dispatch:
     inputs:
@@ -27,6 +29,12 @@ on:
       - deploy/**
       - client/**
       - pyproject.toml
+  # After a human publishes the draft (which is what creates the git tag),
+  # promote-images retags the digests already recorded in that release's
+  # manifest. This trigger does not publish. Every other job skips it.
+  release:
+    types:
+      - published
 
 # The workflow default is read-only. Exactly two jobs widen it, each by one
 # scope: `push-images` takes packages:write and `draft-release` takes
@@ -55,6 +63,7 @@ concurrency:
 jobs:
   preflight:
     name: preflight (versions, data pin, tag absence)
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.versions.outputs.version }}
@@ -231,6 +240,7 @@ jobs:
 
   python-package:
     name: wheel/sdist build, audit, install
+    if: github.event_name != 'release'
     needs: preflight
     runs-on: ubuntu-latest
     steps:
@@ -270,6 +280,7 @@ jobs:
 
   client:
     name: desktop client zip (windows)
+    if: github.event_name != 'release'
     needs: preflight
     runs-on: windows-latest
     steps:
@@ -346,6 +357,7 @@ jobs:
   # guards the steps that are checked in.
   images:
     name: container images (runtime + builder)
+    if: github.event_name != 'release'
     needs: preflight
     runs-on: ubuntu-latest
     permissions:
@@ -367,9 +379,8 @@ jobs:
           DRY_RUN: "true"
         run: |
           set -euo pipefail
-          major_minor="${VERSION%.*}"
           short="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-7)"
-          tag_values=("v$VERSION" "$major_minor" "sha-$short")
+          tag_values=("sha-$short")
           tag_list="$(IFS=,; echo "${tag_values[*]}")"
 
           # Loaded into the local daemon, never pushed: this job proves both
@@ -415,7 +426,8 @@ jobs:
             echo "### Images"
             echo ""
             echo "- built and loaded locally; this job pushes nothing"
-            echo "- tags that a publishing run would push: $tag_list"
+            echo "- draft-time tags a publishing run would push: $tag_list"
+            echo "- vX.Y.Z and X.Y are applied after a human publishes, from the recorded digest"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The push, and the only job that may write packages. Unreachable from a
@@ -423,13 +435,10 @@ jobs:
   # image jobs so a release tag is never pushed for a commit whose wheel, sdist
   # or client build had already failed.
   #
-  # What this still does not solve, deliberately: a draft that is later
-  # discarded leaves these tags on the registry. The approved design accepts
-  # that and records it - the retry of the same version overwrites them - and
-  # docs/release-checklist.md says so. Promoting staging tags to release tags
-  # after publication would remove the window at the cost of a second registry
-  # mutation outside this workflow, which is a bigger change than the window is
-  # worth.
+  # Draft-time registry tags are sha-<7> only. vX.Y.Z and X.Y are applied by
+  # promote-images after a human publishes the draft, from the exact digests
+  # written into release-manifest.json. A discarded draft therefore cannot
+  # leave release-looking tags on the registry.
   push-images:
     name: push the container images
     needs: [preflight, python-package, client, images]
@@ -480,9 +489,8 @@ jobs:
           BUILT_UTC: ${{ needs.preflight.outputs.built_utc }}
         run: |
           set -euo pipefail
-          major_minor="${VERSION%.*}"
           short="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-7)"
-          tag_values=("v$VERSION" "$major_minor" "sha-$short")
+          tag_values=("sha-$short")
           tag_list="$(IFS=,; echo "${tag_values[*]}")"
 
           # Same labels, same build arg, same commit as the build job above.
@@ -542,7 +550,7 @@ jobs:
     # push-images is SKIPPED in every dry run, and a skipped need would
     # otherwise skip this job too. Success of everything that did run is still
     # required: failure() covers any failed ancestor.
-    if: ${{ !cancelled() && !failure() }}
+    if: ${{ !cancelled() && !failure() && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -800,7 +808,10 @@ jobs:
               "unrecognised publisher; continue through *More info* then *Run anyway* only",
               "if you trust this download, after checking its checksum.",
               "",
-              "Container images built from the same commit:",
+              "Container images built from the same commit. The tags listed here are",
+              "the immutable sha tags pushed while this release was still a draft.",
+              "The `vX.Y.Z` and `X.Y` tags are applied to these exact digests only",
+              "after a maintainer publishes the draft:",
               "",
               image_line("runtime"),
               image_line("builder"),
@@ -819,6 +830,8 @@ jobs:
               "",
               "### Known Limitations",
               "",
+              "- WuwaTerm is an unofficial, independent fan project. It is not",
+              "  affiliated with, authorized by, or endorsed by Kuro Games.",
               "- Release artifacts remain self-hosting inputs. A separate anonymous",
               "  public beta is available at https://wuwaterm.denia-official.chatgpt.site;",
               "  it uses one shared, first-come pool and has no SLA or per-visitor",
@@ -873,4 +886,95 @@ jobs:
             echo ""
             echo "- draft created for $TAG with $count assets"
             echo "- not published: no tag exists until a maintainer publishes it"
+            echo "- GHCR still has only sha-<7> tags; vX.Y.Z / X.Y wait for promote-images"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The only job that runs on release: published. It does not rebuild, does
+  # not create a release, and does not publish. It retags the exact digests
+  # already recorded in the published release-manifest.json. Recovery for a
+  # failed run is to re-run this job; do not dispatch a new draft.
+  promote-images:
+    name: promote GHCR release tags
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - name: Download the published release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          gh release download "$TAG" --pattern release-manifest.json --dir staging
+          test "$(jq -r .dry_run staging/release-manifest.json)" = "false"
+          test "$(jq -r .tag staging/release-manifest.json)" = "$TAG"
+          test "$(jq -r .images.runtime.digest staging/release-manifest.json)" != "null"
+          test "$(jq -r .images.builder.digest staging/release-manifest.json)" != "null"
+          test "$(jq -r .images.runtime.digest staging/release-manifest.json)" != ""
+          test "$(jq -r .images.builder.digest staging/release-manifest.json)" != ""
+      - name: Log in to the container registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Retag the recorded digests as vX.Y.Z and X.Y
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          major_minor="${version%.*}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "tag '$TAG' is not vX.Y.Z; refusing to promote" >&2
+            exit 1
+          fi
+
+          digest_of() {
+            docker buildx imagetools inspect "$1" 2>/dev/null \
+              | awk '/^Digest:/{print $2; exit}'
+          }
+
+          promote_one() {
+            image="$1"
+            digest="$2"
+            source="${image}@${digest}"
+            if [ -z "$digest" ] || [ "$digest" = "null" ]; then
+              echo "missing digest for $image; stop" >&2
+              exit 1
+            fi
+            for t in "$TAG" "$major_minor"; do
+              dest="${image}:${t}"
+              existing="$(digest_of "$dest" || true)"
+              if [ -n "$existing" ] && [ "$existing" != "$digest" ]; then
+                echo "refusing to move $dest from $existing to $digest" >&2
+                exit 1
+              fi
+              docker buildx imagetools create --tag "$dest" "$source"
+              got="$(digest_of "$dest")"
+              if [ "$got" != "$digest" ]; then
+                echo "$dest resolved to '$got', expected $digest" >&2
+                exit 1
+              fi
+              echo "promoted $dest -> $digest"
+            done
+          }
+
+          runtime_digest="$(jq -r .images.runtime.digest staging/release-manifest.json)"
+          builder_digest="$(jq -r .images.builder.digest staging/release-manifest.json)"
+          promote_one "$(jq -r .images.runtime.name staging/release-manifest.json)" "$runtime_digest"
+          promote_one "$(jq -r .images.builder.name staging/release-manifest.json)" "$builder_digest"
+
+          {
+            echo "### GHCR tags promoted"
+            echo ""
+            echo "- source release: $TAG"
+            echo "- runtime $TAG / $major_minor -> $runtime_digest"
+            echo "- builder $TAG / $major_minor -> $builder_digest"
+            echo "- no rebuild; imagetools retag of the published manifest digests"
           } >> "$GITHUB_STEP_SUMMARY"

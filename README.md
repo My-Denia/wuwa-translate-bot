@@ -62,7 +62,7 @@ A general-purpose translator sees game names as ordinary words, so an official n
 | Windows client | Lookup, translation | A server address and device token |
 | HTTP API | Lookup, translation, review | Your own server |
 
-<sub>Outside the public beta, sentence translation also needs an OpenAI-compatible model configured on the server. In the HTTP API, review and pinyin or fuzzy term candidates (which the Windows client's lookup uses) are on the `main` branch and not yet in a tagged release.</sub>
+<sub>Outside the public beta, sentence translation also needs an OpenAI-compatible model configured on the server.</sub>
 
 ## How it works
 

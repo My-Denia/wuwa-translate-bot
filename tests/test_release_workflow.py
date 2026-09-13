@@ -90,10 +90,19 @@ def _template_block() -> str:
 
 
 def test_release_workflow_exists_and_has_no_tag_trigger():
-    # The two triggers, and nothing else. A push, tag or release trigger would
-    # make publication a side effect of moving a ref; the whole design is that
-    # a person publishes a draft.
-    assert _trigger_keys(_workflow_text()) == ["workflow_dispatch", "pull_request"]
+    # Dispatch builds the draft; pull_request is always a dry run; release
+    # published only retags recorded GHCR digests. A push or tag trigger
+    # would still make publication a side effect of moving a ref.
+    assert _trigger_keys(_workflow_text()) == [
+        "workflow_dispatch",
+        "pull_request",
+        "release",
+    ]
+    assert re.search(
+        r"^  release:\n    types:\n      - published\s*$",
+        _workflow_text(),
+        re.MULTILINE,
+    )
 
 
 def test_release_workflow_never_publishes():
@@ -115,11 +124,10 @@ def test_release_workflow_keeps_write_permissions_where_the_design_put_them():
     assert re.search(r"^permissions:\n  contents: read\n", text, re.MULTILINE), (
         "the workflow default must be read-only"
     )
-    # One image job may push packages; one draft job may write releases. More
-    # than one of either means a permission spread somewhere it was not meant
-    # to reach.
+    # Two package writes: draft-time sha push, and post-publish digest retag.
+    # One draft job may write releases. More than that is a permission spread.
     code = _code_lines(text)
-    assert sum("packages: write" in line for line in code) == 1
+    assert sum("packages: write" in line for line in code) == 2
     assert sum("contents: write" in line for line in code) == 1
 
 
@@ -148,7 +156,7 @@ def test_no_write_scope_is_reachable_from_a_pull_request():
             assert current is not None, f"a write scope outside any job at line {index + 1}"
             widened[current] = line.strip()
 
-    assert set(widened) == {"push-images", "draft-release"}, widened
+    assert set(widened) == {"push-images", "draft-release", "promote-images"}, widened
 
     for job in widened:
         start = lines.index(f"  {job}:")
@@ -160,6 +168,11 @@ def test_no_write_scope_is_reachable_from_a_pull_request():
         condition = [line for line in block if line.strip().startswith("if:")]
         assert condition, f"{job} holds a write scope with no condition at all"
         text_of = " ".join(condition)
+        if job == "promote-images":
+            assert "release" in text_of, f"{job}: {text_of}"
+            assert "published" in text_of, f"{job}: {text_of}"
+            assert "pull_request" not in text_of, f"{job}: {text_of}"
+            continue
         assert "workflow_dispatch" in text_of, f"{job}: {text_of}"
         assert "dry_run" in text_of and "'false'" in text_of, f"{job}: {text_of}"
 
@@ -179,6 +192,49 @@ def test_note_template_headings_match_the_notes_the_workflow_writes():
         f"  workflow:  {generated}\n"
         f"  checklist: {documented}"
     )
+
+
+def _job_block(name: str) -> str:
+    lines = _workflow_text().splitlines()
+    start = lines.index(f"  {name}:")
+    block = []
+    for line in lines[start + 1 :]:
+        if re.match(r"^  [a-z0-9-]+:$", line):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def test_build_jobs_skip_the_release_event():
+    for job in ("preflight", "python-package", "client", "images", "assemble"):
+        block = _job_block(job)
+        condition = [line for line in block.splitlines() if line.strip().startswith("if:")]
+        assert condition, f"{job} has no if: and would rebuild on release published"
+        text_of = " ".join(condition)
+        assert "github.event_name != 'release'" in text_of, f"{job}: {text_of}"
+
+
+def test_draft_image_tags_are_sha_class_only():
+    assignments = re.findall(r"tag_values=\(([^)]+)\)", _workflow_text())
+    assert assignments, "no tag_values assignments found"
+    for assigned in assignments:
+        assert "v$VERSION" not in assigned, assigned
+        assert "major_minor" not in assigned, assigned
+        assert "sha-$short" in assigned, assigned
+
+
+def test_promote_images_retags_published_manifest_digests():
+    block = _job_block("promote-images")
+    assert "imagetools" in block
+    assert "release-manifest.json" in block
+    assert "deploy/Dockerfile" not in block
+    assert "docker buildx build" not in block
+    executable = [
+        line
+        for line in block.splitlines()
+        if "--draft=false" in line and not line.lstrip().startswith("#")
+    ]
+    assert executable == []
 
 
 def test_the_note_template_states_the_unsigned_client():

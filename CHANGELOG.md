@@ -5,135 +5,44 @@ does not distribute generated game data or generated SQLite databases.
 
 ## Unreleased
 
-### Documentation
+## 0.5.0 - 2026-09-13
 
-- Rebuild the repository front door as a short landing page. `README.md` is now
-  English and `README.zh-CN.md` Chinese (replacing `README.en.md`), with an
-  original logo, a hero banner, real screenshots of the public beta, a
-  how-it-works diagram and one path per audience. Operator, validation and
-  data-source detail that only the old READMEs carried moves to
-  `docs/deployment.md`, `docs/validation.md`, `docs/release-checklist.md` and
-  `docs/data-refresh.md`, and a new `docs/README.md` indexes every guide.
-  The operator notes are now English-only in `docs/deployment.md`, and the
-  package long description follows `README.md`, so it is now the English page.
+The public product and `main` catch up to a tagged release. WuwaTerm is an
+unofficial, independent fan project: look up official Chinese and English
+Wuthering Waves terms, translate a sentence with those names locked, or review
+a translation you already have.
 
-### Operations
+Try it: <https://wuwaterm.denia-official.chatgpt.site> (anonymous public beta,
+one shared first-come pool, no SLA). Windows client:
+`WuwaTerm-0.2.0-windows-x64.zip` on this release (unsigned). Self-host and
+docs: [docs/self-hosting.md](docs/self-hosting.md) and
+[docs/README.md](docs/README.md).
 
-- Add a transactional runtime-only deployment mode that keeps the existing
-  terminology database unchanged while updating bot and API to one verified
-  image. Shared locking, immutable database checks, durable recovery state and
-  old-image/pointer rollback protect interrupted updates. No data refresh or
-  candidate database is part of this mode.
+### Highlights
 
-### Sites
+- **Public beta.** No-account lookup, term-locked translation, and review on
+  the shared site above (#96, #98, #104, #105, #109).
+- **Review workbench.** Paste a source string and an existing translation;
+  dictionary-first findings, no model call (`POST /v1/reviews`; default
+  `review-v1`, opt-in `review-v2`) (#110).
+- **Resumable manuscripts.** Save or import a local bilingual draft and recheck
+  current dictionary evidence before reusing saved choices (#111).
+- **Bidirectional term locks.** English-to-Chinese placeholder instructions
+  keep locked tokens for official-term restoration (#108).
+- **API and deploy.** `/v1/terms` returns the backend-ranked exact-to-fuzzy
+  list (the unpublished 0.4.1 package line). Transactional runtime-only deploys
+  can update bot and API without rebuilding the terminology database (#97,
+  #107).
+- **Repository front door.** Bilingual landing READMEs and a docs index (#112).
 
-- Add local manuscript save/import, occurrence-specific choice recovery, explicit
-  segment correspondence, and decision-aware report comparison to the bilingual
-  workbench. Recheck current dictionary evidence before reusing saved choices;
-  imported reports never certify current work. Export current text and scoped
-  terminology results without claiming sentence correctness. Patch the existing
-  Site dependencies required by the security audit gate.
+### Also in this release
 
-- Add an anonymous review workbench on the public Site: paste a source string and an existing translation, inspect dictionary evidence, apply a local official-pair or not-a-term choice, recheck after edits, and export a local report. Default review does not call the model and does not consume translation or character pool counters. Hosted D1 must apply `0001_review_used` before this UPSERT is deployed, or every admission path that uses the new statement will fail together. The live public URL does not gain the surface until that Hosted deploy.
-
-- Open the shared beta at
-  <https://wuwaterm.denia-official.chatgpt.site> for anonymous, no-account
-  access to official-term lookup and bidirectional term-locked sentence
-  translation. Quotas are site-wide and first-come: one visitor can exhaust
-  them, admitted failures may still count, and the best-effort service has no
-  SLA. The WuwaTerm application does not process visitor IPs or promise
-  personal fairness; hosting, network and model providers may still process
-  technical data under their own operation.
-- Remove temporary private acceptance controls from the final shared-pool product.
-
-### HTTP API
-
-- Add opt-in `review-v2` with decimal-aware segment handling, explicit scalar
-  correspondences, full dictionary/candidate identities and resolution freshness
-  validation. Default `review-v1` requests retain their existing behavior and
-  response shape.
-
-- api: add `POST /v1/reviews` for dictionary-first review of a source text plus an existing translation. Existing `/v1/translations`, `/v1/terms` and `/v1/meta` exact-key contracts are unchanged. Review does not call the model. Findings are capped and omitted until the JSON body fits the Site's 64KiB upstream read limit. Constraint-green is not sentence-meaning certification.
-
-- api: make English-to-Chinese placeholder protocol instructions explicit so
-  the model keeps locked tokens for server-side official-term restoration.
-  Integrity checks, error responses and retry behavior are unchanged; default
-  bot/CLI and HTML translation prompts are not changed.
-
-- api: correlate internal LLM output-validation diagnostics with the existing
-  request ID, distinguishing empty output and missing or repeated term locks
-  without exposing text or changing the public error envelope or retry behavior.
-
-- api: `/v1/terms` now exposes the existing backend-ranked exact-to-fuzzy
-  dictionary lookup instead of stopping after exact candidates. The backend
-  still owns the five-result limit, ordering, category-aware exact handling,
-  fuzzy scoring, reasons, and deduplication; API consumers only render the
-  returned list. This private server-package patch is version `0.4.1`; it does
-  not publish a new GitHub release or desktop client.
-
-### Telegram Bot
-
-- bot: owner chat allowlisting is now `/grant` (the `/authorize` command is
-  gone). Success and list replies are structured plain text — heading, one id
-  per line, and a three-line usage block — instead of a bilingual run-on.
-  `/revoke`, persistence, and auto-leave are unchanged.
-
-### Desktop Client
-
-- client: the strings-source gate now forbids a string literal holding any CJK
-  character **anywhere** in `ui/*.py`, not only at a whitelisted text setter
-  (#65). The old rule could not see a Chinese literal that went through a local
-  variable, an f-string, or a setter nobody had listed, and that is exactly the
-  path it left open. The check is AST-based, so comments are outside it by
-  construction and docstrings are excluded deliberately; the one literal the
-  new rule found in the tree — the ideographic comma joining the supported API
-  versions in the status view — moved into `strings.py` as `LIST_SEPARATOR`.
-  The gate is proven red on a planted literal and green once it is removed, and
-  what it still cannot see (text from Qt, text from the service) is stated in
-  the test's own docstring. Review follow-ups on the same change: the ranges
-  reach above the basic multilingual plane, so an extension-B ideograph is a
-  Han character to the gate as well; and both rules enumerate the package
-  recursively, so a widget moved into a subpackage is still read, and the one
-  file the setter rule skips is the ui package's own `__init__.py`, identified
-  by position rather than by name, so a subpackage initializer is no longer
-  discarded. The block list of what counts as a CJK character came up short
-  three review rounds running — the supplementary Han extensions, then
-  extension I by a single code point, then the supplementary Kana blocks — each
-  time while the rule's own description already claimed the missing one, so it
-  is now checked against the character database the interpreter ships with by a
-  sweep of the whole code space. Every one of those properties is held open by
-  a test that fails without it.
-
-### Sites
-
-- site: document the Hosted workbench that shipped in #96 (metadata
-  feasibility) and #98 (terminology and sentence translation). `site/` is a
-  same-origin proxy, not `/wuwaterm-web`, and application code does not
-  authenticate the visitor. Operator contract, environment, and CI live in
-  [docs/sites.md](docs/sites.md).
-
-### Documentation
-
-- docs: make the anonymous public beta a first-class repository entry; align
-  both READMEs, architecture, Sites, privacy, support, security, contribution,
-  issue and future-release copy with the live shared-pool state. This changes
-  public documentation and repository metadata only, not translation logic,
-  the `/v1` contract, D1, Telegram, the client, terminology data or a release.
-- docs: name `site/` as a fifth surface in both READMEs, CONTRIBUTING, the
-  architecture map, the support matrix, and the validation job list; put it
-  in SECURITY.md scope; correct the supported-release table from 0.3.x to
-  0.4.x; and tell the in-process web guide that it is not the Sites
-  workbench. A read-only inventory of `main` at `291d82d` remains at
-  [docs/repo-audit.md](docs/repo-audit.md). No runtime behaviour changes.
-- docs: contributing gains a behaviour-over-wiring test rule (#66), and the
-  self-hosting guide gets the four accuracy fixes the v0.4.0 clean-room run
-  found (#90) — a standard-library fallback for the online credential-store
-  backup when the `sqlite3` shell is absent, a note that an API-only install has
-  no bot state directory to restore, an illustrative `/v1/terms` response that
-  shows the three matches the example term really returns, and an expected
-  duration for a first install. CONTRIBUTING also states, in three sentences
-  and no new file, why this project carries no code of conduct at v0.4.0 and
-  what would change that.
+- Owner chat allowlisting is `/grant`; `/authorize` is gone (#95).
+- The desktop client's CJK-literal gate covers the whole `ui/` package (#93,
+  #94).
+- GHCR `vX.Y.Z` and `X.Y` image tags are applied only after this GitHub
+  Release is published; a discarded draft leaves only `sha-<7>` registry tags
+  (#88).
 
 ## 0.4.0 - 2026-08-19
 
